@@ -17,6 +17,7 @@ langchain-community = ">=0.3.29,<0.4.0"
 simhash = ">=2.1.2,<3.0.0"
 pymupdf = ">=1.26.4,<2.0.0"
 pyautogen = ">=0.2.20,<0.3.0"
+autogen-ext = {extras = ["openai"], version = "^0.7.4"}
 
 [[tool.poetry.source]]
 name = "tsinghua"

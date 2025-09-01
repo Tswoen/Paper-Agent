@@ -61,10 +61,8 @@ class PaperSearch:
             )
             
             # 执行搜索并解析结果
-            papers = []
-            for result in search.results():
-                paper_info = self._parse_paper_result(result)
-                papers.append(paper_info)
+            # 使用新方法格式化论文列表
+            papers = self.format_papers_list(search.results())
             
             logger.info(f"论文搜索完成，共找到 {len(papers)} 篇论文")
             return papers
@@ -103,6 +101,19 @@ class PaperSearch:
             start_date=start_date
         )
     
+    def format_papers_list(self, search_results: List[arxiv.Result]) -> List[Dict]:
+        """
+        将搜索结果列表格式化为论文信息字典列表
+        
+        参数:
+            search_results: arxiv搜索结果对象列表
+        
+        返回:
+            格式化后的论文信息字典列表
+        """
+        logger.info(f"开始格式化论文列表，共 {len(search_results)} 篇论文")
+        return [self._parse_paper_result(result) for result in search_results]
+
     def search_by_author(self, 
                         author_name: str, 
                         limit: int = 10) -> List[Dict]:
