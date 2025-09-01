@@ -1,0 +1,73 @@
+# 虚拟环境
+env/
+venv/
+.venv/
+env.bak/
+venv.bak/
+
+# IDE配置文件
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# 操作系统文件
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Python编译文件
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 缓存文件
+.cache/
+*.pytest_cache/
+
+# 数据缓存
+data/cache/
+
+# 输出文件
+output/
+*.log
+
+# 环境变量文件
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# 打包文件
+build/
+dist/
+*.egg-info/
+
+# Poetry文件（根据团队偏好决定是否包含）
+# poetry.lock
+
+# 测试覆盖率
+.coverage
+coverage.xml
+htmlcov/
+
+# 其他临时文件
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
+# Windows可执行文件
+*.exe
+*.dll
+*.so
+*.dylib
