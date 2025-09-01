@@ -7,7 +7,7 @@ from src.utils.log_utils import setup_logger
 
 logger = setup_logger(__name__)
 
-class PaperSearch:
+class PaperSearcher:
     """论文搜索器，使用arxiv库搜索论文"""
     
     def __init__(self):
@@ -60,6 +60,7 @@ class PaperSearch:
                 sort_order=sort_order
             )
             
+            logger.info(f"论文搜索结果为：{search.results()}")
             # 执行搜索并解析结果
             # 使用新方法格式化论文列表
             papers = self.format_papers_list(search.results())
@@ -101,18 +102,24 @@ class PaperSearch:
             start_date=start_date
         )
     
-    def format_papers_list(self, search_results: List[arxiv.Result]) -> List[Dict]:
+    def format_papers_list(self, search_results) -> List[Dict]:
         """
-        将搜索结果列表格式化为论文信息字典列表
+        将搜索结果（迭代器或列表）格式化为论文信息字典列表
         
         参数:
-            search_results: arxiv搜索结果对象列表
+            search_results: arxiv搜索结果对象（可能是迭代器）
         
         返回:
             格式化后的论文信息字典列表
         """
-        logger.info(f"开始格式化论文列表，共 {len(search_results)} 篇论文")
-        return [self._parse_paper_result(result) for result in search_results]
+        # 将迭代器转换为列表以便后续处理
+        results_list = list(search_results)
+        
+        # 格式化论文列表
+        formatted_papers = [self._parse_paper_result(result) for result in results_list]
+        
+        logger.info(f"开始格式化论文列表，共 {len(results_list)} 篇论文")
+        return formatted_papers
 
     def search_by_author(self, 
                         author_name: str, 
@@ -195,7 +202,7 @@ class PaperSearch:
 # 示例用法
 if __name__ == "__main__":
     try:
-        searcher = PaperSearch()
+        searcher = PaperSearcher()
         
         # 搜索"large language models"主题的论文
         papers = searcher.search_by_topic("large language models", limit=5, recent_days=30)

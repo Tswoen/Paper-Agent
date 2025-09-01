@@ -3,7 +3,7 @@ from typing import List, Dict, Optional, Tuple
 from datetime import datetime
 
 from src.utils.log_utils import setup_logger
-from src.tasks.paper_search import PaperSearch
+from src.tasks.paper_search import PaperSearcher
 import arxiv
 
 logger = setup_logger(__name__)
@@ -13,7 +13,7 @@ class SearchAgent:
     
     def __init__(self):
         """初始化搜索代理"""
-        self.paper_search = PaperSearch()
+        self.paper_search = PaperSearcher()
     
     def process_search_request(self, 
                               query: str, 
@@ -124,7 +124,7 @@ class SearchAgent:
         
         参数:
             topics: 主题列表
-            authors: 作者列表
+            authors: 作者列表 
             start_date: 开始日期
             end_date: 结束日期
             max_results: 最大返回结果数量

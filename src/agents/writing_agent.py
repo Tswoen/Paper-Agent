@@ -5,7 +5,7 @@ from datetime import datetime
 import autogen
 from autogen.agentchat import AssistantAgent, UserProxyAgent
 from src.utils.log_utils import setup_logger
-from src.tasks.paper_search import PaperSearch
+from src.tasks.paper_search import PaperSearcher
 
 logger = setup_logger(__name__)
 
@@ -14,7 +14,7 @@ class PaperRetrievalAgent:
     
     def __init__(self):
         """初始化论文检索智能体"""
-        self.paper_search = PaperSearch()
+        self.paper_search = PaperSearcher()
         
         # 配置AutoGen代理
         config_list = [{

@@ -7,7 +7,7 @@ from typing import List, Dict, Optional
 import arxiv
 
 from src.utils.log_utils import setup_logger
-from src.tasks.paper_search import PaperSearch
+from src.tasks.paper_search import PaperSearcher
 from src.tasks.paper_filter import PaperFilter
 
 logger = setup_logger(__name__)
@@ -31,7 +31,7 @@ class PaperDownloader:
         self.cache_base_dir.mkdir(parents=True, exist_ok=True)
         
         # 初始化搜索器和筛选器
-        self.searcher = PaperSearch()
+        self.searcher = PaperSearcher()
         self.filterer = PaperFilter()
     
     def _get_user_cache_dir(self, user_id: str) -> Path:
