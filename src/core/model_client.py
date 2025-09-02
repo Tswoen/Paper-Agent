@@ -39,8 +39,8 @@ class ModelClient:
         """
         # 从配置中加载默认值
         config = Config()
-        provider_config = config.get_provider_config(provider)
-        
+        provider_config = config.get(provider)
+
         # 如果未提供参数，则使用配置中的默认值
         model = model or provider_config.get("model")
         api_key = api_key or provider_config.get("api_key")
@@ -62,7 +62,8 @@ class ModelClient:
         )
         
         logger.info(f"创建OpenAIChatCompletionClient - 提供商: {provider}, 模型: {model}")
-        
+        logger.info(f"模型api_key: {api_key}")
+        logger.info(f"模型base_url: {base_url}")
         # 创建并返回客户端实例
         return OpenAIChatCompletionClient(
             model=model,
@@ -76,7 +77,7 @@ class ModelClient:
 
 def create_default_client() -> OpenAIChatCompletionClient:
     """创建默认的OpenAIChatCompletionClient实例，使用siliconflow提供商和Qwen3-32B模型"""
-    return OpenAIClientWrapper.create_client(
+    return ModelClient.create_client(
         provider="siliconflow",
         model="Qwen/Qwen3-32B",
         base_url="https://api.siliconflow.cn/v1",
