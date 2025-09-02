@@ -71,3 +71,5 @@ htmlcov/
 *.dll
 *.so
 *.dylib
+
+poetry.lock

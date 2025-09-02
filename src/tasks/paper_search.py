@@ -16,7 +16,7 @@ class PaperSearcher:
     
     def search_papers(self, 
                       query: str, 
-                      max_results: int = 20, 
+                      max_results: int = 2, 
                       sort_by: arxiv.SortCriterion = arxiv.SortCriterion.Relevance, 
                       sort_order: arxiv.SortOrder = arxiv.SortOrder.Descending, 
                       start_date: Optional[Union[str, datetime]] = None, 
