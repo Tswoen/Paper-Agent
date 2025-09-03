@@ -1,11 +1,7 @@
-from autogen_agentchat.agents import AssistantAgent
+
 from pydantic import BaseModel
 from typing import List, Optional
-from src.utils.log_utils import setup_logger
-from src.core.prompts import reading_agent_prompt
-from src.core.model_client import create_default_client
 
-logger = setup_logger(__name__)
 
 class KeyMethodology(BaseModel):
     name: str  # 方法名称（如“Transformer-based Sentiment Classifier”）
@@ -28,12 +24,5 @@ class ExtractedPaperData(BaseModel):
 # 创建一个新的Pydantic模型来包装列表
 class ExtractedPapersDataList(BaseModel):
     papers: List[ExtractedPaperData]
-
-model_client = create_default_client()
-
-read_agent = AssistantAgent(
-    name="read_agent",
-    model_client=model_client,
-    system_message=reading_agent_prompt,
-    output_content_type=ExtractedPapersDataList
-)
+    
+print(ExtractedPapersDataList.model_json_schema())

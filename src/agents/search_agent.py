@@ -1,14 +1,15 @@
 from autogen_core.tools import FunctionTool
 from autogen_agentchat.agents import AssistantAgent
-from autogen_agentchat.ui import Console
 
 from src.utils.log_utils import setup_logger
 from src.tasks.paper_search import PaperSearcher
 
+from src.core.model_client import create_default_client
+
 logger = setup_logger(__name__)
 
 
-model_client = ModelClient.create_default_client()
+model_client = create_default_client()
 paper_searcher = PaperSearcher()
 search_papers = paper_searcher.search_papers
 
