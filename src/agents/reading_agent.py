@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from typing import List, Optional
 from src.utils.log_utils import setup_logger
 from src.core.prompts import reading_agent_prompt
+from src.core.model_client import create_default_client
 
 logger = setup_logger(__name__)
 
@@ -26,7 +27,7 @@ class ExtractedPaperData(BaseModel):
     author_institutions: Optional[str]  # 如“Stanford University, Department of CS”
     extract_source: dict  # 溯源：记录每个维度的提取章节，如{"core_problem": "Abstract, Introduction"}
 
-model_client = ModelClient.create_default_client()
+model_client = create_default_client()
 
 read_agent = AssistantAgent(
     name="read_agent",

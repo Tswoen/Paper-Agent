@@ -5,21 +5,21 @@ model-provider:
   - dashscope
 
 siliconflow:
-  api-key: SILICONFLOW_API_KEY
-  base-url: https://api.siliconflow.cn/v1
+  api_key: SILICONFLOW_API_KEY
+  base_url: https://api.siliconflow.cn/v1
   model: SILICONFLOW_MODEL
 
 openai:
-  api-key: OPENAI_API_KEY
-  base-url: https://api.openai.com/v1
+  api_key: OPENAI_API_KEY
+  base_url: https://api.openai.com/v1
   model: OPENAI_MODEL
 
 huggingface:
-  api-key: HUGGINGFACE_API_KEY
-  base-url: HUGGINGFACE_BASE_URL
+  api_key: HUGGINGFACE_API_KEY
+  base_url: HUGGINGFACE_BASE_URL
   model: HUGGINGFACE_MODEL
 
 dashscope:
-  api-key: DASHSCOPE_API_KEY
-  base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
+  api_key: DASHSCOPE_API_KEY
+  base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
   model: DASHSCOPE_MODEL

@@ -17,6 +17,7 @@ class Config(dict):
         """加载.env文件中的环境变量"""
         # 查找.env文件的路径
         env_path = Path(__file__).parent.parent.parent / ".env"
+
         if env_path.exists():
             load_dotenv(env_path)
         
@@ -37,11 +38,11 @@ class Config(dict):
     def _resolve_config_references(self):
         """解析配置中的环境变量引用，如SILICONFLOW_API_KEY"""
         for provider in self.get('model-provider', []):
-            if provider in self and 'api-key' in self[provider]:
-                api_key_ref = self[provider]['api-key']
-                # 如果api-key是一个环境变量引用且在环境变量中存在
+            if 'api_key' in self[provider]:
+                api_key_ref = self[provider]['api_key']
+                # 如果api_key是一个环境变量引用且在环境变量中存在
                 if api_key_ref in self:
-                    self[provider]['api-key'] = self[api_key_ref]
+                    self[provider]['api_key'] = self[api_key_ref]
             
     def get(self, key, default=None):
         """重写get方法，提供默认值"""
