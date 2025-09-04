@@ -23,7 +23,7 @@ class ExtractedPaperData(BaseModel):
     limitations: str
     contributions: List[str]
     author_institutions: Optional[str]  # 如“Stanford University, Department of CS”
-    extract_source: dict  # 溯源：记录每个维度的提取章节，如{"core_problem": "Abstract, Introduction"}
+    # extract_source: dict  # 溯源：记录每个维度的提取章节，如{"core_problem": "Abstract, Introduction"}
 
 # 创建一个新的Pydantic模型来包装列表
 class ExtractedPapersDataList(BaseModel):
@@ -35,5 +35,5 @@ read_agent = AssistantAgent(
     name="read_agent",
     model_client=model_client,
     system_message=reading_agent_prompt,
-    output_content_type=ExtractedPapersDataList
+    output_content_type=ExtractedPapersDataList,
 )

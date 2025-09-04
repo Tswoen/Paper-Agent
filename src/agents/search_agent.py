@@ -1,5 +1,6 @@
 from autogen_core.tools import FunctionTool
 from autogen_agentchat.agents import AssistantAgent
+from autogen_core import RoutedAgent
 
 from src.utils.log_utils import setup_logger
 from src.tasks.paper_search import PaperSearcher
