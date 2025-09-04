@@ -6,10 +6,13 @@
 
 import asyncio
 import json
+from autogen_agentchat.agents import AssistantAgent
+from src.core.model_client import create_default_client
+from src.core.prompts import clustering_agent_prompt
 import numpy as np
 from typing import List, Dict, Any, Tuple
 from sklearn.cluster import KMeans
-from sklearn.feature_extraction.text import TfidfVectorizer
+# from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from openai import OpenAI
 from dataclasses import dataclass
@@ -110,17 +113,20 @@ class PaperClusteringAgent:
     
     def __init__(self, model_client=None):
         """初始化聚类智能体"""
-        self.model_client = model_client
-        
-    
-
-        self.vectorizer = TfidfVectorizer(
-            max_features=100,
-            stop_words='english',
-            ngram_range=(1, 2),
-            min_df=1
+        self.model_client = create_default_client()
+        self.clustering_agent = AssistantAgent(
+            name="clustering_agent",
+            model_client= self.model_client,
+            system_message = clustering_agent_prompt
         )
-    
+
+        # self.vectorizer = TfidfVectorizer(
+        #     max_features=100,
+        #     stop_words='english',
+        #     ngram_range=(1, 2),
+        #     min_df=1
+        # )
+
     def get_embedding(text: Union[str, List[str]]) -> list[float]:
         client = OpenAI(
                 api_key="sk-mvjhwoypajnggqoasejoqumfaabvifdrvztgvmxdpdyukggy",
@@ -131,7 +137,10 @@ class PaperClusteringAgent:
             model="Qwen/Qwen3-Embedding-8B",
             dimensions=1024
         )
-        return response.data[0].embedding
+        res = []
+        for tmp in response.data:
+            res.append(tmp.embedding)
+        return res
 
     def prepare_text_for_embedding(self, paper: Dict[str, Any]) -> str:
         """准备用于生成嵌入向量的文本"""
@@ -167,7 +176,7 @@ class PaperClusteringAgent:
         
         embeddings = self.get_embedding(texts)
         
-        return embeddings.toarray()
+        return np.array(embeddings)
     
     def determine_optimal_clusters(self, embeddings: np.ndarray, max_k: int = 5) -> int:
         """使用肘部法则确定最佳聚类数量"""
@@ -268,14 +277,8 @@ class PaperClusteringAgent:
             主题描述：[主题描述]
             关键词：[关键词1, 关键词2, 关键词3]
             """
-            
-            # 模拟LLM响应（实际使用时应调用真实的LLM API）
-            if "DriveQA" in str(paper_summaries):
-                return "自动驾驶大模型评测与优化"
-            elif "QR-LoRA" in str(paper_summaries):
-                return "高效参数微调方法研究"
-            else:
-                return "机器学习模型优化研究"
+            response = self.clustering_agent.run(prompt)
+            return response.messages[0].content
                 
         except Exception as e:
             logger.error(f"生成聚类主题时出错: {e}")

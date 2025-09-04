@@ -19,6 +19,7 @@ pymupdf = ">=1.26.4,<2.0.0"
 pyautogen = ">=0.2.20,<0.3.0"
 autogen-ext = {extras = ["openai"], version = "^0.7.4"}
 autogen-agentchat = "^0.7.4"
+scikit-learn = "^1.7.1"
 
 
 [[tool.poetry.source]]
