@@ -60,7 +60,7 @@ reading_agent_prompt = """
 
 【任务步骤】  
 1. 阅读全文，先定位“问题-方法-实验-结论”四大区域。  
-2. 逐字段抽取：  
+2. 逐字段抽取，例子如下：  
    - core_problem：用“尽管…但…”或“为了…”句式概括。  
    - key_methodology.name：优先取原文给出的模型/算法/框架名。  
    - key_methodology.principle：用1-2句话描述技术路线（可用公式或缩写，但需保留）。  
@@ -79,5 +79,4 @@ reading_agent_prompt = """
 
 【说明】：当您输出完毕，且没有其他问题时，请回复“APPROVE”
 
-请遵循下面的JSON格式输出
 """
