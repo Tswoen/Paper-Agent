@@ -10,7 +10,7 @@ from autogen_agentchat.agents import AssistantAgent
 from src.core.model_client import create_default_client
 from src.core.prompts import clustering_agent_prompt
 import numpy as np
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Union
 from sklearn.cluster import KMeans
 # from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
@@ -127,7 +127,7 @@ class PaperClusteringAgent:
         #     min_df=1
         # )
 
-    def get_embedding(text: Union[str, List[str]]) -> list[float]:
+    def get_embedding(self, text: Union[str, List[str]]) -> list[float]:
         client = OpenAI(
                 api_key="sk-mvjhwoypajnggqoasejoqumfaabvifdrvztgvmxdpdyukggy",
                 base_url="https://api.siliconflow.cn/v1"
@@ -264,9 +264,9 @@ class PaperClusteringAgent:
                 paper_summaries.append(summary)
             
             prompt = f"""
-            基于以下论文摘要，为这个聚类生成一个简洁的主题描述和3-5个关键词：
+            基于以下论文信息，为这个聚类生成一个简洁的主题描述(必须生成一个主题，不能生成空主题)和3-5个关键词：
             
-            论文摘要：
+            论文信息：
             {json.dumps(paper_summaries, ensure_ascii=False, indent=2)}
             
             请提供：
@@ -277,7 +277,10 @@ class PaperClusteringAgent:
             主题描述：[主题描述]
             关键词：[关键词1, 关键词2, 关键词3]
             """
-            response = self.clustering_agent.run(prompt)
+            response = await self.clustering_agent.run(task=prompt)
+            print("LLM输出：")
+            print(response)
+            print("------------------------------------------")
             return response.messages[0].content
                 
         except Exception as e:
@@ -354,40 +357,7 @@ class PaperClusteringAgent:
 async def main():
     """主测试函数"""
     # 测试数据
-    test_papers = {
-        "papers": [
-            {
-                "paper_id": "2508.21824v1",
-                "title": "DriveQA: A Comprehensive Benchmark for Evaluating Large Language Models in Autonomous Driving",
-                "core_problem": "DriveQA aims to determine if an LLM can pass a driving knowledge test by thoroughly testing its understanding of traffic rules and edge cases",
-                "key_methodology": {
-                    "name": "Benchmark Design",
-                    "principle": "Combine text and vision-based evaluations to test traffic understanding in LLMs and MLLMs",
-                    "novelty": "we present DriveQA, an extensive open-source text and vision-based benchmark"
-                },
-                "main_results": "state-of-the-art LLMs perform well on basic traffic rules but exhibit weaknesses in numerical reasoning",
-                "contributions": [
-                    "we present DriveQA, an extensive open-source benchmark",
-                    "we show LLMs perform well on basic traffic rules"
-                ]
-            },
-            {
-                "paper_id": "2508.21810v1",
-                "title": "QR-LoRA: Efficient Parameter-Efficient Fine-Tuning via QR Decomposition",
-                "core_problem": "QR-LoRA addresses the inefficiency of parameter initialization in LoRA methods",
-                "key_methodology": {
-                    "name": "QR-LoRA",
-                    "principle": "QR-LoRA expresses the LoRA update as a linear combination of basis vectors",
-                    "novelty": "we extract an orthonormal basis using QR decomposition"
-                },
-                "main_results": "QR-LoRA achieves performance comparable to full fine-tuning with 1000x parameter reduction",
-                "contributions": [
-                    "proposing QR-LoRA with QR decomposition",
-                    "showing 1000x parameter reduction"
-                ]
-            }
-        ]
-    }
+    test_papers = papers
     
     # 创建聚类智能体
     agent = PaperClusteringAgent()
