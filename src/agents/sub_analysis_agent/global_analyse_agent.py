@@ -1,7 +1,5 @@
-
-#!/usr/bin/env python3
 """
-测试分析智能体 - 单主题深入分析功能演示
+测试分析智能体 - 全局分析功能
 """
 
 import asyncio
@@ -75,69 +73,3 @@ class GlobalAnalysisAgent:
                 "global_analysis": f"全局分析失败: {str(e)}",
                 "cluster_summaries": []
             }
-
-# 模拟聚类分析结果数据
-mock_cluster_results = [
-    ClusterAnalysisResult(
-        cluster_id=1,
-        theme="大模型在自动驾驶知识评估与参数优化",
-        keywords=['自动驾驶', '知识评估', '参数优化', '基准测试'],
-        paper_count=15,
-        deep_analysis="该主题主要研究大模型在自动驾驶领域的知识评估能力，包括交通规则理解、场景推理等。研究发现当前大模型在数值推理和复杂场景处理方面存在明显局限性。",
-        papers=[]
-    ),
-    ClusterAnalysisResult(
-        cluster_id=2,
-        theme="高效参数微调技术研究",
-        keywords=['LoRA', '参数效率', '微调', 'QR分解'],
-        paper_count=12,
-        deep_analysis="该主题聚焦于大模型的高效微调技术，特别是LoRA及其变种方法。QR-LoRA等方法显著减少了可训练参数数量，同时保持了模型性能。",
-        papers=[]
-    ),
-    ClusterAnalysisResult(
-        cluster_id=3,
-        theme="多模态大模型应用",
-        keywords=['多模态', '视觉语言', '图像理解', '跨模态'],
-        paper_count=8,
-        deep_analysis="该主题探索多模态大模型在视觉语言任务中的应用，包括图像描述、视觉问答等。模型在复杂多模态推理方面仍有提升空间。",
-        papers=[]
-    )
-]
-
-async def main():
-    """主测试函数 - 测试全局分析功能"""
-    print("=== 开始测试全局分析功能 ===")
-    
-    # 创建全局分析智能体
-    global_agent = GlobalAnalysisAgent()
-    
-    print(f"共有 {len(mock_cluster_results)} 个聚类结果需要分析")
-    for result in mock_cluster_results:
-        print(f"聚类 {result.cluster_id}: {result.theme} ({result.paper_count}篇论文)")
-    
-    print("\n开始生成全局分析草稿...")
-    
-    try:
-        # 执行全局分析
-        global_result = await global_agent.generate_global_analysis(mock_cluster_results)
-        
-        print("\n=== 全局分析结果 ===")
-        print(f"总聚类数: {global_result['total_clusters']}")
-        print(f"总论文数: {global_result['total_papers']}")
-        print(f"聚类主题: {', '.join(global_result['cluster_themes'])}")
-        print(f"\n全局分析草稿:\n{global_result['global_analysis']}")
-        
-        # 保存分析结果到文件
-        output_file = "global_analysis_report.json"
-        with open(output_file, 'w', encoding='utf-8') as f:
-            json.dump(global_result, f, ensure_ascii=False, indent=2)
-        print(f"\n分析结果已保存到: {output_file}")
-        
-    except Exception as e:
-        print(f"全局分析过程中出现错误: {e}")
-        import traceback
-        traceback.print_exc()
-
-if __name__ == "__main__":
-    asyncio.run(main())
-   

@@ -35,3 +35,13 @@ clustering_agent_prompt = """
                 - key_methodology: a dictionary with the following keys:
                 - datasets_used: a list of datasets used in the paper`
 """
+
+deep_analysis_agent_prompt = """
+                You are a helpful assistant that analyzes papers in a cluster.
+                You will receive a list of papers, each represented as a dictionary and some information about the cluster.
+"""
+
+global_analysis_agent_prompt = """
+                You are a helpful assistant that analyzes clusters of papers.
+                You will receive a list of clusters, each represented as a dictionary.
+"""
