@@ -6,35 +6,41 @@ import asyncio
 import sys
 import os
 import json
-from typing import Dict, Any
-from src.core.prompts import global_analysis_agent_prompt
+from typing import Dict, Any, List
+from src.core.prompts import global_analyse_agent_prompt
 from src.core.model_client import create_default_client
 from autogen_agentchat.agents import AssistantAgent
-from src.agents.sub_analysis_agent.deep_analyse_agent import ClusterAnalysisResult
+from src.agents.sub_analyse_agent.deep_analyse_agent import DeepAnalyseResult
+from src.utils.log_utils import setup_logger
 
+logger = setup_logger(__name__)
 
-class GlobalAnalysisAgent:
+class GlobalanalyseAgent:
+    async def run(self, cluster_results: List[DeepAnalyseResult]):
+        """统一接口方法"""
+        return await self.generate_global_analyse(cluster_results)
+        
     def __init__(self, model_client=None):
         """初始化聚类智能体"""
         self.model_client = create_default_client()
-        self.deep_analysis_agent = AssistantAgent(
-            name="global_analysis_agent",
+        self.global_analyse_agent = AssistantAgent(
+            name="global_analyse_agent",
             model_client= self.model_client,
-            system_message = global_analysis_agent_prompt
+            system_message = global_analyse_agent_prompt
         )
     
-    async def generate_global_analysis(self, cluster_results: List[ClusterAnalysisResult]) -> Dict[str, Any]:
+    async def generate_global_analyse(self, analyse_results: List[DeepAnalyseResult]) -> Dict[str, Any]:
         """生成全局分析草稿 - 汇总各主题分析结果"""
         try:
             # 准备所有聚类的分析内容
             cluster_summaries = []
-            for result in cluster_results:
+            for result in analyse_results:
                 cluster_summaries.append({
                     "cluster_id": result.cluster_id,
                     "theme": result.theme,
                     "keywords": result.keywords,
                     "paper_count": result.paper_count,
-                    "analysis_summary": result.deep_analysis[:5000] + "..." if len(result.deep_analysis) > 5000 else result.deep_analysis
+                    "analyse_summary": result.deep_analyse[:1000] + "..." if len(result.deep_analyse) > 10000 else result.deep_analyse
                 })
             
             prompt = f"""
@@ -53,23 +59,23 @@ class GlobalAnalysisAgent:
 请生成结构清晰、内容完整的全局分析草稿。
 """
             
-            response = await self.deep_analysis_agent.run(task=prompt)
-            global_analysis = response.messages[-1].content
+            response = await self.global_analyse_agent.run(task=prompt)
+            global_analyse = response.messages[-1].content
             
             return {
-                "total_clusters": len(cluster_results),
-                "total_papers": sum(result.paper_count for result in cluster_results),
-                "cluster_themes": [result.theme for result in cluster_results],
-                "global_analysis": global_analysis,
+                "total_clusters": len(analyse_results),
+                "total_papers": sum(result.paper_count for result in analyse_results),
+                "cluster_themes": [result.theme for result in analyse_results],
+                "global_analyse": global_analyse,
                 "cluster_summaries": cluster_summaries
             }
             
         except Exception as e:
-            print(f"生成全局分析时出错: {e}")
+            logger.error(f"生成全局分析时出错: \n{e}")
             return {
                 "total_clusters": len(cluster_results),
                 "total_papers": sum(result.paper_count for result in cluster_results),
                 "cluster_themes": [result.theme for result in cluster_results],
-                "global_analysis": f"全局分析失败: {str(e)}",
+                "global_analyse": f"全局分析失败: {str(e)}",
                 "cluster_summaries": []
             }

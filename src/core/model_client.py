@@ -61,9 +61,6 @@ class ModelClient:
             structured_output=structured_output
         )
         
-        logger.info(f"创建OpenAIChatCompletionClient - 提供商: {provider}, 模型: {model}")
-        logger.info(f"模型api_key: {api_key}")
-        logger.info(f"模型base_url: {base_url}")
         # 创建并返回客户端实例
         return OpenAIChatCompletionClient(
             model=model,
