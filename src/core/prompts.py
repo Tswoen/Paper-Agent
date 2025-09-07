@@ -20,6 +20,7 @@ reading_agent_prompt = """
 
 【格式要求】  
 - 仅返回合法 JSON，不添加解释。  
+- 也不要在前面添加```json```，直接返回JSON数据。  
 - 所有字符串值须用英文双引号。  
 - 若信息缺失，用 null（不要空字符串）。  
 
@@ -36,12 +37,12 @@ clustering_agent_prompt = """
                 - datasets_used: a list of datasets used in the paper`
 """
 
-deep_analysis_agent_prompt = """
+deep_analyse_agent_prompt = """
                 You are a helpful assistant that analyzes papers in a cluster.
                 You will receive a list of papers, each represented as a dictionary and some information about the cluster.
 """
 
-global_analysis_agent_prompt = """
+global_analyse_agent_prompt = """
                 You are a helpful assistant that analyzes clusters of papers.
                 You will receive a list of clusters, each represented as a dictionary.
 """

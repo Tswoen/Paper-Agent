@@ -10,10 +10,13 @@ import os
 import json
 from typing import Dict, Any, List
 from dataclasses import dataclass
-from src.core.prompts import deep_analysis_agent_prompt
+from src.core.prompts import deep_analyse_agent_prompt
 from src.core.model_client import create_default_client
 from autogen_agentchat.agents import AssistantAgent
-from src.agents.sub_analysis_agent.cluster_agent import PaperCluster
+from src.agents.sub_analyse_agent.cluster_agent import PaperCluster
+from src.utils.log_utils import setup_logger
+
+logger = setup_logger(__name__)
 
 
 
@@ -99,13 +102,13 @@ paperslist = [
     ]
 
 @dataclass
-class ClusterAnalysisResult:
+class DeepAnalyseResult:
     """聚类分析结果封装类"""
     cluster_id: int
     theme: str
     keywords: List[str]
     paper_count: int
-    deep_analysis: str
+    deep_analyse: str
     papers: List[Dict[str, Any]]
     
     def to_dict(self) -> Dict[str, Any]:
@@ -115,20 +118,24 @@ class ClusterAnalysisResult:
             "theme": self.theme,
             "keywords": self.keywords,
             "paper_count": self.paper_count,
-            "deep_analysis": self.deep_analysis,
+            "deep_analyse": self.deep_analyse,
             "papers": self.papers
         }
 
-class DeepAnalysisAgent:
+class DeepAnalyseAgent:
+    async def run(self, cluster_data):
+        """统一接口方法"""
+        return await self.deep_analyze_cluster(cluster_data)
+        
     def __init__(self, model_client=None):
         """初始化聚类智能体"""
         self.model_client = create_default_client()
-        self.deep_analysis_agent = AssistantAgent(
-            name="deep_analysis_agent",
+        self.deep_analyse_agent = AssistantAgent(
+            name="deep_analyse_agent",
             model_client= self.model_client,
-            system_message = deep_analysis_agent_prompt
+            system_message = deep_analyse_agent_prompt
         )
-    async def deep_analyze_cluster(self, cluster: PaperCluster) -> Dict[str, Any]:
+    async def deep_analyze_cluster(self, cluster: PaperCluster) -> DeepAnalyseResult:
         """对单个聚类进行深入分析"""
         try:
             
@@ -151,48 +158,36 @@ class DeepAnalysisAgent:
                 请以结构化的方式组织你的分析结果。
 """
             
-            response = await self.deep_analysis_agent.run(task=prompt)
-            analysis_content = response.messages[-1].content
+            response = await self.deep_analyse_agent.run(task=prompt)
+            analyse_content = response.messages[-1].content
             
-            return ClusterAnalysisResult(
+            return DeepAnalyseResult(
                 cluster_id=cluster.cluster_id,
                 theme=cluster.theme_description,
                 keywords=cluster.keywords,
                 paper_count=len(cluster.papers),
-                deep_analysis=analysis_content,
+                deep_analyse=analyse_content,
                 papers=cluster.papers
             )
                 
         except Exception as e:
-            print(f"深入分析聚类时出错: {e}")
-            return ClusterAnalysisResult(
+            logger.error(f"深入分析聚类时出错: \n{e}")
+            return DeepAnalyseResult(
                 cluster_id=cluster.cluster_id,
                 theme=cluster.theme_description,
                 keywords=cluster.keywords,
                 paper_count=len(cluster.papers),
-                deep_analysis=f"分析失败: {str(e)}",
+                deep_analyse=f"分析失败: {str(e)}",
                 papers=cluster.papers
             )
     
-    async def deep_analyze_clusters(self, clusters: List[PaperCluster]) -> List[ClusterAnalysisResult]:
-        """并行处理多个聚类进行深入分析"""
-        try:
-            # 使用asyncio.gather并行执行所有聚类分析
-            analysis_tasks = [self.deep_analyze_cluster(cluster) for cluster in clusters]
-            analysis_results = await asyncio.gather(*analysis_tasks)
-            
-            return analysis_results
-            
-        except Exception as e:
-            print(f"并行分析聚类时出错: {e}")
-            return []
 
 async def main():
     """主测试函数 - 测试并行深入分析功能"""
-    print("=== 开始测试并行深入分析功能 ===")
+    logger.info("=== 开始测试并行深入分析功能 ===")
     
     # 创建分析智能体
-    analysis_agent = DeepAnalysisAgent()
+    analyse_agent = DeepanalyseAgent()
     
     # 创建多个模拟的聚类对象
     clusters = [
@@ -224,19 +219,19 @@ async def main():
     
     try:
         # 执行并行深入分析
-        analysis_results = await analysis_agent.deep_analyze_clusters(clusters)
+        analyse_results = await analyse_agent.deep_analyze_clusters(clusters)
         
         print("\n=== 并行深入分析结果 ===")
-        for result in analysis_results:
+        for result in analyse_results:
             print(f"\n--- 聚类 {result.cluster_id} 分析结果 ---")
             print(f"主题: {result.theme}")
             print(f"关键词: {', '.join(result.keywords)}")
             print(f"论文数量: {result.paper_count}")
-            print(f"分析摘要: {result.deep_analysis[:200]}...")
+            print(f"分析摘要: {result.deep_analyse[:200]}...")
         
         print(f"\n=== 分析完成 ===")
-        print(f"成功分析 {len([r for r in analysis_results if not r.deep_analysis.startswith('分析失败')])} 个聚类")
-        print(f"失败 {len([r for r in analysis_results if r.deep_analysis.startswith('分析失败')])} 个聚类")
+        print(f"成功分析 {len([r for r in analyse_results if not r.deep_analyse.startswith('分析失败')])} 个聚类")
+        print(f"失败 {len([r for r in analyse_results if r.deep_analyse.startswith('分析失败')])} 个聚类")
         
     except Exception as e:
         print(f"分析过程中出现错误: {e}")

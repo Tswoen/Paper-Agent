@@ -9,6 +9,7 @@ import json
 from autogen_agentchat.agents import AssistantAgent
 from src.core.model_client import create_default_client
 from src.core.prompts import clustering_agent_prompt
+from src.agents.reading_agent import ExtractedPaperData, ExtractedPapersData
 import numpy as np
 from typing import List, Dict, Any, Tuple, Union
 from sklearn.cluster import KMeans
@@ -16,11 +17,10 @@ from sklearn.cluster import KMeans
 from sklearn.metrics.pairwise import cosine_similarity
 from openai import OpenAI
 from dataclasses import dataclass
-import logging
+from src.utils.log_utils import setup_logger
 
 # 配置日志
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = setup_logger(__name__)
 
 papers = {
     "papers": [
@@ -108,7 +108,7 @@ class PaperCluster:
     keywords: List[str]
     centroid_vector: np.ndarray = None
 
-class PaperClusteringAgent:
+class PaperClusterAgent:
     """论文聚类智能体"""
     
     def __init__(self, model_client=None):
@@ -142,7 +142,7 @@ class PaperClusteringAgent:
             res.append(tmp.embedding)
         return res
 
-    def prepare_text_for_embedding(self, paper: Dict[str, Any]) -> str:
+    def prepare_text_for_embedding(self, paper: List[Dict[str, Any]]) -> str:
         """准备用于生成嵌入向量的文本"""
         text_parts = []
         
@@ -177,7 +177,7 @@ class PaperClusteringAgent:
         embeddings = self.get_embedding(texts)
         
         return np.array(embeddings)
-    
+        
     def determine_optimal_clusters(self, embeddings: np.ndarray, max_k: int = 5) -> int:
         """使用肘部法则确定最佳聚类数量"""
         if len(embeddings) <= 2:
@@ -325,7 +325,7 @@ class PaperClusteringAgent:
             return theme_description, keywords
             
         except Exception as e:
-            logger.error(f"解析LLM响应时出错: {e}")
+            logger.error(f"解析LLM响应时出错:\n {e}")
             return "未分类研究主题", ["research"]
     
     async def generate_cluster_theme(self, cluster: PaperCluster) -> str:
@@ -356,22 +356,17 @@ class PaperClusteringAgent:
                 关键词：[关键词1, 关键词2, 关键词3]
             """
             response = await self.clustering_agent.run(task=prompt)
-            print("LLM输出：")
-            print(response.messages[-1].content)
-            print("------------------------------------------")
             
             # 解析LLM响应
             theme_description, keywords = self.parse_llm_response(response.messages[-1].content)
-            print(f"主题描述：{theme_description}\n关键词：{keywords}")
-            print("------------------------------------------")
             return theme_description, keywords
                 
         except Exception as e:
-            logger.error(f"生成聚类主题时出错: {e}")
+            logger.error(f"生成聚类主题时出错: \n{e}")
             return "未分类研究主题"
     
 
-    async def run_clustering_analysis(self, papers_data: Dict[str, Any]) -> Dict[str, Any]:
+    async def run_clustering_analyse(self, papers_data: Dict[str, Any]) -> List[PaperCluster]:
         """运行完整的聚类分析"""
         papers = papers_data.get("papers", [])
         
@@ -386,28 +381,31 @@ class PaperClusteringAgent:
         # 为每个聚类生成主题和关键词
         results = []
         for cluster in clusters:
-            cluster.theme_description, cluster.keywords = await self.generate_cluster_theme(cluster)
+            theme_description, keywords = await self.generate_cluster_theme(cluster)
+            paperCluster = PaperCluster(
+                cluster_id=cluster.cluster_id,
+                papers=cluster.papers,
+                theme_description=theme_description,
+                keywords=keywords)  
             cluster_result = {
-                "cluster_id": cluster.cluster_id,
-                "theme": cluster.theme_description,
-                "keywords": cluster.keywords,
-                "paper_count": len(cluster.papers),
-                "papers": [
-                    {
-                        "paper_id": paper.get("paper_id"),
-                        "title": paper.get("title", "未知标题"),
-                        "core_problem": paper.get("core_problem", "")[:100] + "..."
-                    }
-                    for paper in cluster.papers
-                ]
+
+                # "paper_count": len(cluster.papers),
+                # "papers": [
+                #     {
+                #         "paper_id": paper.get("paper_id"),
+                #         "title": paper.get("title", "未知标题"),
+                #         "core_problem": paper.get("core_problem", "")[:100] + "..."
+                #     }
+                #     for paper in cluster.papers
+                # ]
             }
-            results.append(cluster_result)
+            results.append(paperCluster)
         
-        return {
-            "total_papers": len(papers),
-            "total_clusters": len(clusters),
-            "clusters": results
-        }
+        return results
+    def run(self, papers_data: ExtractedPapersData):
+        """统一接口方法"""
+        papers = papers_data.model_dump()
+        return self.run_clustering_analyse(papers)
 
 async def main():
     """主测试函数"""
@@ -418,7 +416,7 @@ async def main():
     agent = PaperClusteringAgent()
     
     # 运行聚类分析
-    results = await agent.run_clustering_analysis(test_papers)
+    results = await agent.run_cluster_analyse(test_papers)
     
     # 输出结果
     print("=" * 60)
