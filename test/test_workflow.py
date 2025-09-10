@@ -1,3 +1,4 @@
+from pkgutil import extend_path
 from typing import List, Sequence
 
 from autogen_agentchat.agents import AssistantAgent, MessageFilterAgent, MessageFilterConfig, PerSourceFilter
@@ -46,7 +47,7 @@ filtered_retrieval_agent = MessageFilterAgent(
 
 end_agent = AssistantAgent(
     name="end_agent",
-    system_message="你是一个终结代理，轮到你发言时，不管什么情况，你只需输出TERMINATE",
+    system_message="你是一个终结代理，轮到你发言时，不管什么情况，都不需要思考推理，你只需输出TERMINATE",
     model_client=create_default_client(),
 )
 
@@ -57,21 +58,39 @@ builder = DiGraphBuilder()
 # builder.add_edge(filtered_writing_director_agent, filtered_writing_agent)
 # builder.add_edge(filtered_writing_agent, filtered_retrieval_agent)
 
+def isRight(msg: BaseChatMessage):
+    print("--" * 40)
+    print(msg.to_model_text())
+    print("TERMINATE" in msg.to_model_text())
+    print("--" * 40)
+    return False
+
+def isNotRight(msg: BaseChatMessage):
+    print("--" * 40)
+    print(msg.to_model_text())
+    print("TERMINATE" not in msg.to_model_text())
+    print("--" * 40)
+    return True
 
 
 builder.add_node(filtered_writing_director_agent).add_node(filtered_writing_agent).add_node(filtered_retrieval_agent).add_node(end_agent)
-# builder.add_edge(filtered_writing_director_agent, filtered_writing_agent,condition=lambda msg: "TERMINATE" not in msg.to_model_text())
-builder.add_edge(filtered_writing_director_agent, filtered_writing_agent,condition=lambda msg: "TERMINATE" in "TERMINATE")
+builder.add_edge(filtered_writing_director_agent, filtered_writing_agent,condition=lambda msg: "TERMINATE" not in msg.to_model_text())
 builder.add_edge(filtered_writing_director_agent, end_agent,condition=lambda msg: "TERMINATE" in msg.to_model_text())
-builder.add_edge(filtered_writing_agent, filtered_writing_director_agent, condition=lambda msg: "APPROVE" in msg.to_model_text())
+builder.add_edge(filtered_writing_agent, filtered_writing_director_agent,condition=lambda msg: "APPROVE" in msg.to_model_text())
 builder.add_edge(filtered_writing_agent, filtered_retrieval_agent, condition=lambda msg: "APPROVE" not in msg.to_model_text())
 builder.add_edge(filtered_retrieval_agent, filtered_writing_agent)
 builder.set_entry_point(filtered_writing_director_agent)  
 
+# builder.add_node(writing_director_agent).add_node(writing_agent).add_node(retrieval_agent).add_node(end_agent)
+# builder.add_edge(writing_director_agent, writing_agent)
+# builder.add_edge(writing_agent, end_agent,condition=lambda msg: 1!=1)
+# builder.add_edge(writing_agent, retrieval_agent, condition=lambda msg: 1==1)
+# # builder.add_edge(retrieval_agent, end_agent)
+# builder.set_entry_point(writing_director_agent)  
+
 graph = builder.build()
 
 termination_condition = TextMentionTermination("TERMINATE")
-# termination_condition = MaxMessageTermination(5)
 
 # Create the flow
 flow = GraphFlow(
