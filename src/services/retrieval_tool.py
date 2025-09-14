@@ -1,12 +1,22 @@
-serapi_key =  "4a0d7556aaa9bdf806083661d38e205c838fdae709e38a714b84e22315d3f1fa"
+from typing import List, Dict, Any
+from src.services.chroma_client import ChromaClient
 
-from langchain_community.utilities import SerpAPIWrapper
-
-# 初始化SerpAPI的包装器
-search = SerpAPIWrapper(serpapi_api_key=serapi_key)
-
-def retrieval_tool(query: str) -> str:
+def retrieval_tool(query: str, n_results: int = 5) -> List[Dict[str, Any]]:
     """
-    使用SerpAPI进行网络检索并返回结果。
+    检索工具，从向量数据库中查询相关文档
+    
+    :param query: 查询文本
+    :param n_results: 返回结果数量
+    :return: 包含文档metadata的列表
     """
-    return search.run(query)
+    # 初始化Chroma客户端
+    client = ChromaClient()
+    
+    # 执行查询
+    query_results = client.query(query_texts=[query], n_results=n_results)
+    
+    # 提取metadata列表
+    if query_results and 'metadatas' in query_results:
+        return query_results['metadatas']
+    
+    return []

@@ -1,11 +1,12 @@
-# 虚拟环境
+# 开发环境
+## 虚拟环境
 env/
 venv/
 .venv/
 env.bak/
 venv.bak/
 
-# IDE配置文件
+## IDE配置文件
 .vscode/
 .idea/
 *.suo
@@ -23,53 +24,76 @@ venv.bak/
 ehthumbs.db
 Thumbs.db
 
-# Python编译文件
+# Python开发
+## 编译文件
 __pycache__/
 *.py[cod]
 *$py.class
+*.pyc
+*.pyo
+*.pyd
 
-# 缓存文件
+## 包管理
+poetry.lock
+*.egg-info/
+
+## 测试
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# 前端开发
+## 依赖
+node_modules/
+.npm
+.pnpm
+.yarn-integrity
+
+## 构建产物
+/dist
+/.vite
+*.local
+
+# 数据文件
+## 缓存
 .cache/
-*.pytest_cache/
-
-# 数据缓存
 data/cache/
 
-# 输出文件
-output/
-*.log
+## 数据库
+*.sqlite
+*.sqlite3
 
-# 环境变量文件
+## 日志
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# 构建与打包
+build/
+dist/
+
+# 环境变量
 .env
 .env.local
 .env.development.local
 .env.test.local
 .env.production.local
 
-# 打包文件
-build/
-dist/
-*.egg-info/
-
-# Poetry文件（根据团队偏好决定是否包含）
-# poetry.lock
-
-# 测试覆盖率
-.coverage
-coverage.xml
-htmlcov/
-
-# 其他临时文件
+# 临时文件
 *.tmp
 *.temp
-*.swp
-*.swo
+.~*
 *~
 
-# Windows可执行文件
+# 编辑器/系统
+*.swp
+*.swo
+
+# 可执行文件
 *.exe
 *.dll
 *.so
 *.dylib
-
-poetry.lock

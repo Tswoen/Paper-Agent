@@ -12,7 +12,12 @@ from src.agents.sub_analyse_agent.cluster_agent import PaperClusterAgent
 from src.agents.sub_analyse_agent.deep_analyse_agent import DeepAnalyseAgent
 from src.agents.sub_analyse_agent.global_analyse_agent import GlobalanalyseAgent
 from src.core.model_client import create_default_client
+from src.core.state_models import BackToFrontData
+from main import update_state
 import json
+
+from src.core.state_models import State,ExecutionState
+from autogen_core import message_handler
 
 logger = setup_logger(__name__)
 
@@ -35,7 +40,8 @@ class AnalyseAgent(BaseChatAgent):
     def produced_message_types(self) -> Sequence[type[BaseChatMessage]]:
         return (TextMessage,)
 
-    async def on_messages(self, messages: Sequence[BaseChatMessage], cancellation_token: CancellationToken) -> Response:
+    @message_handler
+    async def on_messages(self, messages: ExtractedPapersData, cancellation_token: CancellationToken) -> Response:
         # Calls the on_messages_stream.
         response: Response | None = None
         
@@ -45,8 +51,9 @@ class AnalyseAgent(BaseChatAgent):
         assert response is not None
         return response
 
+    @message_handler
     async def on_messages_stream(
-        self, messages: Sequence[BaseChatMessage], cancellation_token: CancellationToken
+        self, messages: ExtractedPapersData, cancellation_token: CancellationToken
     ) -> AsyncGenerator[BaseAgentEvent | BaseChatMessage | Response, None]:
         inner_messages: List[BaseAgentEvent | BaseChatMessage] = []
         # 1. 调用聚类智能体进行论文聚类
@@ -82,3 +89,25 @@ class AnalyseAgent(BaseChatAgent):
     async def on_reset(self, cancellation_token: CancellationToken) -> None:
         pass
    
+async def analyse_node(state: State) -> State:
+    """搜索论文节点"""
+    try:
+        current_state = state["value"]
+        current_state.current_step = ExecutionState.ANALYZING
+        await update_state(BackToFrontData(step=ExecutionState.ANALYZING,state="processing",data=None))
+        extracted_apers = current_state.extracted_data
+        analyse_agent = AnalyseAgent()
+        response = await analyse_agent.run(task=extracted_apers)
+
+        analyse_results = response.messages[-1].content
+        
+        current_state.analyse_results = analyse_results
+        await update_state(BackToFrontData(step=ExecutionState.ANALYZING,state="completed",data=analyse_results))
+
+        return {"value": current_state}
+            
+    except Exception as e:
+        err_msg = f"Analyse failed: {str(e)}"
+        state["value"].error.analyse_node_error = err_msg
+        await update_state(BackToFrontData(step=ExecutionState.ANALYZING,state="error",data=err_msg))
+        return state
