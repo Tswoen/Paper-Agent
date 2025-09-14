@@ -1,9 +1,10 @@
 import os
-from typing import List, Dict, Optional
+from typing import Any, List, Dict, Optional
 import chromadb
 from chromadb.config import Settings
 from chromadb.utils import embedding_functions
-
+from pathlib import Path
+from chromadb.utils.embedding_functions import OpenAIEmbeddingFunction
 
 class ChromaClient:
     """
@@ -12,8 +13,7 @@ class ChromaClient:
     
     def __init__(self, 
                  collection_name: str = "default_collection",
-                 persist_directory: str = "./chroma_db",
-                 embedding_model: str = "all-MiniLM-L6-v2"):
+                 embedding_model: str = "Qwen/Qwen3-Embedding-8B"):
         """
         初始化Chroma客户端
         
@@ -22,26 +22,27 @@ class ChromaClient:
         :param embedding_model: 嵌入模型名称
         """
         self.collection_name = collection_name
-        self.persist_directory = persist_directory
         self.embedding_model = embedding_model
         
         # 创建Chroma客户端
         self.client = chromadb.PersistentClient(path=Path(__file__).parent.parent.parent / "data" / "chromadb")
         
         # 初始化嵌入函数
-        self.embedding_function = embedding_functions.SentenceTransformerEmbeddingFunction(
-            model_name=embedding_model
-        )
+        self.embedding_function = OpenAIEmbeddingFunction(
+                model_name=self.embedding_model,
+                api_key="sk-mvjhwoypajnggqoasejoqumfaabvifdrvztgvmxdpdyukggy",
+                api_base="https://api.siliconflow.cn/v1",
+            )
         
         # 获取或创建集合
         self.collection = self.client.get_or_create_collection(
             name=collection_name,
             embedding_function=self.embedding_function
         )
-    
+
     def add_documents(self, 
                      documents: List[str], 
-                     metadatas: Optional[List[Dict]] = None, 
+                     metadatas: Optional[List[Dict[str, Any]]] = None, 
                      ids: Optional[List[str]] = None) -> None:
         """
         添加文档到集合
@@ -62,8 +63,6 @@ class ChromaClient:
             ids=ids
         )
         
-        # 持久化数据
-        self.client.persist()
     
     def query(self, 
               query_texts: List[str], 
@@ -80,7 +79,8 @@ class ChromaClient:
         return self.collection.query(
             query_texts=query_texts,
             n_results=n_results,
-            where=where
+            where=where,
+            include=["metadatas"]
         )
     
     def delete_collection(self) -> None:
@@ -103,9 +103,3 @@ class ChromaClient:
             "metadata": self.collection.metadata
         }
     
-    def __enter__(self):
-        return self
-    
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.client.persist()
-        self.client = None

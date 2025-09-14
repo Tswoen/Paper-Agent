@@ -38,6 +38,7 @@ agent = AssistantAgent(
     model_client=model_client,
     tools=[search_paper_tool],
     system_message="你是一个论文查询助手，请根据用户的需求，进行语义分析，提取关键字作为查询条件，注意查询条件必须是英文，然后调用工具进行论文查询。",
+    model_client_stream=True
 )
 # agent = AssistantAgent(
 #     name="search_agent",

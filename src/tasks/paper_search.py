@@ -14,7 +14,7 @@ class PaperSearcher:
         """初始化论文搜索器"""
         pass
     
-    def search_papers(self, 
+    async def search_papers(self, 
                       query: str, 
                       max_results: int = 2, 
                       sort_by: arxiv.SortCriterion = arxiv.SortCriterion.Relevance, 
@@ -71,7 +71,7 @@ class PaperSearcher:
             logger.error(f"论文搜索失败: {str(e)}")
             raise
     
-    def search_by_topic(self, 
+    async def search_by_topic(self, 
                        topic: str, 
                        limit: int = 10, 
                        recent_days: Optional[int] = None) -> List[Dict]:

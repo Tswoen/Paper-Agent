@@ -1,178 +1,106 @@
-import logging
-from typing import Dict, List, Optional, Union
-from datetime import datetime
+import sys
+import os
+# 将项目根目录添加到Python路径
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-import autogen
-from autogen.agentchat import AssistantAgent, UserProxyAgent
-from src.utils.log_utils import setup_logger
-from src.tasks.paper_search import PaperSearcher
+from typing import Dict, Any
+from langgraph.graph import StateGraph
+from sqlalchemy.sql.functions import current_date
+from src.agents.sub_writing_agent.writing_state_models import WritingState
+from src.core.state_models import State
+from src.agents.sub_writing_agent import writing_director_agent, writing_agent, retrieval_agent
+from src.agents.sub_writing_agent.writing_director_agent import writing_director_node
+from src.agents.sub_writing_agent.writing_agent import section_writing_node
+from src.agents.sub_writing_agent.retrieval_agent import retrieval_node
+from src.core.state_models import ExecutionState
+from src.core.state_models import BackToFrontData
+from main import update_state
 
-logger = setup_logger(__name__)
+def condition_edge(state: WritingState) -> str:
+    """判断是否继续下一个小节"""
+    current_section_index = state["current_section_index"]
+    writted_sections = state["writted_sections"]
+    sections = state["sections"]
 
-class PaperRetrievalAgent:
-    """基于AutoGen框架的论文检索智能体"""
-    
+    if current_section_index+1 >= len(sections) and writted_sections[-1].completed:
+        # 所有小节都已经完成
+        return "end"
+    elif current_section_index+1 == len(writted_sections) and writted_sections[-1].completed:
+        # 移动到下一个小节
+        current_section_index = 0
+        return "section_writing_node"
+    else:
+        # 移动到检索节点
+        return "retrieval_node"
+
+class WritingWorkflow:
     def __init__(self):
-        """初始化论文检索智能体"""
-        self.paper_search = PaperSearcher()
+        self.workflow = self.build_workflow()
         
-        # 配置AutoGen代理
-        config_list = [{
-            "model": "gpt-4o-mini",  # 这里使用示例模型，实际使用时需要配置真实的模型
-            "api_key": "your-api-key"  # 实际使用时需要从环境变量或配置文件中读取
-        }]
-        
-        # 创建论文检索助手代理
-        self.retrieval_assistant = AssistantAgent(
-            name="paper_retrieval_assistant",
-            system_message="你是一个论文检索助手，负责从用户的消息中提取研究关键词，并调用论文检索工具获取相关论文。",
-            llm_config={"config_list": config_list}
-        )
-        
-        # 创建用户代理
-        self.user_proxy = UserProxyAgent(
-            name="user_proxy",
-            system_message="用户代理，负责与用户交互并调用论文检索助手。",
-            human_input_mode="NEVER",  # 非交互式模式
-            max_consecutive_auto_reply=10
-        )
-        
-        # 注册论文检索工具
-        self.user_proxy.register_function(
-            function_map={
-                "retrieve_papers": self.retrieve_papers,
-                "extract_keywords": self.extract_keywords
-            }
-        )
-    
-    def extract_keywords(self, message: str) -> List[str]:
-        """
-        从用户消息中提取研究关键词
-        
-        参数:
-            message: 用户消息
-        
-        返回:
-            提取的关键词列表
-        """
-        logger.info(f"正在从消息中提取关键词: {message}")
-        
-        # 这里使用简单的关键词提取逻辑，实际应用中可以使用NLP模型进行更复杂的提取
-        # 简单的规则：提取消息中的名词和名词短语作为关键词
-        # 这里使用一个模拟的关键词提取实现
-        keywords = []
-        
-        # 示例实现：提取常见的研究领域关键词
-        research_fields = [
-            "large language models", "LLM", "人工智能", "机器学习", "深度学习",
-            "自然语言处理", "计算机视觉", "强化学习", "知识图谱", "推荐系统"
-        ]
-        
-        for field in research_fields:
-            if field.lower() in message.lower():
-                keywords.append(field)
-        
-        # 如果没有提取到关键词，返回消息中长度大于2的单词
-        if not keywords:
-            words = message.strip().split()
-            keywords = [word for word in words if len(word) > 2 and not word.lower() in ["的", "了", "在", "是", "我"]]
-        
-        logger.info(f"提取的关键词: {keywords}")
-        return keywords
-    
-    def retrieve_papers(self, keywords: List[str], max_results: int = 10) -> List[Dict]:
-        """
-        调用学术数据库API（模拟）获取相关论文
-        
-        参数:
-            keywords: 研究关键词列表
-            max_results: 最大返回结果数量
-        
-        返回:
-            包含论文信息的结构化结果列表
-        """
-        logger.info(f"正在检索关键词 '{keywords}' 的论文，最多返回 {max_results} 篇")
-        
-        # 合并关键词构建查询
-        query = " ".join(keywords)
-        
-        # 使用现有的PaperSearch工具检索论文
-        papers = self.paper_search.search_papers(
-            query=query,
-            max_results=max_results,
-            sort_by=arxiv.SortCriterion.SubmittedDate,
-            sort_order=arxiv.SortOrder.Descending
-        )
-        
-        # 如果没有检索到论文，返回一些模拟数据
-        if not papers:
-            logger.warning(f"没有检索到关键词 '{keywords}' 的论文，返回模拟数据")
-            papers = self._generate_mock_papers(keywords, max_results)
-        
-        logger.info(f"检索完成，共找到 {len(papers)} 篇论文")
-        return papers
-    
-    def _generate_mock_papers(self, keywords: List[str], count: int) -> List[Dict]:
-        """\生成模拟的论文数据"""
-        mock_papers = []
-        for i in range(count):
-            paper = {
-                "paper_id": f"mock-{i+1}",
-                "title": f"关于{'与'.join(keywords)}的研究进展{i+1}",
-                "authors": [f"作者{i+1}", f"作者{i+2}"],
-                "summary": f"这是一篇关于{'与'.join(keywords)}的研究论文，探讨了相关领域的最新进展和未来方向。",
-                "published": datetime.now().year,
-                "published_date": datetime.now().isoformat(),
-                "url": f"https://example.com/paper/mock-{i+1}",
-                "pdf_url": f"https://example.com/paper/mock-{i+1}.pdf",
-                "primary_category": "cs.AI",
-                "categories": ["cs.AI", "cs.LG"],
-                "doi": f"10.1234/mock{i+1}"
-            }
-            mock_papers.append(paper)
-        return mock_papers
-    
-    def process_retrieval_request(self, user_message: str) -> Dict:
-        """
-        处理论文检索请求
-        
-        参数:
-            user_message: 用户的检索请求消息
-        
-        返回:
-            包含检索结果的响应
-        """
-        logger.info(f"收到检索请求: {user_message}")
-        
-        try:
-            # 提取关键词
-            keywords = self.extract_keywords(user_message)
-            
-            # 检索论文
-            papers = self.retrieve_papers(keywords)
-            
-            return {
-                "success": True,
-                "message": f"已为您找到{len(papers)}篇关于{'、'.join(keywords)}的论文",
-                "data": papers,
-                "metadata": {
-                    "keywords": keywords,
-                    "total_papers": len(papers)
-                }
-            }
-        except Exception as e:
-            logger.error(f"处理检索请求失败: {str(e)}")
-            return {
-                "success": False,
-                "error": str(e),
-                "message": "处理检索请求时发生错误"
-            }
+    def build_workflow(self):
+        """构建LangGraph工作流"""
+        builder = StateGraph(WritingState)
 
-# 示例用法
-if __name__ == "__main__":
+        # 添加节点
+        builder.add_node("writing_director_node", writing_director_node)
+        builder.add_node("retrieval_node", retrieval_node)
+        builder.add_node("section_writing_node", section_writing_node)
+
+        # 设置入口点
+        builder.set_entry_point("writing_director_node")
+
+        # 添加边
+        builder.add_edge("writing_director_node", "section_writing_node")
+        builder.add_edge("retrieval_node", "section_writing_node")
+        builder.add_conditional_edges("section_writing_node", condition_edge)
+
+        # 编译图
+        graph = builder.compile()
+    
+        return graph
+    
+async def writing_node(state: State) -> State:
+    """运行写入工作流"""
     try:
-        agent = PaperRetrievalAgent()
-        result = agent.process_retrieval_request("请帮我查找关于大型语言模型的最新研究论文")
-        print(f"检索结果: {result}")
+        current_state = state["value"]
+        current_state.current_step = ExecutionState.WRITING
+        await update_state(BackToFrontData(step=ExecutionState.WRITING,state="processing",data=None))
+        writing_state = WritingState()
+        writing_state["user_request"] = current_state.user_request
+        writing_state["global_analysis"] = current_state.analyse_results
+        # writing_state["outline"] = outline
+        writing_state["sections"] = []
+        writing_state["writted_sections"] = []
+        writing_state["current_section_index"] = -1
+        writing_state["retrieved_docs"] = []
+        writingWorkFlow = WritingWorkflow()
+        writing_state = writingWorkFlow.workflow.invoke(writing_state)
+        current_state.writted_sections = writing_state["writted_sections"]
+        await update_state(BackToFrontData(step=ExecutionState.WRITING,state="completed",data=writing_state["writted_sections"]))
+        return {"value": current_state}
+        
     except Exception as e:
-        print(f"错误: {str(e)}")
+        state["value"].error.writing_node_error = f"Writing failed: {str(e)}"
+        return state
+
+async def main():
+    global_analysis = """
+    全局分析结果LangGraph 是一个基于图状态机架构的框架，专为编排复杂、有状态的 AI 智能体（Agent）工作流而设计。它通过引入“循环”概念，克服了传统链式结构无法处理循环和持续对话的局限，非常适合构建多步骤推理、工具调用和多智能体协作系统。其核心优势在于提供了极高的灵活性和清晰的状态管理，是开发高级AI应用的关键工具
+    """
+    writing_state = WritingState()
+    writing_state["global_analysis"] = global_analysis 
+    writing_state["outline"] = outline
+    writing_state["sections"] = []
+    writing_state["writted_sections"] = []
+    writing_state["current_section_index"] = -1
+    writing_state["retrieved_docs"] = []
+    writingWorkFlow = WritingWorkflow()
+    result = await writingWorkFlow.workflow.ainvoke(writing_state)
+    # result是WritingState，而WritingState本质上就是一个字典
+    print("result:")
+    print(result)
+
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(main())
