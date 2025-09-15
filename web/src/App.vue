@@ -124,6 +124,7 @@ const autoScroll = () => {
   eventSource.value.onmessage = (event) => {
     try {
       const stateData = JSON.parse(event.data);
+      console.log('Received state data:', stateData);
       handleExecutionState(stateData);
     } catch (error) {
       console.error('Error processing event:', error);

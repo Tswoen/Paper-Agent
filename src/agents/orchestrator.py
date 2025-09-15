@@ -7,9 +7,9 @@ from sqlalchemy.sql.functions import current_date
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 from typing import TypedDict, Annotated, Sequence
-from langgraph.graph import StateGraph, END
+from langgraph.graph import StateGraph, END, START
 from langgraph.graph.message import add_messages
-from src.core.state_models import PaperAgentState, ExecutionState
+from src.core.state_models import PaperAgentState, ExecutionState,NodeError
 from src.agents.search_agent import search_node
 from src.agents.reading_agent import reading_node
 from src.agents.analyse_agent import analyse_node
@@ -55,7 +55,7 @@ class PaperAgentOrchestrator:
         elif err.writing_node_error is None and current_step == ExecutionState.WRITING:
             return "report_node"
         elif err.report_node_error is None and current_step == ExecutionState.REPORTING:
-            return "end"
+            return END
         else:
             return "handle_error_node"
 
@@ -71,14 +71,17 @@ class PaperAgentOrchestrator:
         builder.add_node("writing_node", writing_node)
         builder.add_node("report_node", report_node)
         builder.add_node("handle_error_node", self.handle_error_node)
+
+        builder.set_entry_point("search_node")
         
         # 定义工作流路径
+        builder.add_edge(START, "search_node")
         builder.add_conditional_edges("search_node", self.condition_handler)
         builder.add_conditional_edges("reading_node", self.condition_handler)
         builder.add_conditional_edges("analyse_node", self.condition_handler)
         builder.add_conditional_edges("writing_node", self.condition_handler)
         builder.add_conditional_edges("report_node", self.condition_handler)
-        builder.add_edge("handle_error_node", "end")
+        builder.add_edge("handle_error_node", END)
         
         return builder.compile()
     
@@ -87,14 +90,19 @@ class PaperAgentOrchestrator:
     async def run(self, user_request: str, max_papers: int = 2) -> PaperAgentState:
         """执行完整工作流"""
         # 初始化状态
+        from src.core.state_models import BackToFrontData
+        from main import update_state
+        await update_state(BackToFrontData(step="front_orchestrator",state="test",data="nothing"))
         initial_state = PaperAgentState(
-            user_request==user_request,
+            user_request=user_request,
             max_papers=max_papers,
+            error=NodeError(),
             config={}  # 可以传入各种配置
         )
-        
+        await update_state(BackToFrontData(step="back_orchestrator",state="test",data="nothing"))
+
         # 运行图
-        final_state = self.graph.ainvoke({"value": initial_state})
+        final_state = await self.graph.ainvoke({"value": initial_state})
         return final_state["value"]
     
 if __name__ == "__main__":
