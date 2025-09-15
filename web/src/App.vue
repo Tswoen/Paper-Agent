@@ -15,13 +15,14 @@
       </button>
     </div>
 
-    <div class="progress-section" v-if="steps.length > 0" @vue:mounted="autoScroll">
+    <div class="progress-section" v-if="steps.length > 0">
       <div 
         v-for="(step, index) in steps" 
         :key="index" 
         class="step-card"
-        :class="{ 'error': step.error }"
+        :class="{ 'error': step.error, 'show': step.show }"
       >
+        <!-- 假设StepCard组件已经定义，并接受step作为prop -->
         <StepCard :step="step" />
       </div>
     </div>
@@ -40,7 +41,6 @@
 
 <script setup>
 import { ref, nextTick, onBeforeUnmount } from 'vue'
-import { debounce } from 'lodash-es'
 
 const userInput = ref('')
 const isSubmitting = ref(false)
@@ -48,6 +48,8 @@ const steps = ref([])
 const reportContent = ref('')
 const eventSource = ref(null)
 
+
+// deepseek修改后
 const submitRequest = () => {
   if (!userInput.value.trim()) return
   
@@ -58,49 +60,55 @@ const submitRequest = () => {
   // 初始化SSE连接
   eventSource.value = new EventSource(`/api/research?query=${encodeURIComponent(userInput.value)}`)
 
-// 状态处理器工厂函数
-const createStateHandlers = () => ({
-  processing: ({ step, data }) => {
-    const stepProcessors = {
-      searching: () => addStep('搜索', data?.content || '正在搜索论文...'),
-      reading: () => addStep('阅读', data?.content || '解析论文内容中...'),
-      analyzing: () => addStep('分析', data?.content || '生成分析报告中...'),
-      writing: () => addStep('撰写', data?.content || '整合最终报告中...')
+  const addStep = (name, content, isError = false) => {
+    const stepElement = {
+      name,
+      content,
+      error: isError,
+      timestamp: new Date().toISOString(),
+      show: false
     };
-    stepProcessors[step]?.();
-  },
-  completed: ({ data }) => {
-    reportContent.value = data.report_markdown;
-    finishProcessing();
-  },
-  error: ({ error }) => {
-    addStep('错误', error?.message || '发生未知错误', true);
-    finishProcessing();
-  }
-});
-
-// 业务逻辑封装
-const addStep = (name, content, isError = false) => {
-  const stepElement = {
-    name,
-    content,
-    error: isError,
-    timestamp: new Date().toISOString(),
-    show: false
+    steps.value.push(stepElement);
+    nextTick(() => {
+      stepElement.show = true;
+      autoScroll();
+    });
   };
-  steps.value.push(stepElement);
+
+const autoScroll = () => {
   nextTick(() => {
-    stepElement.show = true;
-    autoScroll();
+    const progressSection = document.querySelector('.progress-section')
+    if (progressSection) {
+      progressSection.scrollTop = progressSection.scrollHeight
+    }
+  })
+}
+
+  const finishProcessing = () => {
+    isSubmitting.value = false;
+    eventSource.value?.close();
+  };
+
+  // 状态处理器工厂函数
+  const createStateHandlers = () => ({
+    processing: ({ step, data }) => {
+      const stepProcessors = {
+        searching: () => addStep('搜索', data?.content || '正在搜索论文...'),
+        reading: () => addStep('阅读', data?.content || '解析论文内容中...'),
+        analyzing: () => addStep('分析', data?.content || '生成分析报告中...'),
+        writing: () => addStep('撰写', data?.content || '整合最终报告中...')
+      };
+      stepProcessors[step]?.();
+    },
+    completed: ({ data }) => {
+      reportContent.value = data.report_markdown;
+      finishProcessing();
+    },
+    error: ({ error }) => {
+      addStep('错误', error?.message || '发生未知错误', true);
+      finishProcessing();
+    }
   });
-};
-
-const finishProcessing = () => {
-  isSubmitting.value = false;
-  eventSource.value?.close();
-};
-
-
 
   // 统一状态处理入口
   const handleExecutionState = (stateData) => {
@@ -120,19 +128,13 @@ const finishProcessing = () => {
     } catch (error) {
       console.error('Error processing event:', error);
     }
-  }
+  };
     
-}
-  
   eventSource.value.onerror = () => {
-    isSubmitting.value = false
-    steps.value.push({
-      name: '错误',
-      content: '连接服务器失败',
-      error: true
-    })
-    eventSource.value.close()
-  }
+    addStep('错误', '连接服务器失败', true);
+    finishProcessing();
+  };
+}
 
 
 const copyReport = () => {
@@ -172,19 +174,20 @@ onBeforeUnmount(() => {
   transition: all 0.3s ease;
   opacity: 0;
   transform: translateY(20px);
-  &.show {
-    opacity: 1;
-    transform: translateY(0);
-  }
   border: 1px solid #ddd;
   border-radius: 5px;
   padding: 15px;
   margin-bottom: 15px;
-  
-  &[data-type='AGENT_LOG'] {
-    border-left: 4px solid #1890ff;
-    background: #f0f9ff;
-  }
+}
+
+.step-card.show {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.step-card[data-type='AGENT_LOG'] {
+  border-left: 4px solid #1890ff;
+  background: #f0f9ff;
 }
 
 .step-card.error {
