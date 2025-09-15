@@ -1,5 +1,5 @@
 from autogen_agentchat.agents import AssistantAgent
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Optional
 from src.utils.log_utils import setup_logger
 from src.core.prompts import reading_agent_prompt

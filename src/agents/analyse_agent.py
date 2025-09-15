@@ -2,12 +2,14 @@ from typing import Dict, List, Optional, Union, AsyncGenerator, Sequence
 from autogen_agentchat.agents import BaseChatAgent
 import autogen
 import asyncio
+
+from starlette.routing import Route
 from src.utils.log_utils import setup_logger
 from src.agents.reading_agent import ExtractedPapersData
 from autogen_agentchat.agents import AssistantAgent
 from autogen_agentchat.messages import BaseAgentEvent, BaseChatMessage, TextMessage
 from autogen_agentchat.base import Response
-from autogen_core import CancellationToken
+from autogen_core import CancellationToken, RoutedAgent
 from src.agents.sub_analyse_agent.cluster_agent import PaperClusterAgent
 from src.agents.sub_analyse_agent.deep_analyse_agent import DeepAnalyseAgent
 from src.agents.sub_analyse_agent.global_analyse_agent import GlobalanalyseAgent
@@ -20,8 +22,8 @@ from src.core.state_models import State,ExecutionState
 from autogen_core import message_handler
 
 logger = setup_logger(__name__)
-
-class AnalyseAgent(BaseChatAgent):
+# BaseChatAgent
+class AnalyseAgent(RoutedAgent):
     """基于AutoGen框架的论文分析智能体"""
     
     def __init__(self, name: str = "analyse_agent"):
@@ -38,26 +40,26 @@ class AnalyseAgent(BaseChatAgent):
     
     @property
     def produced_message_types(self) -> Sequence[type[BaseChatMessage]]:
-        return (TextMessage,)
+        return (TextMessage,Response)
 
     @message_handler
-    async def on_messages(self, messages: ExtractedPapersData, cancellation_token: CancellationToken) -> Response:
+    async def on_messages(self, message: ExtractedPapersData, cancellation_token: CancellationToken) -> Response:
         # Calls the on_messages_stream.
         response: Response | None = None
         
-        async for message in self.on_messages_stream(messages, cancellation_token):
-            if isinstance(message, Response):
-                response = message
+        async for msg in self.on_messages_stream(message, cancellation_token):
+            if isinstance(msg, Response):
+                response = msg
         assert response is not None
         return response
 
     @message_handler
     async def on_messages_stream(
-        self, messages: ExtractedPapersData, cancellation_token: CancellationToken
+        self, message: ExtractedPapersData, cancellation_token: CancellationToken
     ) -> AsyncGenerator[BaseAgentEvent | BaseChatMessage | Response, None]:
         inner_messages: List[BaseAgentEvent | BaseChatMessage] = []
         # 1. 调用聚类智能体进行论文聚类
-        cluster_results = await self.cluster_agent.run(messages[-1].content)
+        cluster_results = await self.cluster_agent.run(message[-1].content)
         
         # 2. 调用深度分析智能体分析每个聚类的论文
         deep_analysis_results = []
