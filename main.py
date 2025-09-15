@@ -13,11 +13,11 @@ app = FastAPI()
 state_queue = asyncio.Queue()
 
 async def test():
-    await asyncio.sleep(2)
+    await asyncio.sleep(20)
     await update_state(BackToFrontData(step="SEARCH",state="test",data="nothing"))
-    await asyncio.sleep(2)
+    await asyncio.sleep(20)
     await update_state(BackToFrontData(step="ANALYSIS",state="test",data="nothing"))
-    await asyncio.sleep(2)
+    await asyncio.sleep(20)
     await update_state(BackToFrontData(step="REPORT",state="test",data="nothing"))
 
 @app.get('/api/research')

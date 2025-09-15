@@ -1,6 +1,5 @@
-from typing import Dict, List, Optional, Union, AsyncGenerator, Sequence
+from typing import Any, Dict, List, Optional, Union, AsyncGenerator, Sequence,get_type_hints,TypeAlias
 from autogen_agentchat.agents import BaseChatAgent
-import autogen
 import asyncio
 
 from starlette.routing import Route
@@ -23,7 +22,7 @@ from autogen_core import message_handler
 
 logger = setup_logger(__name__)
 # BaseChatAgent
-class AnalyseAgent(RoutedAgent):
+class AnalyseAgent(BaseChatAgent):
     """基于AutoGen框架的论文分析智能体"""
     
     def __init__(self, name: str = "analyse_agent"):
@@ -40,10 +39,19 @@ class AnalyseAgent(RoutedAgent):
     
     @property
     def produced_message_types(self) -> Sequence[type[BaseChatMessage]]:
-        return (TextMessage,Response)
+        return (TextMessage,)
 
     @message_handler
     async def on_messages(self, message: ExtractedPapersData, cancellation_token: CancellationToken) -> Response:
+        """处理分析消息并返回响应
+        
+        Args:
+            message: 提取的论文数据
+            cancellation_token: 取消令牌
+            
+        Returns:
+            Response: 包含分析结果的响应对象
+        """
         # Calls the on_messages_stream.
         response: Response | None = None
         
@@ -54,9 +62,17 @@ class AnalyseAgent(RoutedAgent):
         return response
 
     @message_handler
-    async def on_messages_stream(
-        self, message: ExtractedPapersData, cancellation_token: CancellationToken
-    ) -> AsyncGenerator[BaseAgentEvent | BaseChatMessage | Response, None]:
+    async def on_messages_stream(self, message: ExtractedPapersData, cancellation_token: CancellationToken) -> Any:
+        """流式处理分析消息
+        
+        Args:
+            message: 提取的论文数据
+            cancellation_token: 取消令牌
+            
+        Yields:
+            生成分析过程中的事件或消息
+            AsyncGenerator[BaseAgentEvent | BaseChatMessage | Response, None]
+        """
         inner_messages: List[BaseAgentEvent | BaseChatMessage] = []
         # 1. 调用聚类智能体进行论文聚类
         cluster_results = await self.cluster_agent.run(message[-1].content)
@@ -70,15 +86,7 @@ class AnalyseAgent(RoutedAgent):
         global_analysis = await self.global_analyse_agent.run(deep_analysis_results)
         
         inner_messages.append(global_analysis)
-        # 4. 生成最终分析报告草稿
-        # report_draft = {
-        #     'summary': global_analysis.get('summary', ''),
-        #     'key_findings': global_analysis.get('key_findings', []),
-        #     'recommendations': global_analysis.get('recommendations', []),
-        #     'clusters': cluster_results
-        # }
-        
-
+    
         # 返回分析结果
         yield Response(
             chat_message=TextMessage(
@@ -113,3 +121,7 @@ async def analyse_node(state: State) -> State:
         state["value"].error.analyse_node_error = err_msg
         await update_state(BackToFrontData(step=ExecutionState.ANALYZING,state="error",data=err_msg))
         return state
+
+# if __name__ == "__main__":
+#     analyse_agent = AnalyseAgent()
+#     print(get_type_hints(analyse_agent.on_messages_stream))
