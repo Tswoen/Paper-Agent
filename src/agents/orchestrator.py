@@ -16,21 +16,27 @@ from src.agents.analyse_agent import analyse_node
 from src.agents.writing_agent import writing_node
 from src.agents.report_agent import report_node
 from typing import Dict, Any
+from src.core.state_models import BackToFrontData
+from main import update_state
+from src.core.state_models import State,ConfigSchema
 
 
 import asyncio
 
 
-class State(TypedDict):
-    """LangGraph兼容的状态定义"""
-    value: PaperAgentState
+# class State(TypedDict):
+#     """LangGraph兼容的状态定义"""
+#     state_queue: Queue
+#     value: PaperAgentState
 
-class ConfigSchema(TypedDict):
-    """LangGraph兼容的配置定义"""
-    value: Dict[str, Any]
+# class ConfigSchema(TypedDict):
+#     """LangGraph兼容的配置定义"""
+#     state_queue: Queue
+#     value: Dict[str, Any]
 
 class PaperAgentOrchestrator:
-    def __init__(self):
+    def __init__(self,state_queue):
+        self.state_queue = state_queue
         self.graph = self._build_graph()
 
     async def handle_error_node(self, state: State) -> str:
@@ -87,23 +93,21 @@ class PaperAgentOrchestrator:
     
 
     
-    async def run(self, user_request: str, max_papers: int = 2) -> PaperAgentState:
+    async def run(self, user_request: str, max_papers: int = 2):
         """执行完整工作流"""
         # 初始化状态
-        from src.core.state_models import BackToFrontData
-        from main import update_state
-        await update_state(BackToFrontData(step="front_orchestrator",state="test",data="nothing"))
+        await self.state_queue.put(BackToFrontData(step="start",state="processing",data=None))
+        print("Starting workflow...")
         initial_state = PaperAgentState(
             user_request=user_request,
             max_papers=max_papers,
             error=NodeError(),
             config={}  # 可以传入各种配置
         )
-        await update_state(BackToFrontData(step="back_orchestrator",state="test",data="nothing"))
 
         # 运行图
-        final_state = await self.graph.ainvoke({"value": initial_state})
-        return final_state["value"]
+        final_state = await self.graph.ainvoke({"state_queue": self.state_queue, "value": initial_state})
+
     
 if __name__ == "__main__":
     # from IPython.display import Image, display

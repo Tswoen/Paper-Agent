@@ -101,10 +101,12 @@ class AnalyseAgent(BaseChatAgent):
    
 async def analyse_node(state: State) -> State:
     """搜索论文节点"""
+    state_queue = None
     try:
+        state_queue = state["state_queue"]
         current_state = state["value"]
         current_state.current_step = ExecutionState.ANALYZING
-        await update_state(BackToFrontData(step=ExecutionState.ANALYZING,state="processing",data=None))
+        await state_queue.put(BackToFrontData(step=ExecutionState.ANALYZING,state="processing",data=None))
         extracted_apers = current_state.extracted_data
         analyse_agent = AnalyseAgent()
         response = await analyse_agent.run(task=extracted_apers)
@@ -112,14 +114,14 @@ async def analyse_node(state: State) -> State:
         analyse_results = response.messages[-1].content
         
         current_state.analyse_results = analyse_results
-        await update_state(BackToFrontData(step=ExecutionState.ANALYZING,state="completed",data=analyse_results))
+        await state_queue.put(BackToFrontData(step=ExecutionState.ANALYZING,state="completed",data=analyse_results))
 
         return {"value": current_state}
             
     except Exception as e:
         err_msg = f"Analyse failed: {str(e)}"
         state["value"].error.analyse_node_error = err_msg
-        await update_state(BackToFrontData(step=ExecutionState.ANALYZING,state="error",data=err_msg))
+        await state_queue.put(BackToFrontData(step=ExecutionState.ANALYZING,state="error",data=err_msg))
         return state
 
 # if __name__ == "__main__":

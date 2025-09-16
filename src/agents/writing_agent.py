@@ -61,10 +61,12 @@ class WritingWorkflow:
     
 async def writing_node(state: State) -> State:
     """运行写入工作流"""
+    state_queue = None
     try:
+        state_queue = state["state_queue"]
         current_state = state["value"]
         current_state.current_step = ExecutionState.WRITING
-        await update_state(BackToFrontData(step=ExecutionState.WRITING,state="processing",data=None))
+        await state_queue.put(BackToFrontData(step=ExecutionState.WRITING,state="processing",data=None))
         writing_state = WritingState()
         writing_state["user_request"] = current_state.user_request
         writing_state["global_analysis"] = current_state.analyse_results
@@ -76,11 +78,12 @@ async def writing_node(state: State) -> State:
         writingWorkFlow = WritingWorkflow()
         writing_state = writingWorkFlow.workflow.invoke(writing_state)
         current_state.writted_sections = writing_state["writted_sections"]
-        await update_state(BackToFrontData(step=ExecutionState.WRITING,state="completed",data=writing_state["writted_sections"]))
+        await state_queue.put(BackToFrontData(step=ExecutionState.WRITING,state="completed",data=writing_state["writted_sections"]))
         return {"value": current_state}
         
     except Exception as e:
         state["value"].error.writing_node_error = f"Writing failed: {str(e)}"
+        await state_queue.put(BackToFrontData(step=ExecutionState.WRITING,state="error",data=str(e)))
         return state
 
 async def main():

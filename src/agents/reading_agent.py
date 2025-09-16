@@ -45,10 +45,12 @@ read_agent = AssistantAgent(
 
 async def reading_node(state: State) -> State:
     """搜索论文节点"""
+    state_queue = None
     try:
+        state_queue = state["state_queue"]
         current_state = state["value"]
         current_state.current_step = ExecutionState.READING
-        await update_state(BackToFrontData(step=ExecutionState.READING,state="processing",data=None))
+        await state_queue.put(BackToFrontData(step=ExecutionState.READING,state="processing",data=None))
 
         papers = current_state.search_results
 
@@ -70,12 +72,12 @@ async def reading_node(state: State) -> State:
         )   
         
         current_state.extracted_data = extracted_papers
-        await update_state(BackToFrontData(step=ExecutionState.READING,state="completed",data=extracted_papers))
+        await state_queue.put(BackToFrontData(step=ExecutionState.READING,state="completed",data=extracted_papers))
 
         return {"value": current_state}
             
     except Exception as e:
         err_msg = f"Reading failed: {str(e)}"
         state["value"].error.reading_node_error = err_msg
-        await update_state(BackToFrontData(step=ExecutionState.READING,state="error",data=err_msg))
+        await state_queue.put(BackToFrontData(step=ExecutionState.READING,state="error",data=err_msg))
         return state

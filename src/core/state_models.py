@@ -1,3 +1,4 @@
+from asyncio import Queue
 from typing import List, Dict, Any, Optional,TypedDict
 from pydantic import BaseModel, Field
 from enum import Enum
@@ -88,8 +89,10 @@ class PaperAgentState(BaseModel):
 
 class State(TypedDict):
     """LangGraph兼容的状态定义"""
+    state_queue: Queue
     value: PaperAgentState
 
 class ConfigSchema(TypedDict):
     """LangGraph兼容的配置定义"""
+    state_queue: Queue
     value: Dict[str, Any]

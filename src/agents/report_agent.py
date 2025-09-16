@@ -23,10 +23,12 @@ report_agent = AssistantAgent(
 
 async def report_node(state: State) -> State:
     """报告生成节点"""
+    state_queue = None
     try:
+        state_queue = state["state_queue"]
         current_state = state["value"]
         current_state.current_step = ExecutionState.REPORTING
-        await update_state(BackToFrontData(step=ExecutionState.REPORTING,state="processing",data=None))
+        await state_queue.put(BackToFrontData(step=ExecutionState.REPORTING,state="processing",data=None))
         sections = current_state.writted_sections
         sections_text = "\n".join(sections) if sections else "无章节内容提供"
     
@@ -50,11 +52,11 @@ async def report_node(state: State) -> State:
         content = response.messages[-1].content
         
         current_state.report_markdown = content
-        await update_state(BackToFrontData(step=ExecutionState.REPORTING,state="completed",data=content))
+        await state_queue.put(BackToFrontData(step=ExecutionState.REPORTING,state="completed",data=content))
         return {"value": current_state}
 
     except Exception as e:
         err_msg = f"Report failed: {str(e)}"
         state["value"].error.report_node_error = err_msg
-        await update_state(BackToFrontData(step=ExecutionState.REPORTING,state="error",data=err_msg))
+        await state_queue.put(BackToFrontData(step=ExecutionState.REPORTING,state="error",data=err_msg))
         return state
