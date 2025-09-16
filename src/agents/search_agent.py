@@ -33,10 +33,12 @@ search_agent = AssistantAgent(
 async def search_node(state: State) -> State:
     
     """搜索论文节点"""
+    state_queue = None
     try:
+        state_queue = state["state_queue"]
         current_state = state["value"]
         current_state.current_step = ExecutionState.SEARCHING
-        await update_state(BackToFrontData(step=ExecutionState.SEARCHING,state="processing",data=None))
+        await state_queue.put(BackToFrontData(step=ExecutionState.SEARCHING,state="processing",data=None))
 
         prompt = f"""
         请根据用户查询需求，生成检索查询条件。
@@ -53,12 +55,12 @@ async def search_node(state: State) -> State:
         )
         
         current_state.search_results = results
-        await update_state(BackToFrontData(step=ExecutionState.SEARCHING,state="completed",data=results))
+        await state_queue.put(BackToFrontData(step=ExecutionState.SEARCHING,state="completed",data=results))
             
         return {"value": current_state}
             
     except Exception as e:
         err_msg = f"Search failed: {str(e)}"
         state["value"].error.search_node_error = err_msg
-        await update_state(BackToFrontData(step=ExecutionState.SEARCHING,state="error",data=err_msg))
+        await state_queue.put(BackToFrontData(step=ExecutionState.SEARCHING,state="error",data=err_msg))
         return state
