@@ -15,7 +15,7 @@ class PaperSearcher:
         pass
     
     async def search_papers(self, 
-                      query: str, 
+                      querys: List[str], 
                       max_results: int = 2, 
                       sort_by: arxiv.SortCriterion = arxiv.SortCriterion.Relevance, 
                       sort_order: arxiv.SortOrder = arxiv.SortOrder.Descending, 
@@ -25,7 +25,7 @@ class PaperSearcher:
         搜索arXiv论文
         
         参数:
-            query: 搜索关键词
+            querys: 搜索关键词
             max_results: 最大返回结果数量
             sort_by: 排序方式 (Relevance, LastUpdatedDate, SubmittedDate)
             sort_order: 排序顺序 (Ascending, Descending)
@@ -35,20 +35,21 @@ class PaperSearcher:
         返回:
             论文列表，每项包含论文的详细信息
         """
-        logger.info(f"开始搜索论文: query='{query}', max_results={max_results}, sort_by={sort_by}")
         
         try:
             # 构建搜索查询
-            search_query = query
-            
+            for query in querys:
+                search_query = "all:%22"+query+"%22 OR "
+            search_query = search_query[:-4]
             # 添加日期范围过滤
             if start_date or end_date:
                 start_date_str = self._format_date(start_date) if start_date else "190001010000"
                 end_date_str = self._format_date(end_date) if end_date else datetime.now().strftime("%Y%m%d2359")
                 date_filter = f"submittedDate:[{start_date_str} TO {end_date_str}]"
-                search_query = f"\"{search_query}\" AND {date_filter}"
-            else:
-                search_query = f"\"{search_query}\""
+                search_query = f"{search_query} AND {date_filter}"
+
+            logger.info(f"开始搜索论文: query='{search_query}', max_results={max_results}, sort_by={sort_by}")
+
 
             logger.info(f"论文搜索查询条件: {search_query}")
 

@@ -1,6 +1,6 @@
 from autogen_agentchat.agents import AssistantAgent
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional,List
 
 from src.utils.log_utils import setup_logger
 from src.tasks.paper_search import PaperSearcher
@@ -19,7 +19,7 @@ model_client = create_default_client()
 # 创建一个查询条件类，包括查询内容、主题、时间范围等信息，用于存储用户的查询需求
 class SearchQuery(BaseModel):
     """查询条件类，存储用户查询需求"""
-    query: str = Field(default=None, description="查询关键字")
+    querys: List[str] = Field(default=None, description="查询条件列表")
     start_date: Optional[str] = Field(default=None, description="开始时间, 格式: YYYY-MM-DD")
     end_date: Optional[str] = Field(default=None, description="结束时间, 格式: YYYY-MM-DD")
 
@@ -49,7 +49,7 @@ async def search_node(state: State) -> State:
         # 调用检索服务
         paper_searcher = PaperSearcher()
         results = await paper_searcher.search_papers(
-            query = search_query.query,
+            querys = search_query.querys,
             start_date = search_query.start_date,
             end_date = search_query.end_date,
         )
