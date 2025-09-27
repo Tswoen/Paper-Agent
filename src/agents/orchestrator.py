@@ -17,7 +17,6 @@ from src.agents.writing_agent import writing_node
 from src.agents.report_agent import report_node
 from typing import Dict, Any
 from src.core.state_models import BackToFrontData
-from main import update_state
 from src.core.state_models import State,ConfigSchema
 
 

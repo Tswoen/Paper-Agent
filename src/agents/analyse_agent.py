@@ -14,7 +14,6 @@ from src.agents.sub_analyse_agent.deep_analyse_agent import DeepAnalyseAgent
 from src.agents.sub_analyse_agent.global_analyse_agent import GlobalanalyseAgent
 from src.core.model_client import create_default_client
 from src.core.state_models import BackToFrontData
-from main import update_state
 import json
 
 from src.core.state_models import State,ExecutionState

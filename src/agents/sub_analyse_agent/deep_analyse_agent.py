@@ -11,7 +11,7 @@ import json
 from typing import Dict, Any, List
 from dataclasses import dataclass
 from src.core.prompts import deep_analyse_agent_prompt
-from src.core.model_client import create_default_client
+from src.core.model_client import create_default_client, create_subanalyse_deep_analyse_model_client
 from autogen_agentchat.agents import AssistantAgent
 from src.agents.sub_analyse_agent.cluster_agent import PaperCluster
 from src.utils.log_utils import setup_logger
@@ -129,7 +129,7 @@ class DeepAnalyseAgent:
         
     def __init__(self, model_client=None):
         """初始化聚类智能体"""
-        self.model_client = create_default_client()
+        self.model_client = create_subanalyse_deep_analyse_model_client()
         self.deep_analyse_agent = AssistantAgent(
             name="deep_analyse_agent",
             model_client= self.model_client,
