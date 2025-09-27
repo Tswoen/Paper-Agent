@@ -5,6 +5,8 @@ from chromadb.config import Settings
 from chromadb.utils import embedding_functions
 from pathlib import Path
 from chromadb.utils.embedding_functions import OpenAIEmbeddingFunction
+from src.core.config import config
+
 
 class ChromaClient:
     """
@@ -28,11 +30,8 @@ class ChromaClient:
         self.client = chromadb.PersistentClient(path=Path(__file__).parent.parent.parent / "data" / "chromadb")
         
         # 初始化嵌入函数
-        self.embedding_function = OpenAIEmbeddingFunction(
-                model_name=self.embedding_model,
-                api_key="sk-mvjhwoypajnggqoasejoqumfaabvifdrvztgvmxdpdyukggy",
-                api_base="https://api.siliconflow.cn/v1",
-            )
+        self.embedding_function = self.create_embedding_client()
+    
         
         # 获取或创建集合
         self.collection = self.client.get_or_create_collection(
@@ -40,6 +39,48 @@ class ChromaClient:
             embedding_function=self.embedding_function
         )
 
+    def create_embedding_client(self) -> OpenAIEmbeddingFunction:
+        try:
+            model_config = config.get("chroma-embedding-model", {})
+            provider = model_config.get("model-provider")
+            model = model_config.get("model")
+            
+            # 检查是否配置了阅读模型
+            if not provider or not model:
+                return self.create_default_embedding_client()
+
+            provider_config = config.get(provider)
+
+            # 如果未提供参数，则使用配置中的默认值
+            api_key = provider_config.get("api_key")
+            base_url = provider_config.get("base_url")
+
+            return OpenAIEmbeddingFunction(
+                    model_name=model,
+                    api_key=api_key,
+                    api_base=base_url,
+                )
+            
+            
+        except Exception as e:
+            print(f"创建嵌入模型客户端失败: {e}，使用默认模型代替")
+            return self.create_default_embedding_client()
+
+    def create_default_embedding_client() -> OpenAIEmbeddingFunction:
+        default_model_config = config.get("default-embedding-model", {})
+        provider = default_model_config.get("model-provider", "siliconflow")
+        model = default_model_config.get("model", "Qwen/Qwen3-Embedding-8B")
+        provider_config = config.get(provider)
+
+        # 如果未提供参数，则使用配置中的默认值
+        api_key = provider_config.get("api_key")
+        base_url = provider_config.get("base_url")
+
+        return OpenAIEmbeddingFunction(
+                model_name=model,
+                api_key=api_key,
+                api_base=base_url,
+            )
     def add_documents(self, 
                      documents: List[str], 
                      metadatas: Optional[List[Dict[str, Any]]] = None, 

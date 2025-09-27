@@ -5,14 +5,13 @@ from src.tasks.paper_search import PaperSearcher
 from src.core.state_models import State,ExecutionState
 from src.core.prompts import report_agent_prompt
 from src.core.state_models import BackToFrontData
-from main import update_state
 
-from src.core.model_client import create_default_client
+from src.core.model_client import create_default_client, create_report_model_client
 
 logger = setup_logger(__name__)
 
 
-model_client = create_default_client()
+model_client = create_report_model_client()
 
 
 report_agent = AssistantAgent(

@@ -38,8 +38,9 @@ class PaperSearcher:
         
         try:
             # 构建搜索查询
+            search_query = ""
             for query in querys:
-                search_query = "all:%22"+query+"%22 OR "
+                search_query += "all:%22"+query+"%22 OR "
             search_query = search_query[:-4]
             # 添加日期范围过滤
             if start_date or end_date:
@@ -178,43 +179,62 @@ class PaperSearcher:
     
     def _format_date(self, date: Union[str, datetime]) -> str:
         """
+        
         格式化日期为arXiv API支持的格式YYYYMMDDTTTT
         
         参数:
             date: 日期字符串或datetime对象
         
         返回:
-            格式化后的日期字符串
+            格式化后的日期字符串YYYYMMDD0000
         """
         if isinstance(date, datetime):
-            # 返回YYYYMMDD0000格式（使用00:00作为时间）
             return date.strftime("%Y%m%d0000")
         elif isinstance(date, str):
-            # 如果是字符串，尝试解析并转换格式
+            # 定义多种可能的日期格式
+            date_formats = [
+                "%Y-%m-%d",      # YYYY-MM-DD
+                "%Y/%m/%d",      # YYYY/MM/DD
+                "%Y.%m.%d",      # YYYY.MM.DD
+                "%Y-%m",         # YYYY-MM
+                "%Y/%m",         # YYYY/MM
+                "%Y",            # YYYY
+                "%Y年%m月%d日",  # 中文格式
+                "%Y年%m月",      # 中文格式（年月）
+                "%Y年",          # 中文格式（年）
+            ]
+            
+            for fmt in date_formats:
+                try:
+                    if fmt == "%Y":  # 单独处理只有年份的情况
+                        if len(date) == 4 and date.isdigit():
+                            parsed_date = datetime(int(date), 1, 1)
+                            return parsed_date.strftime("%Y%m%d0000")
+                    elif fmt in ["%Y-%m", "%Y/%m", "%Y年%m月"]:  # 处理年月格式
+                        try:
+                            parsed_date = datetime.strptime(date, fmt)
+                            return parsed_date.strftime("%Y%m%d0000")
+                        except:
+                            continue
+                    else:
+                        parsed_date = datetime.strptime(date, fmt)
+                        return parsed_date.strftime("%Y%m%d0000")
+                except ValueError:
+                    continue
+            
+            # 如果所有格式都失败，尝试使用dateutil或返回默认值
             try:
-                # 假设输入格式为YYYY-MM-DD
-                parsed_date = datetime.strptime(date, "%Y-%m-%d")
+                from dateutil import parser
+                parsed_date = parser.parse(date)
                 return parsed_date.strftime("%Y%m%d0000")
-            except ValueError:
-                # 如果不是YYYY-MM-DD格式，返回原始值
-                return date
-        return date
+            except:
+                # 最终fallback：当前日期
+                return datetime.now().strftime("%Y%m%d0000")
+        
+        # 默认返回当前日期
+        return datetime.now().strftime("%Y%m%d0000")
 
 # 示例用法
 if __name__ == "__main__":
-    try:
-        searcher = PaperSearcher()
-        
-        # 搜索"large language models"主题的论文
-        papers = searcher.search_by_topic("large language models", limit=5, recent_days=30)
-        
-        print(f"找到 {len(papers)} 篇论文")
-        for i, paper in enumerate(papers, 1):
-            print(f"\n{i}. {paper['title']}")
-            print(f"   作者: {', '.join(paper['authors'])}")
-            print(f"   发布年份: {paper['published']}")
-            print(f"   URL: {paper['url']}")
-            print(f"   PDF URL: {paper['pdf_url']}")
-            print(f"   摘要: {paper['summary'][:100]}...")
-    except Exception as e:
-        print(f"搜索失败: {e}")
+    data = PaperSearcher()._format_date("2023")
+    print(data)

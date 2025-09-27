@@ -4,7 +4,7 @@ from src.core.prompts import retrieval_agent_prompt
 from typing import Dict, Any
 from src.utils.log_utils import setup_logger
 
-from src.core.model_client import create_default_client
+from src.core.model_client import create_default_client, create_subwriting_retrieval_model_client
 from src.services.retrieval_tool import retrieval_tool
 from src.agents.sub_writing_agent.writing_state_models import WritingState, SectionState
 import asyncio
@@ -12,7 +12,7 @@ import asyncio
 logger = setup_logger(__name__)
 
 
-model_client = create_default_client()
+model_client = create_subwriting_retrieval_model_client()
 
 
 retriever = FunctionTool(retrieval_tool, description="用于联网查询外部资料，来辅助写作的工具")
@@ -56,22 +56,22 @@ async def retrieval_node(state: WritingState) -> Dict[str, Any]:
 
     retrieved_docs = []
     # 将querys并行交给retrieval_tool去执行，并将结果合并
-    # results = await asyncio.gather(*[retrieval_tool(query) for query in querys])
+    results = await asyncio.gather(*[retrieval_tool(query) for query in querys])
     # 去重
-    # for result in results:
-    #     flag = True
-    #     for doc in retrieved_docs:
-    #         if result["paper_id"] == doc["paper_id"]:
-    #             flag = False
-    #     if flag:
-    #         retrieved_docs.append(result)
+    for result in results:
+        flag = True
+        for doc in retrieved_docs:
+            if result["paper_id"] == doc["paper_id"]:
+                flag = False
+        if flag:
+            retrieved_docs.append(result)
 
 
     # 生成检索条件
-    # response = await retrieval_agent.run(task = prompt)
-    # content = response.messages[-1].content
+    response = await retrieval_agent.run(task = prompt)
+    content = response.messages[-1].content
 
     # 调用检索服务
-    # retrieved_docs = retrieval_tool(content)
-    retrieved_docs = [{"paper_id": "1", "title": "langraph介绍", "abstract": "是一个AI框架", "content": "LangGraph 是一个专为构建复杂、有状态的 AI 智能体（Agent）工作流设计的框架，基于图状态机（Graph State Machine）架构，由 LangChain 团队开发，可看作是对 LangChain 的扩展与增强。"}]
+    retrieved_docs = retrieval_tool(content)
+    # retrieved_docs = [{"paper_id": "1", "title": "langraph介绍", "abstract": "是一个AI框架", "content": "LangGraph 是一个专为构建复杂、有状态的 AI 智能体（Agent）工作流设计的框架，基于图状态机（Graph State Machine）架构，由 LangChain 团队开发，可看作是对 LangChain 的扩展与增强。"}]
     return {"retrieved_docs": retrieved_docs}

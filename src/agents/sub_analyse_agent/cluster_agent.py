@@ -7,7 +7,7 @@
 import asyncio
 import json
 from autogen_agentchat.agents import AssistantAgent
-from src.core.model_client import create_default_client
+from src.core.model_client import create_default_client, create_subanalyse_cluster_model_client
 from src.core.prompts import clustering_agent_prompt
 from src.agents.reading_agent import ExtractedPaperData, ExtractedPapersData
 import numpy as np
@@ -113,7 +113,7 @@ class PaperClusterAgent:
     
     def __init__(self, model_client=None):
         """初始化聚类智能体"""
-        self.model_client = create_default_client()
+        self.model_client = create_subanalyse_cluster_model_client()
         self.clustering_agent = AssistantAgent(
             name="clustering_agent",
             model_client= self.model_client,

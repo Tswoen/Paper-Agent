@@ -5,12 +5,12 @@ from typing import Dict, Any, List
 
 from src.utils.log_utils import setup_logger
 
-from src.core.model_client import create_default_client
+from src.core.model_client import create_default_client, create_subwriting_writing_director_model_client
 
 logger = setup_logger(__name__)
 
 
-model_client = create_default_client()
+model_client = create_subwriting_writing_director_model_client()
 
 
 writing_director_agent = AssistantAgent(

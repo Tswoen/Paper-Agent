@@ -14,7 +14,6 @@ from src.agents.sub_writing_agent.writing_agent import section_writing_node
 from src.agents.sub_writing_agent.retrieval_agent import retrieval_node
 from src.core.state_models import ExecutionState
 from src.core.state_models import BackToFrontData
-from main import update_state
 
 def condition_edge(state: WritingState) -> str:
     """判断是否继续下一个小节"""

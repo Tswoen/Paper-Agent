@@ -8,7 +8,7 @@ import os
 import json
 from typing import Dict, Any, List
 from src.core.prompts import global_analyse_agent_prompt
-from src.core.model_client import create_default_client
+from src.core.model_client import create_default_client, create_subanalyse_global_analyse_model_client
 from autogen_agentchat.agents import AssistantAgent
 from src.agents.sub_analyse_agent.deep_analyse_agent import DeepAnalyseResult
 from src.utils.log_utils import setup_logger
@@ -22,7 +22,7 @@ class GlobalanalyseAgent:
         
     def __init__(self, model_client=None):
         """初始化聚类智能体"""
-        self.model_client = create_default_client()
+        self.model_client = create_subanalyse_global_analyse_model_client()
         self.global_analyse_agent = AssistantAgent(
             name="global_analyse_agent",
             model_client= self.model_client,

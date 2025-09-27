@@ -3,13 +3,12 @@ from pydantic import BaseModel, Field
 from typing import List, Optional
 from src.utils.log_utils import setup_logger
 from src.core.prompts import reading_agent_prompt
-from src.core.model_client import create_default_client
+from src.core.model_client import create_default_client, create_reading_model_client
 from src.core.state_models import BackToFrontData
-from main import update_state
-
 from src.core.state_models import State,ExecutionState
 from src.services.chroma_client import ChromaClient
 import asyncio
+import json
 
 logger = setup_logger(__name__)
 
@@ -32,9 +31,9 @@ class ExtractedPaperData(BaseModel):
 
 # 创建一个新的Pydantic模型来包装列表
 class ExtractedPapersData(BaseModel):
-    papers: List[ExtractedPaperData]
+    papers: List[ExtractedPaperData] = Field(default=[], description="提取的论文数据列表")
 
-model_client = create_default_client()
+model_client = create_reading_model_client()
 
 read_agent = AssistantAgent(
     name="read_agent",
@@ -59,7 +58,7 @@ async def reading_node(state: State) -> State:
         results = await asyncio.gather(*[read_agent.run(task=str(paper)) for paper in papers])
 
         # 合并结果
-        extracted_papers = ExtractedPapersData(papers=[])
+        extracted_papers = ExtractedPapersData()
         for result in results:
             for parsed_paper in result.messages[-1].content.papers:
                 extracted_papers.papers.append(parsed_paper)     
@@ -67,7 +66,7 @@ async def reading_node(state: State) -> State:
         # 还得存入向量数据库中
         chroma_client = ChromaClient()
         chroma_client.add_documents(
-            documents=[paper.model_dump() for paper in extracted_papers.papers],
+            documents=[json.dump(paper.model_dump()) for paper in extracted_papers.papers],
             metadatas=[paper for paper in papers],
         )   
         
@@ -81,3 +80,13 @@ async def reading_node(state: State) -> State:
         state["value"].error.reading_node_error = err_msg
         await state_queue.put(BackToFrontData(step=ExecutionState.READING,state="error",data=err_msg))
         return state
+
+if __name__ == "__main__":
+    paper = {
+        'core_problem': 'Despite the rapid introduction of autonomous vehicles, public misunderstanding and mistrust are prominent issues hindering their acceptance.'
+    }
+    chroma_client = ChromaClient()
+    chroma_client.add_documents(
+        documents=[paper],
+        metadatas=[paper],
+    )   

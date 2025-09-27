@@ -4,22 +4,39 @@ model-provider:
   - huggingface
   - dashscope
 
+default-model:
+  model-provider: siliconflow
+  model: Qwen/Qwen3-32B
+
+default-embedding-model:
+  model-provider: siliconflow
+  model: Qwen/Qwen3-Embedding-8B
+
+reading-model:
+  model-provider: siliconflow
+  model: Qwen/Qwen3-32B
+
+writing-model:
+  model-provider: siliconflow
+  model: Qwen/Qwen3-32B
+
+chroma-embedding-model:
+  model-provider: siliconflow
+  model: Qwen/Qwen3-Embedding-8B
+
+
 siliconflow:
   api_key: SILICONFLOW_API_KEY
   base_url: https://api.siliconflow.cn/v1
-  model: SILICONFLOW_MODEL
 
 openai:
   api_key: OPENAI_API_KEY
   base_url: https://api.openai.com/v1
-  model: OPENAI_MODEL
 
 huggingface:
   api_key: HUGGINGFACE_API_KEY
   base_url: HUGGINGFACE_BASE_URL
-  model: HUGGINGFACE_MODEL
 
 dashscope:
   api_key: DASHSCOPE_API_KEY
   base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
-  model: DASHSCOPE_MODEL
