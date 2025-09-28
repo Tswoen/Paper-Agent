@@ -35,7 +35,7 @@ class PaperSearcher:
         返回:
             论文列表，每项包含论文的详细信息
         """
-        
+        querys = ['artificial intelligence', 'survey report', 'AI']
         try:
             # 构建搜索查询
             search_query = ""

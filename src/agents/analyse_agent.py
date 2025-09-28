@@ -41,7 +41,7 @@ class AnalyseAgent(BaseChatAgent):
         return (TextMessage,)
 
     @message_handler
-    async def on_messages(self, message: ExtractedPapersData, cancellation_token: CancellationToken) -> Response:
+    async def on_messages(self, message: str | BaseChatMessage | Sequence[BaseChatMessage] | None = None,cancellation_token: CancellationToken = None) -> Response:
         """处理分析消息并返回响应
         
         Args:
@@ -53,8 +53,8 @@ class AnalyseAgent(BaseChatAgent):
         """
         # Calls the on_messages_stream.
         response: Response | None = None
-        
-        async for msg in self.on_messages_stream(message, cancellation_token):
+        stream_message = message.content
+        async for msg in self.on_messages_stream(stream_message, cancellation_token):
             if isinstance(msg, Response):
                 response = msg
         assert response is not None
@@ -108,7 +108,7 @@ async def analyse_node(state: State) -> State:
         await state_queue.put(BackToFrontData(step=ExecutionState.ANALYZING,state="processing",data=None))
         extracted_apers = current_state.extracted_data
         analyse_agent = AnalyseAgent()
-        response = await analyse_agent.run(task=extracted_apers)
+        response = await analyse_agent.run(task=TextMessage(content=extracted_apers, source="User"))
 
         analyse_results = response.messages[-1].content
         

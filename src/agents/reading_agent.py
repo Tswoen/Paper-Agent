@@ -39,7 +39,7 @@ read_agent = AssistantAgent(
     name="read_agent",
     model_client=model_client,
     system_message=reading_agent_prompt,
-    output_content_type=ExtractedPapersData,
+    output_content_type=ExtractedPaperData,
 )
 
 async def reading_node(state: State) -> State:
@@ -60,13 +60,13 @@ async def reading_node(state: State) -> State:
         # 合并结果
         extracted_papers = ExtractedPapersData()
         for result in results:
-            for parsed_paper in result.messages[-1].content.papers:
-                extracted_papers.papers.append(parsed_paper)     
+            parsed_paper = result.messages[-1].content
+            extracted_papers.papers.append(parsed_paper)     
 
         # 还得存入向量数据库中
         chroma_client = ChromaClient()
         chroma_client.add_documents(
-            documents=[json.dump(paper.model_dump()) for paper in extracted_papers.papers],
+            documents=[json.dumps(paper.model_dump(),ensure_ascii=False) for paper in extracted_papers.papers],
             metadatas=[paper for paper in papers],
         )   
         

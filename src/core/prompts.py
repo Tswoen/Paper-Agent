@@ -32,8 +32,6 @@ reading_agent_prompt = """
 - 所有字符串值须用英文双引号。  
 - 若信息缺失，用 null（不要空字符串）。  
 
-【说明】：当您输出完毕，且没有其他问题时，请回复“APPROVE”
-
 """
 
 clustering_agent_prompt = """

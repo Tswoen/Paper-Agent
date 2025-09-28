@@ -83,7 +83,7 @@ class ChromaClient:
             )
     def add_documents(self, 
                      documents: List[str], 
-                     metadatas: Optional[List[Dict[str, Any]]] = None, 
+                     metadatas: Optional[List[dict]] = None, 
                      ids: Optional[List[str]] = None) -> None:
         """
         添加文档到集合
@@ -97,7 +97,9 @@ class ChromaClient:
             
         if not metadatas:
             metadatas = [{} for _ in documents]
-            
+
+        metadatas = [self.safe_metadata_conversion(metadata) for metadata in metadatas]
+
         self.collection.add(
             documents=documents,
             metadatas=metadatas,
@@ -144,3 +146,34 @@ class ChromaClient:
             "metadata": self.collection.metadata
         }
     
+    def safe_metadata_conversion(self, data):
+        """安全地将数据转换为 ChromaDB 兼容的元数据"""
+        if hasattr(data, 'model_dump'):
+            data = data.model_dump()
+        
+        metadata = {}
+        
+        for key, value in data.items():
+            # 处理 None 值，转换为空字符串
+            if value is None:
+                metadata[key] = ""
+                continue
+                
+            # 跳过复杂的嵌套结构
+            if isinstance(value, (dict, list, tuple, set)):
+                if isinstance(value, list) and all(isinstance(item, (str, int, float, bool)) for item in value):
+                    # 简单列表转换为字符串
+                    metadata[key] = ", ".join(str(item) for item in value)
+                else:
+                    # 复杂结构跳过或转换为JSON字符串
+                    try:
+                        metadata[key] = json.dumps(value, ensure_ascii=False)
+                    except:
+                        metadata[key] = str(value)
+            elif isinstance(value, (str, int, float, bool)):
+                metadata[key] = value
+            else:
+                # 其他类型转换为字符串
+                metadata[key] = str(value)
+        
+        return metadata
