@@ -24,6 +24,7 @@ venv.bak/
 ehthumbs.db
 Thumbs.db
 
+
 # Python开发
 ## 编译文件
 __pycache__/
@@ -60,9 +61,12 @@ node_modules/
 .cache/
 data/cache/
 
+
 ## 数据库
 *.sqlite
 *.sqlite3
+data/chromadb/
+
 
 ## 日志
 logs/
