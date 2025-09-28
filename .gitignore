@@ -24,7 +24,10 @@ venv.bak/
 ehthumbs.db
 Thumbs.db
 
+<<<<<<< HEAD
 
+=======
+>>>>>>> 2d8183df50da6349dcec80db8e07d40c705f490e
 # Python开发
 ## 编译文件
 __pycache__/
