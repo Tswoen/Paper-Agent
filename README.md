@@ -2,27 +2,22 @@
 <h1 align="center">Paper-Agent: 智能学术调研报告生成系统</h1>
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/)
 ## 📖 简介
 
 **Paper-Agent** 是一个面向科研人员的自动化调研报告生成系统，目标在于解决学术领域论文调研“耗时长、分析浅”的痛点。它不是简单的文献摘要工具，而是一个具备“检索-阅读-分析-综合-报告”全流程能力的智能领域研究助理，能生成有深度、有见解的领域综述报告。
 
-Paper-Agent 是一个自动化调研报告生成系统，旨在解决领域论文调研"耗时长、分析浅"的问题，为科研人员提供一个智能的"领域研究助理"，自动完成"检索-阅读-分析-综合-报告"的完整工作流，快速生成有深度、有见解的领域综述报告。
-
 ## ✨ 核心特性
 
-- **多源论文检索**：支持基于关键词、领域描述、时间范围等条件，自动从 arXiv、Semantic Scholar 等数据库检索高质量论文。
-- **智能体协作工作流**：系统采用多智能体架构，涵盖检索、阅读、分析、写作等多个智能体，自动协作完成复杂任务。
-- **结构化信息抽取**：自动提取论文的核心问题、技术路线、实验结果、数据集、局限性等关键信息，输出标准化 JSON 结构。
-- **领域综述报告生成**：自动汇总分析，生成包含执行摘要、发展脉络、研究热点、技术对比、权威机构与未来趋势等内容的结构化报告（支持 Markdown/PDF 格式）。
-- **模块化设计**：各功能模块解耦，便于扩展和维护。
-
-## 核心功能
-
+<!-- - **多源论文检索**：支持基于关键词、领域描述、时间范围等条件，自动从 arXiv、Semantic Scholar 等数据库检索高质量论文。 -->
+- 👥 **智能体协作工作流**：系统采用多智能体架构，涵盖检索、阅读、分析、写作等多个智能体，自动协作完成复杂任务。
 - 📚 **自动化文献检索**：将自然语言查询转换为精确的搜索条件，获取相关学术论文
-- 🔍 **智能阅读分析**：自动提取论文关键信息（方法、数据集、结果等）
+- 🔍 **结构化信息抽取**：智能阅读自动提取论文的核心问题、技术路线、实验结果、数据集、局限性等关键信息，输出标准化 JSON 结构。
 - 🧠 **深度领域分析**：对文献进行聚类、对比分析，识别研究趋势和热点
-- ✍️ **自动报告生成**：将分析结果整合成结构完整、逻辑清晰的学术报告
+- ✍️ **领域综述报告生成**：将分析结果整合成结构完整、逻辑清晰的学术报告
+<!-- 自动汇总分析，生成包含执行摘要、发展脉络、研究热点、技术对比、权威机构与未来趋势等内容的结构化报告 -->
+<!-- （支持 Markdown/PDF 格式）。 -->
+- 🔧 **模块化设计**：各功能模块解耦，便于扩展和维护。
 
 ## 系统架构
 
@@ -56,14 +51,14 @@ Paper-Agent 采用模块化设计，由五个核心模块协同工作：
    - 管理全局状态与错误处理
 
 
-## 技术架构
+<!-- ## 技术架构 -->
 
-- **主控协调模块（orchestrator）**：基于 LangGraph，实现智能体间的任务分配与调度。
+<!-- - **主控协调模块（orchestrator）**：基于 LangGraph，实现智能体间的任务分配与调度。
 - **数据获取模块（data_acquire）**：负责论文检索、下载与去重。
 - **信息提取模块（info_extract）**：利用 LLM 及规则，提取论文结构化要素（如 core_problem、key_methodology、main_results 等）。
 - **分析与综合模块（analyze & synthesize）**：聚合单篇论文信息，进行主题建模、趋势分析、机构作者统计等。
 - **报告生成模块（report_generate）**：将所有分析结果以结构化报告形式输出。
-- **服务与工具层（services/utils）**：封装外部 API、PDF 解析、日志等通用能力。
+- **服务与工具层（services/utils）**：封装外部 API、PDF 解析、日志等通用能力。 -->
 
 ## 工作流程
 
@@ -77,74 +72,91 @@ Paper-Agent 采用模块化设计，由五个核心模块协同工作：
 ## 📂 目录结构
 
 ```text
-paper-agent/
+Paper-Agents/
+├── main.py                 # 应用主入口，FastAPI应用初始化
+├── pyproject.toml          # Python项目配置和依赖声明
+├── LICENSE                 # MIT许可证文件
+├── README.md               # 项目说明文档
+├── .gitignore              # Git忽略文件
+├──
+├── src/                    # 源代码目录
+│   ├── agents/             # 智能体模块
+│   │   ├── orchestrator.py         # 工作流协调器
+│   │   ├── search_agent.py         # 论文检索智能体
+│   │   ├── reading_agent.py        # 论文阅读智能体
+│   │   ├── analyse_agent.py        # 论文分析智能体
+│   │   ├── writing_agent.py        # 内容写作智能体
+│   │   ├── report_agent.py         # 报告生成智能体
+│   │   ├── sub_analyse_agent/      # 子分析智能体目录
+│   │   └── sub_writing_agent/      # 子写作智能体目录
+│   │
+│   ├── core/               # 核心模块
+│   │   ├── config.py        # 配置管理
+│   │   ├── model_client.py  # 模型客户端
+│   │   ├── models.yaml      # 模型配置
+│   │   ├── prompts.py       # 提示词模板
+│   │   └── state_models.py  # 状态模型定义
+│   │
+│   ├── services/           # 服务层
+│   │   ├── arxiv_client.py           # arXiv API客户端
+│   │   ├── arxiv_fetcher.py          # arXiv论文获取器
+│   │   ├── chroma_client.py          # Chroma向量数据库客户端
+│   │   └── retrieval_tool.py         # 检索工具
+│   │
+│   ├── tasks/              # 任务模块
+│   │   ├── deduplicator.py      # 论文去重
+│   │   ├── paper_downloader.py  # 论文下载
+│   │   ├── paper_filter.py      # 论文过滤
+│   │   ├── paper_search.py      # 论文搜索
+│   │   └── papers/              # 论文存储目录
+│   │
+│   └── utils/              # 工具函数
+│       └── log_utils.py    # 日志工具
 │
-├── main.py                 # 命令行应用入口，FastAPI应用主入口
-├── pyproject.toml          # Python依赖
-├── .env                    # 环境变量
+├── test/                   # 测试目录
+│   ├── test_analyseAgent.py    # 分析智能体测试
+│   ├── test_readingAgent.py    # 阅读智能体测试
+│   ├── test_searchAgent.py     # 搜索智能体测试
+│   ├── test_writingAgent.py    # 写作智能体测试
+│   └── test_workflow.py        # 工作流测试
 │
-├── src/
-│   ├── agents/             # 智能体模块（如 orchestrator、search_agent、reading_agent、analysis_agent、writing_agent）
-│   ├── core/               # 核心数据模型与配置（如 models.py, config.py, prompts.py）
-│   ├── services/           # 外部服务封装（如 arxiv_client, s2_client, grobid_client）
-│   ├── tasks/              # 可复用的具体任务（如 pdf_parser, paper_downloader, deduplicator, trend_analyzer）
-│   └── utils/              # 工具函数（如日志、辅助方法）
+├── web/                    # 前端目录
+│   ├── index.html          # 前端入口页面
+│   ├── package.json        # 前端依赖配置
+│   ├── src/                # 前端源代码
+│   └── vite.config.js      # Vite配置
 │
-├── data/                   # 运行产生的数据（建议 .gitignore）
-├── docs/
-│   ├── README.md           # 项目详细说明
-│   ├── DEV_SETUP.md        # 开发环境配置指南
-│   └── API_REFERENCE.md    # API接口文档
+├── data/                   # 数据存储目录
+└── output/                 # 输出目录
+    └── log/                # 日志输出目录
 ```
 
 ## 🚀 快速开始
 
 1. **环境准备**
    - Python 3.12+
-   - 推荐使用虚拟环境
+   - 项目使用poetry 管理虚拟环境
    - 安装依赖：`poetry install`
-2. **配置**
-   - 配置 `.env` 文件，填写各项API Key、服务地址等
-   - 如需解析 PDF，确保 GROBID 服务可用
-3. **运行服务**
-   - 命令行模式：`poetry run python main.py`
-   - 前端启动：`npm run dev`
-4. **自定义任务**
-   - 在 `src/agents/`、`src/tasks/` 下添加/修改智能体与任务逻辑
 
-## 安装指南
+2. **配置环境**
+   - 复制 `.env.example` 为 `.env` 并填写您的API密钥
+   - 修改 `config.yaml` 中的参数（可选）
 
-```bash
-# 克隆仓库
-git clone https://github.com/yourusername/paper-agent.git
-cd paper-agent
+3. **运行系统**
+   ```bash
+   poetry run python main.py
+   ```
 
-# 创建虚拟环境
-python -m venv venv
-source venv/bin/activate  # Linux/Mac
-venv\Scripts\activate     # Windows
+4. **查看结果**
+   - 生成的报告将保存在 `output/reports/` 目录下
+   - 运行日志可在 `output/logs/` 中查看
 
-# 安装依赖
-pip install -r requirements.txt
-```
+5. **Web界面**
+   ```bash
+   cd web && npm install && npm run dev
+   ```
+   - 访问 http://localhost:5173 使用Web界面
 
-## 使用方法
-
-```python
-from orchestrator import PaperAgentOrchestrator
-
-# 初始化协调器
-orchestrator = PaperAgentOrchestrator()
-
-# 运行调研流程
-result = orchestrator.run(
-    user_query="机器学习在医学影像诊断中的最新进展",
-    max_papers=50
-)
-
-# 获取生成的报告
-print(result.report)
-```
 
 ## 配置说明
 
@@ -157,13 +169,22 @@ print(result.report)
 
 ## 技术栈
 
-- 语言：Python 3.8+
-- 框架：LangGraph
-- 数据处理：Pydantic, Pandas
-- 向量数据库：Chroma
-- 机器学习：Scikit-learn
-- 大语言模型：支持多种LLM集成
-
+### 后端
+- **编程语言**: Python 3.12+
+- **智能体框架**: LangGraph, AutoGen
+- **Web框架**: FastAPI, Uvicorn
+- **向量数据库**: ChromaDB
+- **数据处理**: pyyaml, python-dotenv, tenacity
+- **机器学习**: scikit-learn
+- **论文检索**: arXiv API
+- **网络请求**: requests, aiohttp
+- **包管理**: Poetry
+- **日志系统**: Python标准库logging模块 (自定义配置)
+<!-- - **PDF解析**: PyMuPDF -->
+### 前端
+- **框架**: Vue.js 3.4+
+- **构建工具**: Vite 5.0+
+- **开发工具**: @vitejs/plugin-vue
 
 ## 贡献指南
 
@@ -181,9 +202,9 @@ print(result.report)
 
 ## 联系方式
 
-如有任何问题或建议，请联系：
+如有任何问题或建议，请通过以下方式反馈：
+- **GitHub Issues**：请在项目仓库中提交Issue，这是最推荐的问题反馈方式
 - 项目主页：https://github.com/yourusername/paper-agent
-- 邮箱：contact@paper-agent.com
 
 ---
 
