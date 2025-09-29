@@ -50,8 +50,8 @@ class AnalyseAgent(BaseChatAgent):
     def produced_message_types(self) -> Sequence[type[BaseChatMessage]]:
         return (TextMessage,)
 
-    @message_handler
-    async def on_messages(self, message: str | BaseChatMessage | Sequence[BaseChatMessage] | None = None,cancellation_token: CancellationToken = None) -> Response:
+    # @message_handler
+    async def on_messages(self, messages: Sequence[BaseChatMessage], cancellation_token: CancellationToken) -> Response:
         """处理分析消息并返回响应
         
         Args:
@@ -63,14 +63,15 @@ class AnalyseAgent(BaseChatAgent):
         """
         # Calls the on_messages_stream.
         response: Response | None = None
-        stream_message = message.content
-        async for msg in self.on_messages_stream(stream_message, cancellation_token):
-            if isinstance(msg, Response):
-                response = msg
+        stream_message = messages[-1].content
+        # async for msg in self.on_messages_stream(stream_message, cancellation_token):
+        #     if isinstance(msg, Response):
+        #         response = msg
+        response = await self.on_messages_stream(stream_message, cancellation_token)
         assert response is not None
         return response
 
-    @message_handler
+    # @message_handler
     async def on_messages_stream(self, message: ExtractedPapersData, cancellation_token: CancellationToken) -> Any:
         """流式处理分析消息
         
@@ -84,7 +85,7 @@ class AnalyseAgent(BaseChatAgent):
         """
         inner_messages: List[BaseAgentEvent | BaseChatMessage] = []
         # 1. 调用聚类智能体进行论文聚类
-        cluster_results = await self.cluster_agent.run(message[-1].content)
+        cluster_results = await self.cluster_agent.run(message)
         
         # 2. 调用深度分析智能体分析每个聚类的论文
         deep_analysis_results = []
@@ -97,7 +98,14 @@ class AnalyseAgent(BaseChatAgent):
         inner_messages.append(global_analysis)
     
         # 返回分析结果
-        yield Response(
+        # yield Response(
+        #     chat_message=TextMessage(
+        #         content=json.dumps(global_analysis, ensure_ascii=False, indent=2),
+        #         source=self.name
+        #     ),
+        #     inner_messages=inner_messages
+        # )
+        return Response(
             chat_message=TextMessage(
                 content=json.dumps(global_analysis, ensure_ascii=False, indent=2),
                 source=self.name
@@ -126,6 +134,7 @@ async def analyse_node(state: State) -> State:
 
         analyse_agent = AnalyseAgent()
         task = StructuredMessage(content=extracted_papers, source="User")
+        # task = TextMessage(content=json.dumps(extracted_papers.model_dump(),ensure_ascii=False), source="User")
         response = await analyse_agent.run(task=task)
 
         analyse_results = response.messages[-1].content

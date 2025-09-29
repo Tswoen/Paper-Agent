@@ -142,7 +142,7 @@ class PaperClusterAgent:
             res.append(tmp.embedding)
         return res
 
-    def prepare_text_for_embedding(self, paper: List[Dict[str, Any]]) -> str:
+    def prepare_text_for_embedding(self, paper: Dict[str, Any]) -> str:
         """准备用于生成嵌入向量的文本"""
         text_parts = []
         
