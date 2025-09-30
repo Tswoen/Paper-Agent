@@ -101,7 +101,7 @@ const autoScroll = () => {
       stepProcessors[step]?.();
     },
     completed: ({ data }) => {
-      reportContent.value = data.report_markdown;
+      // reportContent.value = data.report_markdown;
       finishProcessing();
     },
     error: ({ error }) => {

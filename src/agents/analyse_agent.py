@@ -83,20 +83,16 @@ class AnalyseAgent(BaseChatAgent):
             生成分析过程中的事件或消息
             AsyncGenerator[BaseAgentEvent | BaseChatMessage | Response, None]
         """
-        inner_messages: List[BaseAgentEvent | BaseChatMessage] = []
         # 1. 调用聚类智能体进行论文聚类
         cluster_results = await self.cluster_agent.run(message)
         
         # 2. 调用深度分析智能体分析每个聚类的论文
         deep_analysis_results = []
-        analyse_tasks = [self.deep_analyse_agent.run(cluster) for cluster in cluster_results]
-        deep_analysis_results = await asyncio.gather(*analyse_tasks)
+        deep_analysis_results = await asyncio.gather(*[self.deep_analyse_agent.run(cluster) for cluster in cluster_results])
         
         # 3. 调用全局分析智能体生成整体分析报告
         global_analysis = await self.global_analyse_agent.run(deep_analysis_results)
-        
-        inner_messages.append(global_analysis)
-    
+            
         # 返回分析结果
         # yield Response(
         #     chat_message=TextMessage(
@@ -109,8 +105,7 @@ class AnalyseAgent(BaseChatAgent):
             chat_message=TextMessage(
                 content=json.dumps(global_analysis, ensure_ascii=False, indent=2),
                 source=self.name
-            ),
-            inner_messages=inner_messages
+            )
         )
 
     async def on_reset(self, cancellation_token: CancellationToken) -> None:
