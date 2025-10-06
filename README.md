@@ -212,7 +212,7 @@ Paper-Agents/
 
 如有任何问题或建议，请通过以下方式反馈：
 - **GitHub Issues**：请在项目仓库中提交Issue，这是最推荐的问题反馈方式
-- 项目主页：https://github.com/yourusername/paper-agent
+- 项目主页：https://github.com/Tswoen/paper-agent
 
 ---
 
