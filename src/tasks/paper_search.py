@@ -16,7 +16,7 @@ class PaperSearcher:
     
     async def search_papers(self, 
                       querys: List[str], 
-                      max_results: int = 2, 
+                      max_results: int = 50, 
                       sort_by: arxiv.SortCriterion = arxiv.SortCriterion.Relevance, 
                       sort_order: arxiv.SortOrder = arxiv.SortOrder.Descending, 
                       start_date: Optional[Union[str, datetime]] = None, 
@@ -35,7 +35,7 @@ class PaperSearcher:
         返回:
             论文列表，每项包含论文的详细信息
         """
-        querys = ['artificial intelligence', 'survey report', 'AI']
+        querys = ['artificial intelligence', 'AI', 'llm', 'machine learning', 'deep learning']
         try:
             # 构建搜索查询
             search_query = ""

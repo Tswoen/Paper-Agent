@@ -7,7 +7,7 @@
 import asyncio
 import json
 from autogen_agentchat.agents import AssistantAgent
-from src.core.model_client import create_default_client, create_subanalyse_cluster_model_client
+from src.core.model_client import create_default_client, create_subanalyse_cluster_model_client, create_cluster_embedding_client
 from src.core.prompts import clustering_agent_prompt
 from src.agents.reading_agent import ExtractedPaperData, ExtractedPapersData
 import numpy as np
@@ -46,13 +46,10 @@ class PaperClusterAgent:
 
 
     def get_embedding(self, text: Union[str, List[str]]) -> list[float]:
-        client = OpenAI(
-                api_key="sk-mvjhwoypajnggqoasejoqumfaabvifdrvztgvmxdpdyukggy",
-                base_url="https://api.siliconflow.cn/v1"
-        )
+        client = create_cluster_embedding_client()
         response = client.embeddings.create(
+            model=client.default_headers["X-Model"],
             input=text,
-            model="Qwen/Qwen3-Embedding-8B",
             dimensions=1024
         )
         res = []
@@ -260,7 +257,7 @@ class PaperClusterAgent:
                 paper_summaries.append(summary)
             
             prompt = f"""
-                基于以下论文信息，为这个聚类生成一个简洁的主题描述(必须生成一个主题，不能生成空主题)和3-5个关键词：
+                基于以下论文信息，为这一类论文生成一个简洁的主题描述(必须生成一个主题，不能生成空主题)和3-5个关键词：
                 
                 论文信息：
                 {json.dumps(paper_summaries, ensure_ascii=False, indent=2)}
@@ -305,18 +302,6 @@ class PaperClusterAgent:
                 papers=cluster.papers,
                 theme_description=theme_description,
                 keywords=keywords)  
-            cluster_result = {
-
-                # "paper_count": len(cluster.papers),
-                # "papers": [
-                #     {
-                #         "paper_id": paper.get("paper_id"),
-                #         "title": paper.get("title", "未知标题"),
-                #         "core_problem": paper.get("core_problem", "")[:100] + "..."
-                #     }
-                #     for paper in cluster.papers
-                # ]
-            }
             results.append(paperCluster)
         
         return results

@@ -48,30 +48,50 @@ def parse_to_list(s: str) -> list[str]:
 async def retrieval_node(state: WritingState) -> Dict[str, Any]:
     logger.info("开始写作检索节点")
 
-    writted_sections = state["writted_sections"]
-    retrieved_docs = state["retrieved_docs"]
+    try:
+        # writted_sections = state["writted_sections"]
+        retrieved_docs = state["retrieved_docs"]
 
-    query = writted_sections[-1].content
-    querys = parse_to_list(query)
+        # query = writted_sections[-1].content
+        # logger.info(f"检索条件: {query}")
+        # querys = parse_to_list(query)
+        querys  = ['语言模型', '大模型','语言模型原理']
+        # retrieved_docs = []
+        # 将querys并行交给retrieval_tool去执行，并将结果合并
+        results = retrieval_tool(querys)
+        # results = await asyncio.gather(*[retrieval_tool(query) for query in querys])
+        # 去重
+        for result in results:
+            for paper in result:
+                flag = True
+                for doc in retrieved_docs:
+                    if paper["paper_id"] == doc["paper_id"]:
+                        flag = False
+                if flag:
+                    retrieved_docs.append(paper)
 
-    retrieved_docs = []
-    # 将querys并行交给retrieval_tool去执行，并将结果合并
-    results = await asyncio.gather(*[retrieval_tool(query) for query in querys])
-    # 去重
-    for result in results:
-        flag = True
-        for doc in retrieved_docs:
-            if result["paper_id"] == doc["paper_id"]:
-                flag = False
-        if flag:
-            retrieved_docs.append(result)
 
+        # 生成检索条件
+        # response = await retrieval_agent.run(task = prompt)
+        # content = response.messages[-1].content
 
-    # 生成检索条件
-    response = await retrieval_agent.run(task = prompt)
-    content = response.messages[-1].content
+        # 调用检索服务
+        # retrieved_docs = retrieval_tool(content)
+        # retrieved_docs = [{"paper_id": "1", "title": "langraph介绍", "abstract": "是一个AI框架", "content": "LangGraph 是一个专为构建复杂、有状态的 AI 智能体（Agent）工作流设计的框架，基于图状态机（Graph State Machine）架构，由 LangChain 团队开发，可看作是对 LangChain 的扩展与增强。"}]
+        return {"retrieved_docs": retrieved_docs}
+    except Exception as e:
+        logger.error(f"Retrieval failed: {str(e)}")
+        return state
 
-    # 调用检索服务
-    retrieved_docs = retrieval_tool(content)
-    # retrieved_docs = [{"paper_id": "1", "title": "langraph介绍", "abstract": "是一个AI框架", "content": "LangGraph 是一个专为构建复杂、有状态的 AI 智能体（Agent）工作流设计的框架，基于图状态机（Graph State Machine）架构，由 LangChain 团队开发，可看作是对 LangChain 的扩展与增强。"}]
-    return {"retrieved_docs": retrieved_docs}
+def main(state: WritingState):
+    """主函数"""
+    asyncio.run(retrieval_node(state))
+
+if __name__ == "__main__":
+    from src.agents.sub_writing_agent.writing_state_models import WritingState
+    state_queue = asyncio.Queue()
+    state = WritingState(
+            user_request="帮我写一篇关于人工智能的调研报告",
+            retrieved_docs=[],
+        )
+    main(state)

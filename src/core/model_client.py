@@ -2,6 +2,8 @@ from autogen_ext.models.openai import OpenAIChatCompletionClient
 from autogen_core.models import ModelInfo
 from .config import config
 from src.utils.log_utils import setup_logger
+from openai import OpenAI
+
 
 logger = setup_logger(__name__)
 
@@ -10,7 +12,7 @@ class ModelClient:
     
     @staticmethod
     def create_client(
-        provider: str = "siliconflow",
+        provider: str = None,
         model: str = None,
         api_key: str = None,
         base_url: str = None,
@@ -71,10 +73,39 @@ class ModelClient:
             model_info=model_info
         )
 
+    @staticmethod
+    def create_embedding_client(
+        provider: str = None,
+        model: str = None,
+        api_key: str = None,
+        base_url: str = None,
+    ) -> OpenAI:
+        provider_config = config.get(provider)
+
+        # 如果未提供参数，则使用配置中的默认值
+        api_key = api_key or provider_config.get("api_key")
+        base_url = base_url or provider_config.get("base_url")
+        
+        # 验证必要参数
+        if not model:
+            raise ValueError(f"未指定模型名称，请在参数中提供或在配置文件中设置{provider}.model")
+        if not base_url:
+            raise ValueError(f"未指定API基础URL，请在参数中提供或在配置文件中设置{provider}.base_url")
+
+        client = OpenAI(
+                api_key= api_key,
+                base_url=base_url,
+                default_headers={
+                    "X-Model": model  # 设置默认模型
+                }
+        )
+        return client
+
+
 def create_model_client(client_type: str) -> OpenAIChatCompletionClient:
     try:
         """创建用于阅读论文的客户端实例"""
-        model_config = config.get("reading-model", {})
+        model_config = config.get(client_type, {})
         provider = model_config.get("model-provider")
         model = model_config.get("model")
 
@@ -91,6 +122,26 @@ def create_model_client(client_type: str) -> OpenAIChatCompletionClient:
         print(f"创建阅读模型客户端失败: {e}，使用默认模型代替")
         return create_default_client()
 
+def create_embedding_client(client_type: str) -> OpenAI:
+    try:
+        """创建用于阅读论文的客户端实例"""
+        model_config = config.get(client_type, {})
+        provider = model_config.get("model-provider")
+        model = model_config.get("model")
+
+        # 检查是否配置了阅读模型
+        if not provider or not model:
+            logger.warning(f"警告：未配置{client_type}模型，使用默认模型代替")
+            return create_default_embedding_client()
+        
+        return ModelClient.create_embedding_client(
+                provider=provider,
+                model=model
+        )
+    except Exception as e:
+        print(f"创建{client_type}模型客户端失败: {e}，使用默认模型代替")
+        return create_default_embedding_client()
+
 def create_default_client() -> OpenAIChatCompletionClient:
     """创建默认的OpenAIChatCompletionClient实例，使用配置中指定的默认模型"""
     default_model_config = config.get("default-model", {})
@@ -98,6 +149,17 @@ def create_default_client() -> OpenAIChatCompletionClient:
     model = default_model_config.get("model", "Qwen/Qwen3-32B")
     
     return ModelClient.create_client(
+        provider=provider,
+        model=model
+    )
+
+def create_default_embedding_client() -> OpenAI:
+    """创建默认的OpenAIEmbeddingClient实例，使用配置中指定的默认模型"""
+    default_model_config = config.get("default-embedding-model", {})
+    provider = default_model_config.get("model-provider", "siliconflow")
+    model = default_model_config.get("model", "Qwen/Qwen3-Embedding-8B")
+    
+    return ModelClient.create_embedding_client(
         provider=provider,
         model=model
     )
@@ -137,6 +199,10 @@ def create_subwriting_retrieval_model_client() -> OpenAIChatCompletionClient:
 def create_report_model_client() -> OpenAIChatCompletionClient:
     """创建用于写作报告的模型客户端实例"""
     return create_model_client("report-model")
+
+def create_cluster_embedding_client() -> OpenAI:
+    """创建用于聚类嵌入的模型客户端实例"""
+    return create_embedding_client("cluster-embedding-model")
 
 if __name__ == "__main__":
     client = create_report_model_client()

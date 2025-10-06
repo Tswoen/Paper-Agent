@@ -26,9 +26,6 @@ sse-starlette = "^3.0.2"
 uvicorn = "^0.35.0"
 langgraph = "^0.6.7"
 chromadb = "^1.0.20"
-semanticscholar = "^0.11.0"
-scholarly = "^1.7.11"
-habanero = "^2.3.0"
 
 
 

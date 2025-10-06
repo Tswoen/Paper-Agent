@@ -140,18 +140,18 @@ Paper-Agents/
 
 2. **配置环境**
    - 复制 `.env.example` 为 `.env` 并填写您的API密钥
-   - 修改 `config.yaml` 中的参数（可选）
+   - 修改 `models.yaml` 中的参数
 
 3. **运行系统**
    ```bash
    poetry run python main.py
    ```
 
-4. **查看结果**
+<!-- 4. **查看结果**
    - 生成的报告将保存在 `output/reports/` 目录下
-   - 运行日志可在 `output/logs/` 中查看
+   - 运行日志可在 `output/logs/` 中查看 -->
 
-5. **Web界面**
+4. **Web界面**
    ```bash
    cd web && npm install && npm run dev
    ```
@@ -160,12 +160,14 @@ Paper-Agents/
 
 ## 配置说明
 
-系统配置文件位于 `config.yaml`，可根据需求调整以下参数：
+系统配置文件位于 `models.yaml`，可根据需求调整以下参数：
+- 可选模型提供商
+- 项目默认使用的模型和嵌入模型配置
+- 项目模块具体使用的模型和嵌入模型配置（可选）
+- 各个模型提供商的API密钥和基础URL
 
-- 搜索范围与来源
-- 聚类算法参数
-- 模型选择与参数
-- 报告格式与风格
+环境变量配置
+- 在 `.env` 文件中设置API密钥
 
 ## 技术栈
 

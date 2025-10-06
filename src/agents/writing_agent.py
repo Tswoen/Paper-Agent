@@ -14,8 +14,10 @@ from src.agents.sub_writing_agent.writing_agent import section_writing_node
 from src.agents.sub_writing_agent.retrieval_agent import retrieval_node
 from src.core.state_models import ExecutionState
 from src.core.state_models import BackToFrontData
-
-def condition_edge(state: WritingState) -> str:
+from src.utils.tool_utils import handlerChunk
+from src.utils.log_utils import setup_logger
+logger = setup_logger(__name__)
+async def condition_edge(state: WritingState) -> str:
     """判断是否继续下一个小节"""
     current_section_index = state["current_section_index"]
     writted_sections = state["writted_sections"]
@@ -60,29 +62,29 @@ class WritingWorkflow:
     
 async def writing_node(state: State) -> State:
     """运行写入工作流"""
-    state_queue = None
+    state_queue = state["state_queue"]
     try:
-        state_queue = state["state_queue"]
         current_state = state["value"]
         current_state.current_step = ExecutionState.WRITING
-        await state_queue.put(BackToFrontData(step=ExecutionState.WRITING,state="processing",data=None))
+        # await state_queue.put(BackToFrontData(step=ExecutionState.WRITING,state="initializing",data=None))
         writing_state = WritingState()
+        writing_state["state_queue"] = state_queue
         writing_state["user_request"] = current_state.user_request
         writing_state["global_analysis"] = current_state.analyse_results
-        # writing_state["outline"] = outline
         writing_state["sections"] = []
         writing_state["writted_sections"] = []
         writing_state["current_section_index"] = -1
         writing_state["retrieved_docs"] = []
         writingWorkFlow = WritingWorkflow()
-        writing_state = writingWorkFlow.workflow.invoke(writing_state)
+        writing_state = await writingWorkFlow.workflow.ainvoke(writing_state)
+        logger.info(f"writing_state: {writing_state}")
         current_state.writted_sections = writing_state["writted_sections"]
-        await state_queue.put(BackToFrontData(step=ExecutionState.WRITING,state="completed",data=writing_state["writted_sections"]))
+        # await state_queue.put(BackToFrontData(step=ExecutionState.WRITING,state="completed",data=writing_state["writted_sections"]))
         return {"value": current_state}
         
     except Exception as e:
         state["value"].error.writing_node_error = f"Writing failed: {str(e)}"
-        await state_queue.put(BackToFrontData(step=ExecutionState.WRITING,state="error",data=str(e)))
+        # await state_queue.put(BackToFrontData(step=ExecutionState.WRITING,state="error",data=str(e)))
         return state
 
 async def main():

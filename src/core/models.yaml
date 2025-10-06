@@ -1,9 +1,10 @@
+# 可选模型提供商
 model-provider:
   - siliconflow
   - openai
-  - huggingface
   - dashscope
 
+# 项目默认使用的模型和嵌入模型配置
 default-model:
   model-provider: siliconflow
   model: Qwen/Qwen3-32B
@@ -12,6 +13,7 @@ default-embedding-model:
   model-provider: siliconflow
   model: Qwen/Qwen3-Embedding-8B
 
+# 项目模块具体使用的模型和嵌入模型配置（可选）
 reading-model:
   model-provider: siliconflow
   model: Qwen/Qwen3-32B
@@ -24,7 +26,11 @@ chroma-embedding-model:
   model-provider: siliconflow
   model: Qwen/Qwen3-Embedding-8B
 
+cluster-embedding-model:
+  model-provider: siliconflow
+  model: Qwen/Qwen3-Embedding-8B
 
+# 各个模型提供商的API密钥和基础URL
 siliconflow:
   api_key: SILICONFLOW_API_KEY
   base_url: https://api.siliconflow.cn/v1
@@ -32,10 +38,6 @@ siliconflow:
 openai:
   api_key: OPENAI_API_KEY
   base_url: https://api.openai.com/v1
-
-huggingface:
-  api_key: HUGGINGFACE_API_KEY
-  base_url: HUGGINGFACE_BASE_URL
 
 dashscope:
   api_key: DASHSCOPE_API_KEY

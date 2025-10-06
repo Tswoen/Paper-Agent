@@ -60,18 +60,13 @@ class DeepAnalyseAgent:
             prompt = f"""
                 基于以下聚类信息和详细的论文内容，进行深入的学术分析：
 
-                聚类主题：{cluster.theme_description}
-                聚类关键词：{', '.join(cluster.keywords)}
-                论文数量：{len(cluster.papers)}
+                ## 基本信息
+                - **聚类主题**：{cluster.theme_description}
+                - **核心关键词**：{', '.join(cluster.keywords)}
+                - **论文数量**：{len(cluster.papers)}
 
-                详细论文信息：
+                ## 详细论文数据
                 {json.dumps(cluster.papers, ensure_ascii=False, indent=2)}
-
-                # 分析维度
-                1. 趋势分析：按时间顺序分析该技术的发展脉络
-                2. 方法对比：对比不同论文提出的方法优缺点
-                3. 性能分析：在共同数据集上的表现对比（如有）
-                4. 局限性：该技术路线的共同局限性
 
                 请以结构化的方式组织你的分析结果。
 """

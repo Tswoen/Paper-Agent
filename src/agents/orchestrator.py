@@ -92,10 +92,10 @@ class PaperAgentOrchestrator:
     
 
     
-    async def run(self, user_request: str, max_papers: int = 2):
+    async def run(self, user_request: str, max_papers: int = 50):
         """执行完整工作流"""
         # 初始化状态
-        await self.state_queue.put(BackToFrontData(step="start",state="processing",data=None))
+        # await self.state_queue.put(BackToFrontData(step="start",state="processing",data=None))
         print("Starting workflow...")
         initial_state = PaperAgentState(
             user_request=user_request,
@@ -105,7 +105,8 @@ class PaperAgentOrchestrator:
         )
 
         # 运行图
-        final_state = await self.graph.ainvoke({"state_queue": self.state_queue, "value": initial_state})
+        await self.graph.ainvoke({"state_queue": self.state_queue, "value": initial_state})
+        await self.state_queue.put(BackToFrontData(step=ExecutionState.FINISHED,state="finished",data=None))
 
     
 if __name__ == "__main__":

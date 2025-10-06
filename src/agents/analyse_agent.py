@@ -14,6 +14,7 @@ import asyncio
 
 from starlette.routing import Route
 from src.utils.log_utils import setup_logger
+from src.utils.tool_utils import handlerChunk
 from src.agents.reading_agent import ExtractedPapersData,KeyMethodology,ExtractedPaperData
 from autogen_agentchat.agents import AssistantAgent
 from autogen_agentchat.messages import BaseAgentEvent, BaseChatMessage, TextMessage,StructuredMessage
@@ -34,7 +35,7 @@ logger = setup_logger(__name__)
 class AnalyseAgent(BaseChatAgent):
     """基于AutoGen框架的论文分析智能体"""
     
-    def __init__(self, name: str = "analyse_agent"):
+    def __init__(self, name: str = "analyse_agent", state_queue: asyncio.Queue = None):
         super().__init__(name, "A simple agent that counts down.")
         """初始化论文分析系列智能体"""
         # 创建聚类智能体
@@ -45,6 +46,7 @@ class AnalyseAgent(BaseChatAgent):
         self.global_analyse_agent = GlobalanalyseAgent()
     
         self.model_client = create_default_client()
+        self.state_queue = state_queue
     
     @property
     def produced_message_types(self) -> Sequence[type[BaseChatMessage]]:
@@ -84,14 +86,30 @@ class AnalyseAgent(BaseChatAgent):
             AsyncGenerator[BaseAgentEvent | BaseChatMessage | Response, None]
         """
         # 1. 调用聚类智能体进行论文聚类
+        await self.state_queue.put(BackToFrontData(step=ExecutionState.ANALYZING,state="thinking",data="正在进行论文聚类分析\n"))
         cluster_results = await self.cluster_agent.run(message)
+        await self.state_queue.put(BackToFrontData(step=ExecutionState.ANALYZING,state="thinking",data=f"论文聚类分析完成，共形成 {len(cluster_results)} 个聚类\n"))
         
         # 2. 调用深度分析智能体分析每个聚类的论文
         deep_analysis_results = []
+        await self.state_queue.put(BackToFrontData(step=ExecutionState.ANALYZING,state="thinking",data="正在进行论文深度分析\n"))
         deep_analysis_results = await asyncio.gather(*[self.deep_analyse_agent.run(cluster) for cluster in cluster_results])
+        await self.state_queue.put(BackToFrontData(step=ExecutionState.ANALYZING,state="thinking",data="论文深度分析完成\n"))
         
         # 3. 调用全局分析智能体生成整体分析报告
-        global_analysis = await self.global_analyse_agent.run(deep_analysis_results)
+        await self.state_queue.put(BackToFrontData(step=ExecutionState.ANALYZING,state="thinking",data="等待全局分析\n"))
+        is_thinking = None
+        async for chunk in self.global_analyse_agent.run(deep_analysis_results):
+            if isinstance(chunk, Dict):
+                if not chunk.get("isSuccess", False):
+                    await self.state_queue.put(BackToFrontData(step=ExecutionState.ANALYZING,state="error",data=chunk.get("global_analyse", "Unknown error")))
+                    break
+                global_analysis = chunk
+                break
+            state,is_thinking = handlerChunk(is_thinking,chunk)
+            if state is None:
+                continue
+            await self.state_queue.put(BackToFrontData(step=ExecutionState.ANALYZING,state=state,data=chunk))
             
         # 返回分析结果
         # yield Response(
@@ -104,7 +122,7 @@ class AnalyseAgent(BaseChatAgent):
         return Response(
             chat_message=TextMessage(
                 content=json.dumps(global_analysis, ensure_ascii=False, indent=2),
-                source=self.name
+                 source=self.name
             )
         )
 
@@ -113,21 +131,14 @@ class AnalyseAgent(BaseChatAgent):
    
 async def analyse_node(state: State) -> State:
     """搜索论文节点"""
-    state_queue = None
     try:
         state_queue = state["state_queue"]
         current_state = state["value"]
         current_state.current_step = ExecutionState.ANALYZING
-        await state_queue.put(BackToFrontData(step=ExecutionState.ANALYZING,state="processing",data=None))
+        await state_queue.put(BackToFrontData(step=ExecutionState.ANALYZING,state="initializing",data=None))
         extracted_papers = current_state.extracted_data
-        extracted_papers = ExtractedPapersData(
-        papers=[
-        ExtractedPaperData(core_problem='尽管RAI、伦理AI和AI中的伦理问题的研究旨在提高AI的可信度，但此类工作仍可能带来意外的负面影响。', key_methodology=KeyMethodology(name='Impact statements', principle='主张采用类似医学和社会科学领域的影响力声明（impact statements）来识别、阐述和缓解AI研究对社会的潜在影响。', novelty='未明确声明'), datasets_used=['未提及具体数据集'], evaluation_metrics=['未提及具体评估指标'], main_results='主要提出AI研究同样需要刊登影响声明，以避免和评估潜在的不良后果，并通过跨领域比较强调其必要性与合理性。', limitations='未明确具体内容，但可能包含对现有影响声明应用模式的局限性分析', contributions=['We argue that researchers in RAI, ethical AI, and AI ethics can also cause unintended adverse consequences.', 'Highlighting the need for mechanisms to assess and mitigate the impact of RAI-related work.', 'Drawing parallels between impact statements in medical and social sciences and their potential use in AI research.']) ,
-        ExtractedPaperData(core_problem='Despite advancements in AI/ML, the field lacks a unified approach to ensuring confidence in model predictions and results.', key_methodology=KeyMethodology(name='Confident AI', principle='Confident AI is structured around four tenets: Repeatability, Believability, Sufficiency, and Adaptability, each addressing systemic issues in AI/ML.', novelty="We propose 'Confident AI'"), datasets_used=['Not explicitly mentioned'], evaluation_metrics=['None specified'], main_results='Not numerically stated as the paper focuses on framework definition rather than specific experiments or results.', limitations='Not explicitly mentioned', contributions=["Proposed 'Confident AI' as a framework for designing AI and ML systems.", 'Defined four basic tenets: Repeatability, Believability, Sufficiency, and Adaptability.', 'Utilized the tenets to explore fundamental issues in current AI/ML systems.', 'Provided an overall approach to building AI systems with algorithm and user confidence.'])
-           ]
-        )
 
-        analyse_agent = AnalyseAgent()
+        analyse_agent = AnalyseAgent(state_queue=state_queue)
         task = StructuredMessage(content=extracted_papers, source="User")
         # task = TextMessage(content=json.dumps(extracted_papers.model_dump(),ensure_ascii=False), source="User")
         response = await analyse_agent.run(task=task)
@@ -150,14 +161,15 @@ def main():
     asyncio.run(analyse_node(state))
 
 if __name__ == "__main__":
-    from src.core.state_models import PaperAgentState,NodeError
-    state_queue = asyncio.Queue()
-    initial_state = PaperAgentState(
-            user_request="帮我写一篇关于人工智能的调研报告",
-            max_papers=2,
-            error=NodeError(),
-            config={}  # 可以传入各种配置
-        )
-    state = {"state_queue": state_queue, "value": initial_state}
-    analyse_agent = AnalyseAgent()
-    main()
+    pass
+    # from src.core.state_models import PaperAgentState,NodeError
+    # state_queue = asyncio.Queue()
+    # initial_state = PaperAgentState(
+    #         user_request="帮我写一篇关于人工智能的调研报告",
+    #         max_papers=2,
+    #         error=NodeError(),
+    #         config={}  # 可以传入各种配置
+    #     )
+    # state = {"state_queue": state_queue, "value": initial_state}
+    # analyse_agent = AnalyseAgent()
+    # main()

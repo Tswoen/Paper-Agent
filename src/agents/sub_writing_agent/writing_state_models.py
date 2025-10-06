@@ -3,6 +3,7 @@ from pydantic import BaseModel
 from typing import List, Optional, Dict, Any, TypedDict
 from typing_extensions import Annotated
 from langgraph.graph.message import add_messages
+from asyncio import Queue
 
 
 class WritingStage(Enum):
@@ -20,6 +21,7 @@ class SectionState(BaseModel):
     completed: bool = False
 
 class WritingState(TypedDict):
+    state_queue: Queue
     user_request: str
     # 全局分析结果
     global_analysis: Optional[str] = None

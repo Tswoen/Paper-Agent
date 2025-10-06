@@ -12,16 +12,19 @@ class BackToFrontData(BaseModel):
 
 class ExecutionState(str, Enum):
     """工作流执行状态枚举"""
-    INITIALIZED = "initialized"
+    INITIALIZING = "initializing"
     SEARCHING = "searching"
     READING = "reading"
     PARSING = "parsing"
     EXTRACTING = "extracting"
     ANALYZING = "analyzing"
+    WRITING_DIRECTOR = "writing_director"
+    SECTION_WRITING = "section_writing"
     WRITING = "writing"
     REPORTING = "reporting"
     COMPLETED = "completed"
     FAILED = "failed"
+    FINISHED = "finished"
 
 class KeyMethodology(BaseModel):
     name: str  # 方法名称（如“Transformer-based Sentiment Classifier”）
@@ -70,7 +73,7 @@ class PaperAgentState(BaseModel):
     max_papers: int = Field(default=50, description="最大论文数量")
     
     # 执行状态
-    current_step: ExecutionState = Field(default=ExecutionState.INITIALIZED, description="当前执行步骤")
+    current_step: ExecutionState = Field(default=ExecutionState.INITIALIZING, description="当前执行步骤")
     error: Optional[NodeError] = Field(default=None, description="错误信息")
     
     # 数据流
