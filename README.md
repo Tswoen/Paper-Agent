@@ -10,7 +10,7 @@
 **📽️ 系统演示如下**
 
 <video width="800" controls muted>
-  <source src="./projectshow.mp4" type="video/mp4">
+  <source src="projectshow.mp4" type="video/mp4">
 </video>
 
 ## ✨ 核心特性
