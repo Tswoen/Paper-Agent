@@ -70,7 +70,6 @@ async def reading_node(state: State) -> State:
         
     current_state.extracted_data = extracted_papers
     await state_queue.put(BackToFrontData(step=ExecutionState.READING,state="completed",data=f"论文阅读完成，共阅读 {len(extracted_papers.papers)} 篇论文"))
-
     return {"value": current_state}
 
 

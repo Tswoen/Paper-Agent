@@ -89,7 +89,7 @@ class AnalyseAgent(BaseChatAgent):
         await self.state_queue.put(BackToFrontData(step=ExecutionState.ANALYZING,state="thinking",data="正在进行论文聚类分析\n"))
         cluster_results = await self.cluster_agent.run(message)
         await self.state_queue.put(BackToFrontData(step=ExecutionState.ANALYZING,state="thinking",data=f"论文聚类分析完成，共形成 {len(cluster_results)} 个聚类\n"))
-        
+
         # 2. 调用深度分析智能体分析每个聚类的论文
         deep_analysis_results = []
         await self.state_queue.put(BackToFrontData(step=ExecutionState.ANALYZING,state="thinking",data="正在进行论文深度分析\n"))
@@ -111,14 +111,6 @@ class AnalyseAgent(BaseChatAgent):
                 continue
             await self.state_queue.put(BackToFrontData(step=ExecutionState.ANALYZING,state=state,data=chunk))
             
-        # 返回分析结果
-        # yield Response(
-        #     chat_message=TextMessage(
-        #         content=json.dumps(global_analysis, ensure_ascii=False, indent=2),
-        #         source=self.name
-        #     ),
-        #     inner_messages=inner_messages
-        # )
         return Response(
             chat_message=TextMessage(
                 content=json.dumps(global_analysis, ensure_ascii=False, indent=2),

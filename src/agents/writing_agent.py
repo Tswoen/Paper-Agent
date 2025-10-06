@@ -78,7 +78,7 @@ async def writing_node(state: State) -> State:
         writingWorkFlow = WritingWorkflow()
         writing_state = await writingWorkFlow.workflow.ainvoke(writing_state)
         logger.info(f"writing_state: {writing_state}")
-        current_state.writted_sections = writing_state["writted_sections"]
+        current_state.writted_sections = [section.content for section in writing_state["writted_sections"]]
         # await state_queue.put(BackToFrontData(step=ExecutionState.WRITING,state="completed",data=writing_state["writted_sections"]))
         return {"value": current_state}
         

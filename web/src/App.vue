@@ -112,16 +112,17 @@ const submitReviewInput = async () => {
   }
   try {
     // const res = await fetch("/send_input", {
-    const res = await fetch("/send_input", {
+    const res = await fetch("http://localhost:8000/send_input", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ input: userReviewInput.value }),
     });
+    console.log("提交审核输出:", res.status);
     if (res.status != 200) {
       alert( "提交失败");
       return;
     }
-    currentActiveStep.value.content = userReviewInput.value;
+    currentActiveStep.value.content = userReviewInput.value + "\n";
     isReviewing.value = false;
   } catch (err) {
     console.error(err);

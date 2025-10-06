@@ -35,7 +35,7 @@ class PaperSearcher:
         返回:
             论文列表，每项包含论文的详细信息
         """
-        querys = ['artificial intelligence', 'AI', 'llm', 'machine learning', 'deep learning']
+        # querys = ['artificial intelligence', 'AI', 'llm', 'machine learning', 'deep learning']
         try:
             # 构建搜索查询
             search_query = ""
@@ -55,14 +55,18 @@ class PaperSearcher:
             logger.info(f"论文搜索查询条件: {search_query}")
 
             # 创建搜索对象
-            search = arxiv.Search(
-                query=search_query,
-                max_results=max_results,
-                sort_by=sort_by,
-                sort_order=sort_order
-            )
+            try:
+                search = arxiv.Search(
+                    query=search_query,
+                    max_results=max_results,
+                    sort_by=sort_by,
+                    sort_order=sort_order
+                )
+            except Exception as e:
+                logger.error(f"创建arxiv搜索对象失败: {str(e)}")
+                return []
             
-            logger.info(f"论文搜索结果为：{search.results()}")
+            # logger.info(f"论文搜索结果为：{search.results()}")
             # 执行搜索并解析结果
             # 使用新方法格式化论文列表
             papers = self.format_papers_list(search.results())

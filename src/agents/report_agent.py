@@ -25,9 +25,8 @@ report_agent = AssistantAgent(
 
 async def report_node(state: State) -> State:
     """报告生成节点"""
-    state_queue = None
+    state_queue = state["state_queue"]
     try:
-        state_queue = state["state_queue"]
         current_state = state["value"]
         current_state.current_step = ExecutionState.REPORTING
         await state_queue.put(BackToFrontData(step=ExecutionState.REPORTING,state="initializing",data=None))
