@@ -22,6 +22,8 @@ async def parallel_writing_node(state: WritingState) -> Dict[str, Any]:
             """
             is_thinking = False
             cur_source = "user"
+            # 过滤掉非 writing_agent 的消息，保持界面整洁
+            agent_sources = {"writing_agent", "retrieval_agent"}
             try:
                 task_group = create_writing_group()
                 task_group.reset()
@@ -35,7 +37,8 @@ async def parallel_writing_node(state: WritingState) -> Dict[str, Any]:
                         # state["sections"][task["index"]] = chunk.content
                         state["writted_sections"][task["index"]].content = chunk.content
                         continue
-                    if cur_source != chunk.source:
+                    # if cur_source != chunk.source:
+                    if cur_source != chunk.source and chunk.source in agent_sources:
                         cur_source = chunk.source
                         # self.name未定义，消息来源应来自 chunk.source ，并维持前端展示用的 1-based step 编号，确保显示一致
                         # str1,str2,str3 = "="*40, self.name, "="*40
@@ -58,6 +61,8 @@ async def parallel_writing_node(state: WritingState) -> Dict[str, Any]:
                         # await state_queue.put(BackToFrontData(step=ExecutionState.SECTION_WRITING+"_"+str(task["index"]),state="generating",data=chunk.content))
                         await state_queue.put(BackToFrontData(step=ExecutionState.SECTION_WRITING+"_"+str(task["index"] + 1),state="generating",data=chunk.content))
 
+                # 补发completed结束撰写部分
+                await state_queue.put(BackToFrontData(step=ExecutionState.SECTION_WRITING+"_"+str(task["index"] + 1),state="completed",data=None))
             except Exception as e:
                 # 此处应该有重试机制
                 # 异常上报使用 1-based step，避免 UI 误标分段编号。

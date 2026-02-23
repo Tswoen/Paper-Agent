@@ -102,6 +102,23 @@ class Config:
                         self._config[provider]['api_key'] = self._config[api_key_ref]
         except Exception as e:
             print(f"警告: 解析配置引用时出错: {e}")
+        
+        # 解析相对路径为绝对路径（相对于项目根目录）
+        self._resolve_relative_paths()
+    
+    def _resolve_relative_paths(self) -> None:
+        """将配置中的相对路径转换为绝对路径（相对于项目根目录）"""
+        project_root = Path(__file__).parent.parent.parent
+        
+        path_keys = ['SAVE_DIR']
+        
+        for key in path_keys:
+            if key in self._config and self._config[key]:
+                path_value = str(self._config[key])
+                if not os.path.isabs(path_value):
+                    resolved_path = os.path.abspath(os.path.join(project_root, path_value))
+                    self._config[key] = resolved_path
+                    logger.info(f"将相对路径 '{path_value}' 解析为绝对路径 '{resolved_path}'")
     
     def get(self, key: str, default: Any = None) -> Any:
         """获取配置值，支持点表示法访问嵌套配置

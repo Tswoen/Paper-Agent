@@ -1,6 +1,6 @@
 # 系统参数配置文件
 
-SAVE_DIR: "D:/myproject/pyProject/LangChainProject/Paper-Agent/data"
+SAVE_DIR: "data"
 # 知识库配置
 KB_TYPE: "chroma"
 enable_reranker: False
