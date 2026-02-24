@@ -157,7 +157,7 @@ async def reading_node(state: State) -> State:
     successful_papers = []
     for i, result in enumerate(results):
         raw_content = result.messages[-1].content
-        logger.info(f"Reading Agent Raw Output: {raw_content}") # 打印原始输出
+        # logger.info(f"Reading Agent Raw Output: {raw_content}") # 打印原始输出
         
         if isinstance(raw_content, ExtractedPaperData):
             extracted_papers.papers.append(raw_content)
