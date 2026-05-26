@@ -133,6 +133,34 @@ const parseMarkdown = (content) => {
   return DOMPurify.sanitize(html);
 };
 
+const scrollToLatest = () => {
+  nextTick(() => {
+    const container = document.getElementById('steps-container');
+    if (container) {
+      container.scrollTop = container.scrollHeight;
+    }
+  });
+};
+
+const addStep = (title, content = '', isError = false) => {
+  const stepElement = {
+    step: isError ? 'error' : 'message',
+    title,
+    thinking: '',
+    content,
+    isProcessing: false,
+    isError,
+    timestamp: new Date().toISOString(),
+    show: false,
+    showThinking: false,
+  };
+  steps.value.push(stepElement);
+  nextTick(() => {
+    stepElement.show = true;
+    scrollToLatest();
+  });
+};
+
 
 // === 提交人工审核输入 ===
 const submitReviewInput = async () => {
@@ -141,8 +169,7 @@ const submitReviewInput = async () => {
     return;
   }
   try {
-    // const res = await fetch("/send_input", {
-    const res = await fetch("http://localhost:8000/send_input", {
+    const res = await fetch("/send_input", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ input: userReviewInput.value }),
@@ -223,8 +250,8 @@ const submitRequest = () => {
     const stepElement = {
       step,
       title: `${getStepName(step)}阶段正在初始化`,
-      thinking: data?.thinking || '',
-      content: data?.content || '',
+      thinking: typeof data === 'string' ? '' : data?.thinking || '',
+      content: typeof data === 'string' ? data : data?.content || '',
       isProcessing: false, // 用于渲染加载动画（圈圈）
       isError: false,
       timestamp: new Date().toISOString(),
@@ -321,6 +348,8 @@ const submitRequest = () => {
     }
     if (!currentActiveStep.value || currentActiveStep.value.step !== step) {
       console.warn(`No active step found for error step: ${step}`);
+      addStep(`${getStepName(step)}处理异常`, data || '流程处理异常', true);
+      finishProcessing();
       return;
     }
     // 更新步骤内容（关闭加载动画，显示错误信息）
@@ -335,6 +364,7 @@ const submitRequest = () => {
     
     currentActiveStep.value = null; // 清除活跃状态
     autoScroll();
+    finishProcessing();
   };
 
   // 处理「所有阶段完成」状态
@@ -369,6 +399,7 @@ const submitRequest = () => {
       writing_director: '撰写指导',
       section_writing: '撰写小节',
       reporting: '报告',
+      start: '流程',
 
       // 扩展其他阶段
     };

@@ -207,23 +207,28 @@ Paper-Agents/
 
 1. **环境准备**
    - Python 3.12+
-   - 项目使用poetry 管理虚拟环境
-   - 安装依赖：`poetry install`
+   - Node.js 与 npm
+   - 安装后端依赖：`poetry install`，或在已配置好的 Python 3.12 环境中安装依赖
+   - 安装前端依赖：`cd web && npm install`
 
 2. **配置环境**
-   - 复制 `.env.example` 为 `.env` 并填写您的API密钥
+   - 复制 `example.env` 为 `.env` 并填写您的API密钥
    - 修改 `models.yaml` 中的参数
 
-3. **运行系统**
-   ```bash
-   poetry run python main.py
+3. **一键启动开发服务（Windows PowerShell）**
+   ```powershell
+   .\start-dev.ps1
    ```
-
-4. **Web界面**
-   ```bash
-   cd web && npm install && npm run dev
-   ```
+   - 脚本会先启动后端，再启动前端
+   - 后端默认使用 8000 端口；如果 8000 被占用，会自动尝试 8001、8002 等后续端口
    - 访问 http://localhost:5173 使用Web界面
+
+4. **手动启动（可选）**
+   ```powershell
+   python main.py
+   cd web
+   npm.cmd run dev
+   ```
 
 
 ## 配置说明

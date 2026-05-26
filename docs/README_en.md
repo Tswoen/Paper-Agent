@@ -279,23 +279,28 @@ Paper-Agents/
 
 1. **Environment Preparation**
    - Python 3.12+
-   - The project uses poetry to manage virtual environments
-   - Install dependencies: `poetry install`
+   - Node.js and npm
+   - Install backend dependencies with `poetry install`, or install dependencies in an existing Python 3.12 environment
+   - Install frontend dependencies: `cd web && npm install`
 
 2. **Configure Environment**
-   - Copy `.env.example` to `.env` and fill in your API key
+   - Copy `example.env` to `.env` and fill in your API key
    - Modify parameters in `models.yaml`
 
-3. **Run System**
-   ```bash
-   poetry run python main.py
+3. **Start Dev Services with One Command (Windows PowerShell)**
+   ```powershell
+   .\start-dev.ps1
    ```
-
-4. **Web Interface**
-   ```bash
-   cd web && npm install && npm run dev
-   ```
+   - The script starts the backend first, then the frontend
+   - The backend prefers port 8000; if it is occupied, it automatically tries 8001, 8002, and so on
    - Access http://localhost:5173 to use the web interface
+
+4. **Manual Startup (Optional)**
+   ```powershell
+   python main.py
+   cd web
+   npm.cmd run dev
+   ```
 
 ## Configuration Guide
 
