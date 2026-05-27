@@ -1,4 +1,5 @@
 <!-- <h1 align="center">基于多智能体和工作流的大模型的调研报告生成系统</h1> -->
+
 <h1 align="center">Paper-Agent: 智能学术调研报告生成系统</h1>
 
 <p align="center">
@@ -9,19 +10,22 @@
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/)
+
 ## 📖 简介
 
 **Paper-Agent** 是一个面向科研人员的自动化调研报告生成系统，目标在于解决学术领域论文调研“耗时长、分析浅”的痛点。它不是简单的文献摘要工具，而是一个具备“检索-阅读-分析-综合-报告”全流程能力的智能领域研究助理，能生成有深度、有见解的领域综述报告。
+
+（趁这个暑假我将对项目进行全面重构与迭代维护，集中修复现存问题、优化整体体验。欢迎大家积极提交使用反馈、功能建议与问题 BUG，一起把项目打磨得更加完善！）
 
 ## 📸 项目预览
 
 <summary>点击放大截图查看</summary>
 
-| 截图1 | 截图2 | 截图3 |
-|-------|-------|-------|
-| <img width="400" src="https://github.com/user-attachments/assets/b3617fee-ab47-4aac-9be7-0cb543fd706a" /> | <img width="400" src="https://github.com/user-attachments/assets/a27882fb-3bd8-4f44-b18f-8161bb0d44a6" /> | <img width="400" src="https://github.com/user-attachments/assets/18f2f0bc-6d2c-4b5f-a2b9-a87d16fcd6be" /> |
-| 截图4 | 截图5 | 截图6 |
-| <img width="400" src="https://github.com/user-attachments/assets/21e5dc93-1c8b-46e3-b33c-f359d94cf2db" /> | <img width="400" src="https://github.com/user-attachments/assets/1e21162d-e083-40bc-93de-08302f28b08b" /> | <img width="400" src="https://github.com/user-attachments/assets/77738e3d-7d80-4d8c-9ea4-61c45e3db5d6" /> |
+| 截图1                                                                                                         | 截图2                                                                                                         | 截图3                                                                                                         |
+| ------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `<img width="400" src="https://github.com/user-attachments/assets/b3617fee-ab47-4aac-9be7-0cb543fd706a" />` | `<img width="400" src="https://github.com/user-attachments/assets/a27882fb-3bd8-4f44-b18f-8161bb0d44a6" />` | `<img width="400" src="https://github.com/user-attachments/assets/18f2f0bc-6d2c-4b5f-a2b9-a87d16fcd6be" />` |
+| 截图4                                                                                                         | 截图5                                                                                                         | 截图6                                                                                                         |
+| `<img width="400" src="https://github.com/user-attachments/assets/21e5dc93-1c8b-46e3-b33c-f359d94cf2db" />` | `<img width="400" src="https://github.com/user-attachments/assets/1e21162d-e083-40bc-93de-08302f28b08b" />` | `<img width="400" src="https://github.com/user-attachments/assets/77738e3d-7d80-4d8c-9ea4-61c45e3db5d6" />` |
 
 </div>
 
@@ -47,27 +51,28 @@ Paper-Agent 采用模块化设计，基于 LangGraph 构建完整的工作流，
 ### 核心节点
 
 1. **search_agent_node（论文搜索节点）**
+
    - 使用 LLM 将用户自然语言需求转换为结构化查询条件
    - 通过用户代理（userProxyAgent）进行人工审核
    - 调用 PaperSearcher 从 arXiv 检索相关论文
    - 支持查询条件：querys、start_date、end_date
-
 2. **reading_agent_node（论文阅读节点）**
+
    - 并行处理多篇论文，提取每篇论文的核心信息
    - 按照预定义模型提取：核心问题、关键方法、数据集、评估指标、主要结果、局限性、贡献
    - 将提取结果存入向量数据库，支持后续检索增强
-
 3. **analyse_agent_node（论文分析节点）**
+
    - **PaperClusterAgent**：使用嵌入向量和 KMeans 算法进行论文聚类，自动确定聚类数量
    - **DeepAnalyseAgent**：对每个聚类进行深入分析，包括技术路线、方法对比、应用领域等
    - **GlobalanalyseAgent**：汇总所有聚类分析结果，生成包含六大模块的全局分析报告
-
 4. **writing_agent_node（写作节点）**
+
    - **writing_director_node**：根据用户需求和全局分析，生成报告大纲并拆分为写作子任务
    - **parallel_writing_node**：并行执行所有写作子任务，使用多智能体协作完成各章节写作
    - 支持检索增强写作和质量审查
-
 5. **report_agent_node（报告生成节点）**
+
    - 汇总所有写作章节，生成完整的调研报告
    - 使用 Markdown 格式输出，自动补充过渡语句
    - 流式输出，实时推送生成进度
@@ -75,11 +80,13 @@ Paper-Agent 采用模块化设计，基于 LangGraph 构建完整的工作流，
 ### 子智能体架构
 
 **写作模块子智能体**
+
 - **writing_agent**：负责根据子任务撰写章节内容
 - **retrieval_agent**：从向量数据库检索相关内容，补充写作所需资料
 - **review_agent**：审查写作内容质量，通过后输出 "APPROVE" 终止子任务
 
 **分析模块子智能体**
+
 - **PaperClusterAgent**：论文聚类分析，生成主题描述和关键词
 - **DeepAnalyseAgent**：单个聚类深度分析
 - **GlobalanalyseAgent**：全局分析，生成六大模块报告
@@ -87,21 +94,20 @@ Paper-Agent 采用模块化设计，基于 LangGraph 构建完整的工作流，
 ### 工作流架构
 
 - **主控协调模块（orchestrator）**
+
   - 基于 LangGraph 构建完整工作流
   - 协调各节点有序执行
   - 管理全局状态与错误处理
   - 通过 SSE 实时推送任务进度到前端
-
 - **状态管理**
+
   - 使用 State 管理全局状态
   - 通过队列实现前后端通信
   - 支持实时状态推送
 
-
 ## 工作流程
 
 系统基于 LangGraph 构建完整的工作流，通过六个核心节点协同完成调研报告生成：
-
 
 ### 完整流程
 
@@ -206,25 +212,26 @@ Paper-Agents/
 ## 🚀 快速开始
 
 1. **环境准备**
+
    - Python 3.12+
    - 项目使用poetry 管理虚拟环境
    - 安装依赖：`poetry install`
-
 2. **配置环境**
+
    - 复制 `.env.example` 为 `.env` 并填写您的API密钥
    - 修改 `models.yaml` 中的参数
-
 3. **运行系统**
+
    ```bash
    poetry run python main.py
    ```
-
 4. **Web界面**
+
    ```bash
    cd web && npm install && npm run dev
    ```
-   - 访问 http://localhost:5173 使用Web界面
 
+   - 访问 http://localhost:5173 使用Web界面
 
 ## 配置说明
 
@@ -243,15 +250,18 @@ OPENAI_API_KEY=your_openai_api_key
 系统配置文件位于 `models.yaml`，可根据需求调整以下参数：
 
 **可选模型提供商**
+
 - OpenAI
 - 其他兼容的LLM提供商
 
 **项目默认使用的模型和嵌入模型配置**
+
 - 默认LLM模型
 - 默认嵌入模型
 - 模型参数（temperature、max_tokens等）
 
 **项目模块具体使用的模型和嵌入模型配置（可选）**
+
 - search_agent：搜索专用模型
 - reading_agent：阅读专用模型
 - analyse_agent：分析专用模型
@@ -260,6 +270,7 @@ OPENAI_API_KEY=your_openai_api_key
 - 各模块的嵌入模型配置
 
 **各个模型提供商的API密钥和基础URL**
+
 - API密钥配置
 - 基础URL配置
 - 其他连接参数
@@ -299,6 +310,7 @@ openai:
 ## 技术栈
 
 ### 后端
+
 - **编程语言**: Python 3.12+
 - **智能体框架**:
   - AutoGen：多智能体协作框架
@@ -316,6 +328,7 @@ openai:
 - **日志系统**: Python标准库logging模块 (自定义配置)
 
 ### 前端
+
 - **框架**: Vue.js 3.4+
 - **构建工具**: Vite 5.0+
 - **开发工具**: @vitejs/plugin-vue
@@ -337,13 +350,13 @@ openai:
 ## 联系方式
 
 如有任何问题或建议，请通过以下方式反馈：
+
 - **GitHub Issues**：请在项目仓库中提交Issue，这是最推荐的问题反馈方式
 - 项目主页：https://github.com/Tswoen/paper-agent
 
 ---
 
 ⭐ 如果这个项目对你有帮助，请给我们点个星支持一下！
-
 
 ## Star 历史
 
