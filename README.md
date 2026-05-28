@@ -15,7 +15,7 @@
 
 **Paper-Agent** 是一个面向科研人员的自动化调研报告生成系统，目标在于解决学术领域论文调研“耗时长、分析浅”的痛点。它不是简单的文献摘要工具，而是一个具备“检索-阅读-分析-综合-报告”全流程能力的智能领域研究助理，能生成有深度、有见解的领域综述报告。
 
-（趁这个暑假我将对项目进行全面重构与迭代维护，集中修复现存问题、优化整体体验。欢迎大家积极提交使用反馈、功能建议与问题 BUG，一起把项目打磨得更加完善！）
+（趁这个暑假我将对项目进行全面重构与迭代维护，集中修复现存问题、优化整体体验。欢迎大家积极提交使用反馈、功能建议与问题 BUG，一起把项目打磨得更加完善！也欢迎感兴趣的伙伴加入社群QQ（340020097），一同交流协作、参与项目建设。）
 
 ## 📸 项目预览
 
@@ -23,9 +23,9 @@
 
 | 截图1                                                                                                         | 截图2                                                                                                         | 截图3                                                                                                         |
 | ------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| `<img width="400" src="https://github.com/user-attachments/assets/b3617fee-ab47-4aac-9be7-0cb543fd706a" />` | `<img width="400" src="https://github.com/user-attachments/assets/a27882fb-3bd8-4f44-b18f-8161bb0d44a6" />` | `<img width="400" src="https://github.com/user-attachments/assets/18f2f0bc-6d2c-4b5f-a2b9-a87d16fcd6be" />` |
+|<img width="400" src="https://github.com/user-attachments/assets/b3617fee-ab47-4aac-9be7-0cb543fd706a" />| <img width="400" src="https://github.com/user-attachments/assets/a27882fb-3bd8-4f44-b18f-8161bb0d44a6" /> | <img width="400" src="https://github.com/user-attachments/assets/18f2f0bc-6d2c-4b5f-a2b9-a87d16fcd6be" /> |
 | 截图4                                                                                                         | 截图5                                                                                                         | 截图6                                                                                                         |
-| `<img width="400" src="https://github.com/user-attachments/assets/21e5dc93-1c8b-46e3-b33c-f359d94cf2db" />` | `<img width="400" src="https://github.com/user-attachments/assets/1e21162d-e083-40bc-93de-08302f28b08b" />` | `<img width="400" src="https://github.com/user-attachments/assets/77738e3d-7d80-4d8c-9ea4-61c45e3db5d6" />` |
+| <img width="400" src="https://github.com/user-attachments/assets/21e5dc93-1c8b-46e3-b33c-f359d94cf2db" /> | <img width="400" src="https://github.com/user-attachments/assets/1e21162d-e083-40bc-93de-08302f28b08b" /> | <img width="400" src="https://github.com/user-attachments/assets/77738e3d-7d80-4d8c-9ea4-61c45e3db5d6" /> |
 
 </div>
 
