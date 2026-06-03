@@ -1,5 +1,12 @@
 <template>
-  <div class="config-page">
+  <div
+    class="config-page"
+    @focusin="handleTooltipEnter"
+    @focusout="hideTooltip"
+    @mouseleave="hideTooltip"
+    @mouseover="handleTooltipEnter"
+    @scroll="hideTooltip"
+  >
     <header class="config-hero">
       <div class="hero-copy">
         <p class="eyebrow">Runtime Configuration</p>
@@ -424,6 +431,19 @@
     <div v-if="toast.show" class="toast" :class="toast.type">
       {{ toast.message }}
     </div>
+
+    <div
+      v-if="activeTooltip.text"
+      class="global-tooltip"
+      :style="{
+        left: `${activeTooltip.left}px`,
+        top: `${activeTooltip.top}px`,
+        transform: activeTooltip.transform
+      }"
+      role="tooltip"
+    >
+      {{ activeTooltip.text }}
+    </div>
   </div>
 </template>
 
@@ -449,6 +469,12 @@ const agentModels = ref([])
 const embeddingModels = ref([])
 const visibleProviderKeys = reactive({})
 const testResults = reactive({})
+const activeTooltip = reactive({
+  text: '',
+  left: 0,
+  top: 0,
+  transform: 'translate(-50%, -100%)'
+})
 const toast = ref({
   show: false,
   message: '',
@@ -749,6 +775,74 @@ const getErrorMessage = (error, fallback) => {
   if (detail?.message) return detail.message
   if (error?.response?.data?.message) return error.response.data.message
   return fallback
+}
+
+const handleTooltipEnter = (event) => {
+  const target = event.target
+  if (!(target instanceof Element)) {
+    hideTooltip()
+    return
+  }
+
+  const tooltipTarget = getTooltipTarget(target)
+  if (!tooltipTarget) {
+    if (event.type === 'mouseover') {
+      hideTooltip()
+    }
+    return
+  }
+
+  showTooltip(tooltipTarget.trigger, tooltipTarget.text)
+}
+
+const getTooltipTarget = (target) => {
+  const hintButton = target.closest('.hint-button')
+  if (hintButton instanceof HTMLElement) {
+    const text = hintButton.dataset.tooltip
+    return text ? { trigger: hintButton, text } : null
+  }
+
+  if (!target.matches('input, select, textarea')) {
+    return null
+  }
+
+  const field = target.closest('.field')
+  const fieldHint = field?.querySelector('.hint-button')
+  if (fieldHint instanceof HTMLElement && fieldHint.dataset.tooltip) {
+    return { trigger: target, text: fieldHint.dataset.tooltip }
+  }
+
+  const cell = target.closest('td')
+  const table = target.closest('table')
+  if (cell instanceof HTMLTableCellElement && table) {
+    const header = table.querySelectorAll('thead th')[cell.cellIndex]
+    const tableHint = header?.querySelector('.hint-button')
+    if (tableHint instanceof HTMLElement && tableHint.dataset.tooltip) {
+      return { trigger: target, text: tableHint.dataset.tooltip }
+    }
+  }
+
+  return null
+}
+
+const showTooltip = (trigger, text) => {
+  const rect = trigger.getBoundingClientRect()
+  const estimatedWidth = Math.min(320, Math.max(220, window.innerWidth - 32))
+  const center = rect.left + rect.width / 2
+  const left = Math.min(
+    Math.max(center, estimatedWidth / 2 + 12),
+    window.innerWidth - estimatedWidth / 2 - 12
+  )
+
+  const shouldShowBelow = rect.top < 84
+  activeTooltip.text = text
+  activeTooltip.left = left
+  activeTooltip.top = shouldShowBelow ? rect.bottom + 10 : rect.top - 10
+  activeTooltip.transform = shouldShowBelow ? 'translate(-50%, 0)' : 'translate(-50%, -100%)'
+}
+
+const hideTooltip = () => {
+  activeTooltip.text = ''
 }
 
 const showToast = (message, type = 'success') => {
@@ -1403,7 +1497,6 @@ select:focus {
 .hint-button {
   display: inline-grid;
   place-items: center;
-  position: relative;
   width: 19px;
   height: 19px;
   border: 1px solid var(--pa-border);
@@ -1415,35 +1508,10 @@ select:focus {
   cursor: help;
 }
 
-.hint-button::after {
-  position: absolute;
-  left: 50%;
-  bottom: calc(100% + 8px);
-  z-index: 30;
-  width: max-content;
-  max-width: 260px;
-  padding: 8px 10px;
-  border: 1px solid var(--pa-border);
-  border-radius: 8px;
-  background: var(--pa-text);
-  color: var(--pa-surface);
-  box-shadow: var(--pa-shadow);
-  content: attr(data-tooltip);
-  font-size: 0.76rem;
-  font-weight: 700;
-  line-height: 1.45;
-  opacity: 0;
-  pointer-events: none;
-  text-align: left;
-  transform: translate(-50%, 4px);
-  transition: opacity 0.15s ease, transform 0.15s ease;
-  white-space: normal;
-}
-
-.hint-button:hover::after,
-.hint-button:focus-visible::after {
-  opacity: 1;
-  transform: translate(-50%, 0);
+.hint-button:hover,
+.hint-button:focus-visible {
+  border-color: var(--pa-primary);
+  color: var(--pa-primary);
 }
 
 .test-result {
@@ -1478,6 +1546,25 @@ select:focus {
   flex: 0 0 auto;
   color: currentColor;
   opacity: 0.8;
+}
+
+.global-tooltip {
+  position: fixed;
+  z-index: 10000;
+  width: max-content;
+  max-width: min(320px, calc(100vw - 24px));
+  padding: 9px 11px;
+  border: 1px solid color-mix(in srgb, var(--pa-text) 12%, transparent);
+  border-radius: 9px;
+  background: var(--pa-text);
+  color: var(--pa-surface);
+  box-shadow: 0 14px 36px rgba(15, 23, 42, 0.22);
+  font-size: 0.78rem;
+  font-weight: 750;
+  line-height: 1.5;
+  pointer-events: none;
+  text-align: left;
+  white-space: normal;
 }
 
 .toast {
