@@ -14,28 +14,11 @@
         <button class="secondary-button" type="button" :disabled="isLoading" @click="loadSettings">
           {{ isLoading ? '加载中' : '重新加载' }}
         </button>
-        <button v-if="draftMeta" class="secondary-button" type="button" @click="restoreDraft">
-          恢复草稿
-        </button>
-        <button class="secondary-button" type="button" :disabled="isLoading" @click="saveDraft">
-          保存草稿
-        </button>
         <button class="primary-button" type="button" :disabled="isSaving || isLoading" @click="saveSettings">
           {{ isSaving ? '保存中' : '保存配置' }}
         </button>
       </div>
     </header>
-
-    <section v-if="draftMeta" class="draft-banner">
-      <div>
-        <strong>检测到本地草稿</strong>
-        <span>保存于 {{ formatDate(draftMeta.savedAt) }}，可恢复到当前表单继续编辑。</span>
-      </div>
-      <div class="draft-actions">
-        <button type="button" @click="restoreDraft">恢复</button>
-        <button type="button" @click="clearDraft">忽略</button>
-      </div>
-    </section>
 
     <section v-if="isLoading" class="center-state">
       <div class="spinner"></div>
@@ -452,8 +435,6 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { configApi } from '../api/config'
 
-const DRAFT_KEY = 'paper-agent-model-settings-draft'
-
 const fallbackProviderTypes = [
   { value: 'openai', label: 'OpenAI', default_base_url: 'https://api.openai.com/v1' },
   { value: 'siliconflow', label: 'SiliconFlow', default_base_url: 'https://api.siliconflow.cn/v1' },
@@ -471,7 +452,6 @@ const providerTypes = ref([])
 const defaultModels = ref([])
 const agentModels = ref([])
 const embeddingModels = ref([])
-const draftMeta = ref(null)
 const visibleProviderKeys = reactive({})
 const testResults = reactive({})
 const toast = ref({
@@ -712,76 +692,6 @@ const buildPayload = () => ({
   embedding_models: embeddingModels.value.map(toModelPayload)
 })
 
-const saveDraft = () => {
-  try {
-    const draft = {
-      savedAt: new Date().toISOString(),
-      settings: buildPayload()
-    }
-    localStorage.setItem(DRAFT_KEY, JSON.stringify(draft))
-    draftMeta.value = {
-      savedAt: draft.savedAt
-    }
-    showToast('草稿已保存到本地', 'success')
-  } catch (error) {
-    console.error('保存草稿失败:', error)
-    showToast('保存草稿失败，请检查浏览器存储权限', 'error')
-  }
-}
-
-const restoreDraft = () => {
-  const draft = readDraft()
-  if (!draft) {
-    showToast('没有可恢复的草稿', 'error')
-    return
-  }
-
-  providers.value = normalizeProviders(draft.settings.providers || [])
-  ensureSelectedProvider()
-  mergeModelPayload(defaultModels.value, draft.settings.default_models || [])
-  mergeModelPayload(agentModels.value, draft.settings.agent_models || [])
-  mergeModelPayload(embeddingModels.value, draft.settings.embedding_models || [])
-  clearTestResults()
-  showToast('已恢复本地草稿', 'success')
-}
-
-const clearDraft = () => {
-  localStorage.removeItem(DRAFT_KEY)
-  draftMeta.value = null
-  showToast('已忽略本地草稿', 'success')
-}
-
-const readDraft = () => {
-  try {
-    const rawDraft = localStorage.getItem(DRAFT_KEY)
-    if (!rawDraft) return null
-    return JSON.parse(rawDraft)
-  } catch (error) {
-    console.error('读取草稿失败:', error)
-    localStorage.removeItem(DRAFT_KEY)
-    draftMeta.value = null
-    return null
-  }
-}
-
-const refreshDraftMeta = () => {
-  const draft = readDraft()
-  draftMeta.value = draft?.savedAt ? { savedAt: draft.savedAt } : null
-}
-
-const mergeModelPayload = (targetItems, payloadItems) => {
-  const payloadByKey = new Map(payloadItems.map(item => [item.key, item]))
-  targetItems.forEach(item => {
-    const saved = payloadByKey.get(item.config.key)
-    if (!saved) return
-    item.config.provider = saved.provider || item.config.provider
-    item.config.model = saved.model || item.config.model
-    if (item.kind === 'embedding') {
-      item.config.dimension = normalizeDimension(saved.dimension)
-    }
-  })
-}
-
 const saveSettings = async () => {
   isSaving.value = true
   try {
@@ -859,19 +769,7 @@ const showToast = (message, type = 'success') => {
   }, 2600)
 }
 
-const formatDate = (dateString) => {
-  if (!dateString) return '未知时间'
-  return new Date(dateString).toLocaleString('zh-CN', {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit'
-  })
-}
-
 onMounted(async () => {
-  refreshDraftMeta()
   await loadSettings()
 })
 </script>
@@ -890,7 +788,6 @@ onMounted(async () => {
 
 .config-hero,
 .config-section,
-.draft-banner,
 .center-state {
   border: 1px solid var(--pa-border);
   border-radius: 12px;
@@ -957,8 +854,7 @@ onMounted(async () => {
   font-weight: 800;
 }
 
-.hero-actions,
-.draft-actions {
+.hero-actions {
   display: flex;
   flex-wrap: wrap;
   justify-content: flex-end;
@@ -969,7 +865,6 @@ onMounted(async () => {
 .secondary-button,
 .danger-button,
 .test-button,
-.draft-actions button,
 .password-field button {
   min-height: 36px;
   border-radius: 8px;
@@ -987,7 +882,6 @@ onMounted(async () => {
 
 .secondary-button,
 .test-button,
-.draft-actions button,
 .password-field button {
   padding: 0 12px;
   border: 1px solid var(--pa-border);
@@ -1012,33 +906,9 @@ onMounted(async () => {
 
 .secondary-button:hover,
 .test-button:hover,
-.draft-actions button:hover,
 .password-field button:hover {
   border-color: var(--pa-border-strong);
   color: var(--pa-text);
-}
-
-.draft-banner {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 14px;
-  margin-bottom: 14px;
-  padding: 13px 16px;
-}
-
-.draft-banner div:first-child {
-  display: grid;
-  gap: 3px;
-}
-
-.draft-banner strong {
-  color: var(--pa-warning);
-}
-
-.draft-banner span {
-  color: var(--pa-text-muted);
-  font-size: 0.86rem;
 }
 
 .center-state {
@@ -1659,19 +1529,16 @@ select:focus {
 
 @media (max-width: 900px) {
   .config-hero,
-  .section-header,
-  .draft-banner {
+  .section-header {
     align-items: stretch;
     flex-direction: column;
   }
 
-  .hero-actions,
-  .draft-actions {
+  .hero-actions {
     justify-content: stretch;
   }
 
   .hero-actions button,
-  .draft-actions button,
   .section-header .primary-button {
     width: 100%;
   }

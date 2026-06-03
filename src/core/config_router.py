@@ -397,7 +397,7 @@ async def save_model_settings(payload: ModelSettingsPayload):
     config.reload()
     logger.info("模型配置已通过配置页面保存并重新加载")
     return {
-        "message": "模型配置已保存",
+        "message": "模型配置已写入 models.yaml，并已重新加载运行时配置",
         "settings": _settings_response(next_config),
     }
 
