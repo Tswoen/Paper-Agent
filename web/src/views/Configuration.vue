@@ -55,105 +55,141 @@
           </button>
         </header>
 
-        <div class="provider-table-card">
-          <div class="provider-table-scroll">
-            <table class="provider-table">
-              <thead>
-                <tr>
-                  <th scope="col">
-                    Provider ID
-                    <button
-                      class="hint-button"
-                      type="button"
-                      data-tooltip="Provider ID 会写入 YAML 顶层键，例如 siliconflow 或 ark，也会被模型配置引用。"
-                      aria-label="Provider ID 说明"
-                    >
-                      ?
-                    </button>
-                  </th>
-                  <th scope="col">
-                    类型
-                    <button
-                      class="hint-button"
-                      type="button"
-                      data-tooltip="用于减少输入错误。自定义服务可选择 OpenAI Compatible。"
-                      aria-label="Provider 类型说明"
-                    >
-                      ?
-                    </button>
-                  </th>
-                  <th scope="col">
-                    API URL
-                    <button
-                      class="hint-button"
-                      type="button"
-                      data-tooltip="服务商的 OpenAI-compatible base_url，后端会传给模型客户端。"
-                      aria-label="API URL 说明"
-                    >
-                      ?
-                    </button>
-                  </th>
-                  <th scope="col">
-                    API Key
-                    <button
-                      class="hint-button"
-                      type="button"
-                      data-tooltip="可以填写真实 Key，也可以填写环境变量名，例如 OPENAI_API_KEY。测试时后端会自动解析环境变量。"
-                      aria-label="API Key 说明"
-                    >
-                      ?
-                    </button>
-                  </th>
-                  <th scope="col">操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="provider in providers" :key="provider.localId">
-                  <td data-label="Provider ID">
-                    <input
-                      v-model.trim="provider.id"
-                      type="text"
-                      placeholder="siliconflow"
-                      @change="syncProviderReferences(provider)"
-                    >
-                  </td>
-                  <td data-label="类型">
-                    <select v-model="provider.type" @change="handleProviderTypeChange(provider)">
-                      <option v-for="type in providerTypeOptions" :key="type.value" :value="type.value">
-                        {{ type.label }}
-                      </option>
-                    </select>
-                  </td>
-                  <td data-label="API URL">
-                    <input v-model.trim="provider.base_url" type="url" placeholder="https://api.example.com/v1">
-                  </td>
-                  <td data-label="API Key">
-                    <div class="password-field provider-key-field">
-                      <input
-                        v-model.trim="provider.api_key"
-                        :type="visibleProviderKeys[provider.localId] ? 'text' : 'password'"
-                        placeholder="OPENAI_API_KEY 或 sk-..."
-                        autocomplete="off"
-                      >
-                      <button type="button" @click="toggleProviderKey(provider.localId)">
-                        {{ visibleProviderKeys[provider.localId] ? '隐藏' : '显示' }}
-                      </button>
-                    </div>
-                  </td>
-                  <td class="provider-action-cell" data-label="操作">
+        <div class="provider-console">
+          <aside class="provider-list-panel" aria-label="模型服务商列表">
+            <button
+              v-for="provider in providers"
+              :key="provider.localId"
+              class="provider-list-item"
+              :class="{ active: selectedProviderLocalId === provider.localId }"
+              type="button"
+              @click="selectProvider(provider)"
+            >
+              <span class="provider-logo" :data-provider="provider.type">
+                {{ getProviderInitial(provider) }}
+              </span>
+              <span class="provider-list-copy">
+                <strong>{{ getProviderDisplayName(provider) }}</strong>
+                <small>{{ isProviderConfigured(provider) ? '已配置' : '未配置' }}</small>
+              </span>
+              <span class="provider-state" :class="{ configured: isProviderConfigured(provider) }">
+                {{ isProviderConfigured(provider) ? 'OK' : '' }}
+              </span>
+            </button>
+          </aside>
+
+          <section v-if="selectedProvider" class="provider-detail-panel">
+            <header class="provider-detail-header">
+              <span class="provider-logo large" :data-provider="selectedProvider.type">
+                {{ getProviderInitial(selectedProvider) }}
+              </span>
+              <div>
+                <h3>{{ getProviderDisplayName(selectedProvider) }}</h3>
+                <p>在服务商控制台获取 API 密钥，并配置 OpenAI-compatible 调用地址。</p>
+              </div>
+              <button
+                class="provider-link-button"
+                type="button"
+                :disabled="!getProviderConsoleUrl(selectedProvider)"
+                @click="openProviderConsole(selectedProvider)"
+              >
+                获取 API Key
+              </button>
+            </header>
+
+            <div class="provider-detail-fields">
+              <label class="field provider-field-wide">
+                <span>
+                  API Key
                   <button
-                    class="provider-remove-button"
+                    class="hint-button"
                     type="button"
-                    :disabled="providers.length <= 1"
-                    @click="removeProvider(provider)"
+                    data-tooltip="可以填写真实 Key，也可以填写环境变量名，例如 OPENAI_API_KEY。测试时后端会自动解析环境变量。"
+                    aria-label="API Key 说明"
                   >
-                    删除
+                    ?
                   </button>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
+                </span>
+                <div class="password-field">
+                  <input
+                    v-model.trim="selectedProvider.api_key"
+                    :type="visibleProviderKeys[selectedProvider.localId] ? 'text' : 'password'"
+                    placeholder="OPENAI_API_KEY 或 sk-..."
+                    autocomplete="off"
+                  >
+                  <button type="button" @click="toggleProviderKey(selectedProvider.localId)">
+                    {{ visibleProviderKeys[selectedProvider.localId] ? '隐藏' : '显示' }}
+                  </button>
+                </div>
+              </label>
+
+              <label class="field provider-field-wide">
+                <span>
+                  API URL
+                  <button
+                    class="hint-button"
+                    type="button"
+                    data-tooltip="服务商的 OpenAI-compatible base_url，后端会传给模型客户端。"
+                    aria-label="API URL 说明"
+                  >
+                    ?
+                  </button>
+                </span>
+                <input v-model.trim="selectedProvider.base_url" type="url" placeholder="https://api.example.com/v1">
+              </label>
+
+              <label class="field">
+                <span>
+                  Provider ID
+                  <button
+                    class="hint-button"
+                    type="button"
+                    data-tooltip="Provider ID 会写入 YAML 顶层键，例如 siliconflow 或 ark，也会被模型配置引用。"
+                    aria-label="Provider ID 说明"
+                  >
+                    ?
+                  </button>
+                </span>
+                <input
+                  v-model.trim="selectedProvider.id"
+                  type="text"
+                  placeholder="siliconflow"
+                  @change="syncProviderReferences(selectedProvider)"
+                >
+              </label>
+
+              <label class="field">
+                <span>
+                  Provider 类型
+                  <button
+                    class="hint-button"
+                    type="button"
+                    data-tooltip="用于减少输入错误。自定义服务可选择 OpenAI Compatible。"
+                    aria-label="Provider 类型说明"
+                  >
+                    ?
+                  </button>
+                </span>
+                <select v-model="selectedProvider.type" @change="handleProviderTypeChange(selectedProvider)">
+                  <option v-for="type in providerTypeOptions" :key="type.value" :value="type.value">
+                    {{ type.label }}
+                  </option>
+                </select>
+              </label>
+            </div>
+
+            <footer class="provider-detail-footer">
+              <span>当前配置键：{{ selectedProvider.id || '未命名 Provider' }}</span>
+              <button
+                class="provider-remove-button"
+                type="button"
+                :disabled="providers.length <= 1"
+                @click="removeProvider(selectedProvider)"
+              >
+                删除 Provider
+              </button>
+            </footer>
+          </section>
         </div>
       </section>
 
@@ -430,6 +466,7 @@ const isLoading = ref(false)
 const isSaving = ref(false)
 const modelsPath = ref('')
 const providers = ref([])
+const selectedProviderLocalId = ref('')
 const providerTypes = ref([])
 const defaultModels = ref([])
 const agentModels = ref([])
@@ -455,6 +492,17 @@ const providerOptions = computed(() => {
       label: `${provider.id} (${getProviderTypeLabel(provider.type)})`
     }))
 })
+
+const selectedProvider = computed(() => {
+  return providers.value.find(provider => provider.localId === selectedProviderLocalId.value) || providers.value[0] || null
+})
+
+const providerConsoleLinks = {
+  openai: 'https://platform.openai.com/api-keys',
+  siliconflow: 'https://cloud.siliconflow.cn/account/ak',
+  dashscope: 'https://dashscope.console.aliyun.com/apiKey',
+  ark: 'https://console.volcengine.com/ark'
+}
 
 const createLocalId = () => {
   return `provider-${Date.now()}-${Math.random().toString(16).slice(2)}`
@@ -491,6 +539,7 @@ const normalizeDimension = (value) => {
 
 const applySettings = (settings) => {
   providers.value = normalizeProviders(settings.providers || [])
+  ensureSelectedProvider()
   providerTypes.value = settings.provider_types || []
   modelsPath.value = settings.models_path || ''
   defaultModels.value = normalizeModelItems(settings.default_models || [])
@@ -514,14 +563,17 @@ const loadSettings = async () => {
 
 const addProvider = () => {
   const type = 'custom'
-  providers.value.push({
+  const provider = {
     localId: createLocalId(),
     id: suggestProviderId(type),
     previousId: '',
     type,
     base_url: '',
     api_key: ''
-  })
+  }
+
+  providers.value.push(provider)
+  selectedProviderLocalId.value = provider.localId
 }
 
 const removeProvider = (provider) => {
@@ -529,6 +581,9 @@ const removeProvider = (provider) => {
 
   const removedId = provider.id
   providers.value = providers.value.filter(item => item.localId !== provider.localId)
+  if (selectedProviderLocalId.value === provider.localId) {
+    selectedProviderLocalId.value = providers.value[0]?.localId || ''
+  }
 
   const fallbackProvider = providers.value[0]?.id || ''
   forEachModelItem(item => {
@@ -536,6 +591,22 @@ const removeProvider = (provider) => {
       item.config.provider = fallbackProvider
     }
   })
+}
+
+const ensureSelectedProvider = () => {
+  if (!providers.value.length) {
+    selectedProviderLocalId.value = ''
+    return
+  }
+
+  const exists = providers.value.some(provider => provider.localId === selectedProviderLocalId.value)
+  if (!exists) {
+    selectedProviderLocalId.value = providers.value[0].localId
+  }
+}
+
+const selectProvider = (provider) => {
+  selectedProviderLocalId.value = provider.localId
 }
 
 const suggestProviderId = (type) => {
@@ -579,6 +650,32 @@ const toggleProviderKey = (localId) => {
 
 const getProviderTypeLabel = (type) => {
   return providerTypeOptions.value.find(item => item.value === type)?.label || type || 'Custom'
+}
+
+const getProviderDisplayName = (provider) => {
+  if (!provider) return 'Provider'
+  const typeLabel = getProviderTypeLabel(provider.type)
+  return provider.id || typeLabel || 'Provider'
+}
+
+const getProviderInitial = (provider) => {
+  const label = getProviderDisplayName(provider)
+  return label.slice(0, 2).toUpperCase()
+}
+
+const isProviderConfigured = (provider) => {
+  return Boolean(provider?.api_key?.trim() && provider?.base_url?.trim())
+}
+
+const getProviderConsoleUrl = (provider) => {
+  if (!provider) return ''
+  return providerConsoleLinks[provider.type] || ''
+}
+
+const openProviderConsole = (provider) => {
+  const url = getProviderConsoleUrl(provider)
+  if (!url) return
+  window.open(url, '_blank', 'noopener,noreferrer')
 }
 
 const forEachModelItem = (callback) => {
@@ -640,6 +737,7 @@ const restoreDraft = () => {
   }
 
   providers.value = normalizeProviders(draft.settings.providers || [])
+  ensureSelectedProvider()
   mergeModelPayload(defaultModels.value, draft.settings.default_models || [])
   mergeModelPayload(agentModels.value, draft.settings.agent_models || [])
   mergeModelPayload(embeddingModels.value, draft.settings.embedding_models || [])
@@ -1041,63 +1139,204 @@ onMounted(async () => {
     var(--pa-surface);
 }
 
-.provider-table-card {
+.provider-console {
+  display: grid;
+  grid-template-columns: minmax(220px, 270px) minmax(0, 1fr);
+  min-height: 360px;
   border: 1px solid var(--pa-border);
-  border-radius: 10px;
+  border-radius: 12px;
   background: var(--pa-surface);
   overflow: hidden;
 }
 
-.provider-table-scroll {
-  overflow-x: auto;
+.provider-list-panel {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  padding: 12px;
+  border-right: 1px solid var(--pa-border);
+  background: color-mix(in srgb, var(--pa-surface-soft) 72%, var(--pa-surface));
 }
 
-.provider-table {
+.provider-list-item {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) 30px;
+  align-items: center;
+  gap: 10px;
   width: 100%;
-  min-width: 980px;
-  border-collapse: collapse;
-}
-
-.provider-table th,
-.provider-table td {
-  padding: 12px 12px;
-  border-bottom: 1px solid var(--pa-border);
+  min-height: 62px;
+  padding: 9px 10px;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--pa-text);
   text-align: left;
-  vertical-align: middle;
+  cursor: pointer;
 }
 
-.provider-table th {
-  background: var(--pa-surface-soft);
-  color: var(--pa-text-muted);
-  font-size: 0.78rem;
+.provider-list-item:hover {
+  background: var(--pa-surface);
+}
+
+.provider-list-item.active {
+  border-color: var(--pa-border-strong);
+  background: var(--pa-surface);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--pa-text) 6%, transparent);
+}
+
+.provider-logo {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 9px;
+  background: linear-gradient(135deg, #56d6b2, #5e7cff 58%, #b975ff);
+  color: #ffffff;
+  font-size: 0.62rem;
   font-weight: 900;
+  letter-spacing: -0.02em;
+}
+
+.provider-logo[data-provider='openai'] {
+  background: #111827;
+}
+
+.provider-logo[data-provider='siliconflow'] {
+  background: linear-gradient(135deg, #2f8da3, #7fc7d8);
+}
+
+.provider-logo[data-provider='dashscope'] {
+  background: linear-gradient(135deg, #1f6f82, #86d7b8);
+}
+
+.provider-logo[data-provider='ark'] {
+  background: linear-gradient(135deg, #2b5cab, #8fb2ff);
+}
+
+.provider-logo.large {
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  font-size: 0.78rem;
+}
+
+.provider-list-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.provider-list-copy strong,
+.provider-list-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.provider-table th .hint-button {
-  margin-left: 5px;
-  vertical-align: middle;
+.provider-list-copy strong {
+  font-size: 0.92rem;
 }
 
-.provider-table tbody tr:last-child td {
-  border-bottom: 0;
+.provider-list-copy small {
+  color: var(--pa-text-muted);
+  font-size: 0.76rem;
 }
 
-.provider-table tbody tr:hover {
-  background: color-mix(in srgb, var(--pa-primary-soft) 18%, transparent);
+.provider-state {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--pa-border-strong);
+  border-radius: 50%;
+  color: transparent;
+  font-size: 0.58rem;
+  font-weight: 900;
 }
 
-.provider-table input,
-.provider-table select {
-  min-height: 36px;
+.provider-state.configured {
+  border-color: var(--pa-text);
+  background: var(--pa-text);
+  color: var(--pa-surface);
 }
 
-.provider-key-field {
-  min-width: 280px;
+.provider-detail-panel {
+  display: grid;
+  align-content: start;
+  gap: 22px;
+  padding: 24px 30px 22px;
 }
 
-.provider-action-cell {
-  width: 86px;
+.provider-detail-header {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 13px;
+}
+
+.provider-detail-header h3 {
+  margin: 0 0 6px;
+  color: var(--pa-text);
+  font-size: 1.24rem;
+}
+
+.provider-detail-header p {
+  margin: 0;
+  color: var(--pa-text-muted);
+  font-size: 0.88rem;
+  line-height: 1.55;
+}
+
+.provider-link-button {
+  min-height: 32px;
+  padding: 0 2px;
+  border: 0;
+  background: transparent;
+  color: var(--pa-text-muted);
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 850;
+  cursor: pointer;
+}
+
+.provider-link-button:hover {
+  color: var(--pa-primary);
+}
+
+.provider-link-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+.provider-detail-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 18px 16px;
+}
+
+.provider-field-wide {
+  grid-column: 1 / -1;
+}
+
+.provider-detail-fields input,
+.provider-detail-fields select {
+  min-height: 44px;
+  border-radius: 10px;
+}
+
+.provider-detail-fields .password-field button {
+  min-height: 44px;
+}
+
+.provider-detail-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 6px;
+  color: var(--pa-text-subtle);
+  font-size: 0.78rem;
+  font-weight: 800;
 }
 
 .provider-remove-button {
@@ -1436,6 +1675,18 @@ select:focus {
   .section-header .primary-button {
     width: 100%;
   }
+
+  .provider-console {
+    grid-template-columns: 1fr;
+  }
+
+  .provider-list-panel {
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(190px, 1fr);
+    overflow-x: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--pa-border);
+  }
 }
 
 @media (max-width: 640px) {
@@ -1453,6 +1704,28 @@ select:focus {
   .model-grid,
   .default-grid {
     grid-template-columns: 1fr;
+  }
+
+  .provider-detail-panel {
+    padding: 18px;
+  }
+
+  .provider-detail-header {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .provider-link-button {
+    grid-column: 1 / -1;
+    justify-self: start;
+  }
+
+  .provider-detail-fields {
+    grid-template-columns: 1fr;
+  }
+
+  .provider-detail-footer {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .model-card-header {
