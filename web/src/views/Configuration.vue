@@ -4,10 +4,6 @@
       <div class="hero-copy">
         <p class="eyebrow">Runtime Configuration</p>
         <h1>系统配置</h1>
-        <p>
-          集中管理 Provider、默认模型、智能体阶段模型和知识库嵌入模型，让 Paper-Agent 的运行参数有一个稳定入口。
-        </p>
-        <span v-if="modelsPath" class="path-pill">YAML: {{ modelsPath }}</span>
       </div>
 
       <div class="hero-actions">
@@ -445,7 +441,6 @@ const fallbackProviderTypes = [
 
 const isLoading = ref(false)
 const isSaving = ref(false)
-const modelsPath = ref('')
 const providers = ref([])
 const selectedProviderLocalId = ref('')
 const providerTypes = ref([])
@@ -521,7 +516,6 @@ const applySettings = (settings) => {
   providers.value = normalizeProviders(settings.providers || [])
   ensureSelectedProvider()
   providerTypes.value = settings.provider_types || []
-  modelsPath.value = settings.models_path || ''
   defaultModels.value = normalizeModelItems(settings.default_models || [])
   agentModels.value = normalizeModelItems(settings.agent_models || [])
   embeddingModels.value = normalizeModelItems(settings.embedding_models || [])
@@ -779,14 +773,12 @@ onMounted(async () => {
   height: 100%;
   min-height: 0;
   overflow-y: auto;
-  padding: 18px;
   background:
     radial-gradient(circle at top left, color-mix(in srgb, var(--pa-primary) 14%, transparent), transparent 34%),
     linear-gradient(135deg, var(--pa-bg), var(--pa-surface-soft));
   color: var(--pa-text);
 }
 
-.config-hero,
 .config-section,
 .center-state {
   border: 1px solid var(--pa-border);
@@ -797,17 +789,19 @@ onMounted(async () => {
 
 .config-hero {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
-  gap: 18px;
-  margin-bottom: 14px;
-  padding: 20px;
+  gap: 14px;
+  min-height: 72px;
+  padding: 14px 22px;
+  border-bottom: 1px solid var(--pa-border);
+  background: var(--pa-surface);
 }
 
 .hero-copy {
   display: grid;
-  gap: 8px;
-  max-width: 760px;
+  gap: 5px;
+  min-width: 0;
 }
 
 .eyebrow,
@@ -829,17 +823,10 @@ onMounted(async () => {
 }
 
 .config-hero h1 {
-  font-size: clamp(1.6rem, 2.4vw, 2.2rem);
-  line-height: 1.16;
+  font-size: 1.25rem;
+  line-height: 1.25;
 }
 
-.hero-copy p {
-  margin: 0;
-  color: var(--pa-text-muted);
-  line-height: 1.65;
-}
-
-.path-pill,
 .key-chip {
   display: inline-flex;
   align-items: center;
@@ -917,6 +904,7 @@ onMounted(async () => {
   align-content: center;
   gap: 12px;
   min-height: 360px;
+  margin: 14px 18px;
   color: var(--pa-text-muted);
 }
 
@@ -936,7 +924,7 @@ onMounted(async () => {
 .config-section {
   display: grid;
   gap: 16px;
-  margin-bottom: 14px;
+  margin: 14px 18px;
   padding: 18px;
 }
 
@@ -1557,13 +1545,14 @@ select:focus {
 }
 
 @media (max-width: 640px) {
-  .config-page {
-    padding: 10px;
-  }
-
   .config-hero,
   .config-section {
     padding: 14px;
+  }
+
+  .config-section,
+  .center-state {
+    margin: 10px;
   }
 
   .form-grid,
