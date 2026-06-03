@@ -56,10 +56,6 @@
               </span>
               <span class="provider-list-copy">
                 <strong>{{ getProviderDisplayName(provider) }}</strong>
-                <small>{{ isProviderConfigured(provider) ? '已配置' : '未配置' }}</small>
-              </span>
-              <span class="provider-state" :class="{ configured: isProviderConfigured(provider) }">
-                {{ isProviderConfigured(provider) ? 'OK' : '' }}
               </span>
             </button>
           </aside>
@@ -682,10 +678,6 @@ const getProviderInitial = (provider) => {
   return label.slice(0, 2).toUpperCase()
 }
 
-const isProviderConfigured = (provider) => {
-  return Boolean(provider?.api_key?.trim() && provider?.base_url?.trim())
-}
-
 const getProviderConsoleUrl = (provider) => {
   if (!provider) return ''
   return providerConsoleLinks[provider.type] || ''
@@ -1187,7 +1179,7 @@ onMounted(async () => {
 
 .provider-list-item {
   display: grid;
-  grid-template-columns: 34px minmax(0, 1fr) 30px;
+  grid-template-columns: 34px minmax(0, 1fr);
   align-items: center;
   gap: 10px;
   width: 100%;
@@ -1248,13 +1240,12 @@ onMounted(async () => {
 }
 
 .provider-list-copy {
-  display: grid;
-  gap: 2px;
+  display: block;
   min-width: 0;
 }
 
-.provider-list-copy strong,
-.provider-list-copy small {
+.provider-list-copy strong {
+  display: block;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1262,29 +1253,6 @@ onMounted(async () => {
 
 .provider-list-copy strong {
   font-size: 0.92rem;
-}
-
-.provider-list-copy small {
-  color: var(--pa-text-muted);
-  font-size: 0.76rem;
-}
-
-.provider-state {
-  display: grid;
-  place-items: center;
-  width: 24px;
-  height: 24px;
-  border: 1px solid var(--pa-border-strong);
-  border-radius: 50%;
-  color: transparent;
-  font-size: 0.58rem;
-  font-weight: 900;
-}
-
-.provider-state.configured {
-  border-color: var(--pa-text);
-  background: var(--pa-text);
-  color: var(--pa-surface);
 }
 
 .provider-detail-panel {
