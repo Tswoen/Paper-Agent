@@ -134,6 +134,7 @@ ALL_MODEL_DEFINITIONS = (
     + EMBEDDING_MODEL_DEFINITIONS
 )
 MODEL_DEFINITION_BY_KEY = {item["key"]: item for item in ALL_MODEL_DEFINITIONS}
+DEFAULT_MODEL_KEYS = {item["key"] for item in DEFAULT_MODEL_DEFINITIONS}
 
 
 class ProviderPayload(BaseModel):
@@ -243,6 +244,10 @@ def _model_fallback(raw: dict[str, Any], kind: str) -> dict[str, Any]:
     return fallback if isinstance(fallback, dict) else {}
 
 
+def _is_default_model_key(key: str) -> bool:
+    return key in DEFAULT_MODEL_KEYS
+
+
 def _normalize_model_config(raw: dict[str, Any], definition: dict[str, str]) -> dict[str, Any]:
     key = definition["key"]
     kind = definition["kind"]
@@ -250,9 +255,25 @@ def _normalize_model_config(raw: dict[str, Any], definition: dict[str, str]) -> 
     if not isinstance(model_data, dict):
         model_data = {}
 
-    fallback = _model_fallback(raw, kind)
     providers = raw.get("model-provider", [])
     first_provider = providers[0] if isinstance(providers, list) and providers else ""
+
+    has_model_provider = bool(model_data.get("model-provider"))
+    has_model_name = bool(model_data.get("model"))
+
+    if not _is_default_model_key(key) and (not has_model_provider or not has_model_name):
+        item = {
+            "key": key,
+            "provider": "",
+            "model": "",
+        }
+
+        if kind == "embedding":
+            item["dimension"] = None
+
+        return item
+
+    fallback = _model_fallback(raw, kind) if _is_default_model_key(key) else {}
 
     item = {
         "key": key,
@@ -330,6 +351,15 @@ def _validate_settings(payload: ModelSettingsPayload) -> None:
 
         if item.key not in expected_keys:
             raise HTTPException(status_code=400, detail=f"未知模型配置键: {item.key}")
+
+        uses_default_model = not _is_default_model_key(item.key) and not item.provider and not item.model
+        if uses_default_model:
+            item.dimension = None
+            continue
+
+        if not _is_default_model_key(item.key) and (not item.provider or not item.model):
+            raise HTTPException(status_code=400, detail=f"模型配置 '{item.key}' 请完整填写 Provider 和模型名称，或选择默认配置")
+
         if item.provider not in valid_provider_ids:
             raise HTTPException(status_code=400, detail=f"模型配置 '{item.key}' 使用了不存在的 Provider: {item.provider}")
         if not item.model:
@@ -353,6 +383,10 @@ def _model_payload_to_yaml(item: ModelConfigPayload) -> dict[str, Any]:
     return data
 
 
+def _uses_default_model_payload(item: ModelConfigPayload) -> bool:
+    return not _is_default_model_key(item.key) and not item.provider and not item.model
+
+
 def _payload_to_yaml(payload: ModelSettingsPayload, existing: dict[str, Any]) -> dict[str, Any]:
     next_config = dict(existing)
     old_provider_ids = set(existing.get("model-provider", [])) if isinstance(existing.get("model-provider"), list) else set()
@@ -370,8 +404,14 @@ def _payload_to_yaml(payload: ModelSettingsPayload, existing: dict[str, Any]) ->
             "base_url": provider.base_url,
         }
 
-    for item in payload.default_models + payload.agent_models + payload.embedding_models:
+    for item in payload.default_models:
         next_config[item.key] = _model_payload_to_yaml(item)
+
+    for item in payload.agent_models + payload.embedding_models:
+        if _uses_default_model_payload(item):
+            next_config.pop(item.key, None)
+        else:
+            next_config[item.key] = _model_payload_to_yaml(item)
 
     return next_config
 

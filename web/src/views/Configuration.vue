@@ -1,4 +1,4 @@
-<template>
+﻿<template>
   <div
     class="config-page"
     @focusin="handleTooltipEnter"
@@ -93,7 +93,6 @@
                     data-tooltip="可以填写真实 Key，也可以填写环境变量名，例如 OPENAI_API_KEY。测试时后端会自动解析环境变量。"
                     aria-label="API Key 说明"
                   >
-                    ?
                   </button>
                 </span>
                 <div class="password-field">
@@ -118,7 +117,6 @@
                     data-tooltip="服务商的 OpenAI-compatible base_url，后端会传给模型客户端。"
                     aria-label="API URL 说明"
                   >
-                    ?
                   </button>
                 </span>
                 <input v-model.trim="selectedProvider.base_url" type="url" placeholder="https://api.example.com/v1">
@@ -133,7 +131,6 @@
                     data-tooltip="Provider ID 会写入 YAML 顶层键，例如 siliconflow 或 ark，也会被模型配置引用。"
                     aria-label="Provider ID 说明"
                   >
-                    ?
                   </button>
                 </span>
                 <input
@@ -153,7 +150,6 @@
                     data-tooltip="用于减少输入错误。自定义服务可选择 OpenAI Compatible。"
                     aria-label="Provider 类型说明"
                   >
-                    ?
                   </button>
                 </span>
                 <select v-model="selectedProvider.type" @change="handleProviderTypeChange(selectedProvider)">
@@ -211,7 +207,6 @@
                     data-tooltip="选择该模型调用时使用的服务商，对应 YAML 中的 model-provider。"
                     aria-label="模型 Provider 说明"
                   >
-                    ?
                   </button>
                 </span>
                 <select v-model="item.config.provider">
@@ -230,7 +225,6 @@
                     data-tooltip="服务商侧的模型 ID，例如 Qwen/Qwen3-32B、text-embedding-v4 或 doubao endpoint。"
                     aria-label="模型名称说明"
                   >
-                    ?
                   </button>
                 </span>
                 <input v-model.trim="item.config.model" type="text" placeholder="model-name">
@@ -245,7 +239,6 @@
                     data-tooltip="Embedding 返回向量维度，会影响检索、相似度计算和聚类。"
                     aria-label="向量维度说明"
                   >
-                    ?
                   </button>
                 </span>
                 <input v-model.number="item.config.dimension" type="number" min="1" placeholder="1024">
@@ -286,7 +279,6 @@
                       data-tooltip="该阶段模型使用的 Provider，与后端 YAML 配置键保持一致。"
                       aria-label="智能体 Provider 说明"
                     >
-                      ?
                     </button>
                   </th>
                   <th scope="col">
@@ -297,7 +289,6 @@
                       data-tooltip="建议复杂分析阶段选择能力更强的模型，检索或简单规划阶段可选择更快模型。"
                       aria-label="智能体模型名称说明"
                     >
-                      ?
                     </button>
                   </th>
                   <th scope="col">连通性</th>
@@ -313,14 +304,19 @@
                     <span class="key-chip">{{ item.config.key }}</span>
                   </td>
                   <td data-label="Provider">
-                    <select v-model="item.config.provider">
-                      <option v-for="provider in providerOptions" :key="provider.value" :value="provider.value">
+                    <select v-model="item.config.provider" @change="handleModelProviderChange(item)">
+                      <option v-for="provider in modelProviderOptions(item)" :key="provider.value" :value="provider.value">
                         {{ provider.label }}
                       </option>
                     </select>
                   </td>
                   <td data-label="模型名称">
-                    <input v-model.trim="item.config.model" type="text" placeholder="model-name">
+                    <input
+                      v-model.trim="item.config.model"
+                      type="text"
+                      :placeholder="getModelPlaceholder(item)"
+                      :disabled="usesDefaultModel(item)"
+                    >
                   </td>
                   <td class="agent-test-cell" data-label="连通性">
                     <button class="test-button" type="button" :disabled="isTesting(item.config.key)" @click="testModel(item)">
@@ -376,11 +372,10 @@
                     data-tooltip="嵌入模型调用时使用的服务商，对应 YAML 中的 model-provider。"
                     aria-label="嵌入 Provider 说明"
                   >
-                    ?
                   </button>
                 </span>
-                <select v-model="item.config.provider">
-                  <option v-for="provider in providerOptions" :key="provider.value" :value="provider.value">
+                <select v-model="item.config.provider" @change="handleModelProviderChange(item)">
+                  <option v-for="provider in modelProviderOptions(item)" :key="provider.value" :value="provider.value">
                     {{ provider.label }}
                   </option>
                 </select>
@@ -395,10 +390,14 @@
                     data-tooltip="嵌入模型 ID 会影响检索召回、相似度计算和聚类质量。"
                     aria-label="嵌入模型名称说明"
                   >
-                    ?
                   </button>
                 </span>
-                <input v-model.trim="item.config.model" type="text" placeholder="embedding-model">
+                <input
+                  v-model.trim="item.config.model"
+                  type="text"
+                  :placeholder="getModelPlaceholder(item)"
+                  :disabled="usesDefaultModel(item)"
+                >
               </label>
 
               <label class="field">
@@ -410,10 +409,15 @@
                     data-tooltip="需要与实际模型返回维度和向量库配置匹配。"
                     aria-label="嵌入维度说明"
                   >
-                    ?
                   </button>
                 </span>
-                <input v-model.number="item.config.dimension" type="number" min="1" placeholder="1024">
+                <input
+                  v-model.number="item.config.dimension"
+                  type="number"
+                  min="1"
+                  :placeholder="getDimensionPlaceholder(item)"
+                  :disabled="usesDefaultModel(item)"
+                >
               </label>
             </div>
 
@@ -459,6 +463,9 @@ const fallbackProviderTypes = [
   { value: 'custom', label: 'OpenAI Compatible', default_base_url: '' }
 ]
 
+const DEFAULT_CONFIG_VALUE = ''
+const defaultModelKeys = new Set(['default-model', 'default-embedding-model'])
+
 const isLoading = ref(false)
 const isSaving = ref(false)
 const providers = ref([])
@@ -493,6 +500,17 @@ const providerOptions = computed(() => {
       label: `${provider.id} (${getProviderTypeLabel(provider.type)})`
     }))
 })
+
+const modelProviderOptions = (item) => {
+  if (isDefaultModelItem(item)) {
+    return providerOptions.value
+  }
+
+  return [
+    { value: DEFAULT_CONFIG_VALUE, label: '默认配置' },
+    ...providerOptions.value
+  ]
+}
 
 const selectedProvider = computed(() => {
   return providers.value.find(provider => provider.localId === selectedProviderLocalId.value) || providers.value[0] || null
@@ -588,7 +606,8 @@ const removeProvider = (provider) => {
   const fallbackProvider = providers.value[0]?.id || ''
   forEachModelItem(item => {
     if (item.config.provider === removedId) {
-      item.config.provider = fallbackProvider
+      item.config.provider = isDefaultModelItem(item) ? fallbackProvider : DEFAULT_CONFIG_VALUE
+      handleModelProviderChange(item)
     }
   })
 }
@@ -678,6 +697,51 @@ const openProviderConsole = (provider) => {
   window.open(url, '_blank', 'noopener,noreferrer')
 }
 
+const isDefaultModelItem = (item) => {
+  return defaultModelKeys.has(item?.config?.key || item?.key)
+}
+
+const usesDefaultModel = (item) => {
+  return !isDefaultModelItem(item) && !item.config.provider
+}
+
+const getDefaultModelKey = (kind) => {
+  return kind === 'embedding' ? 'default-embedding-model' : 'default-model'
+}
+
+const getDefaultModelItem = (kind) => {
+  const key = getDefaultModelKey(kind)
+  return defaultModels.value.find(item => item.config.key === key) || null
+}
+
+const getModelPlaceholder = (item) => {
+  if (!usesDefaultModel(item)) {
+    return item.kind === 'embedding' ? 'embedding-model' : 'model-name'
+  }
+
+  const defaultModel = getDefaultModelItem(item.kind)?.config.model
+  return defaultModel ? `使用默认配置：${defaultModel}` : '使用默认配置'
+}
+
+const getDimensionPlaceholder = (item) => {
+  if (!usesDefaultModel(item)) {
+    return '1024'
+  }
+
+  const defaultDimension = normalizeDimension(getDefaultModelItem(item.kind)?.config.dimension)
+  return defaultDimension ? `使用默认维度：${defaultDimension}` : '1024'
+}
+
+const handleModelProviderChange = (item) => {
+  if (!usesDefaultModel(item)) return
+
+  item.config.model = ''
+  if (item.kind === 'embedding') {
+    item.config.dimension = null
+  }
+  delete testResults[item.config.key]
+}
+
 const forEachModelItem = (callback) => {
   ;[defaultModels.value, agentModels.value, embeddingModels.value].forEach(group => {
     group.forEach(callback)
@@ -692,17 +756,27 @@ const toProviderPayload = (provider) => ({
 })
 
 const toModelPayload = (item) => {
+  const usesDefault = usesDefaultModel(item)
   const payload = {
     key: item.config.key,
-    provider: item.config.provider,
-    model: item.config.model
+    provider: usesDefault ? DEFAULT_CONFIG_VALUE : item.config.provider,
+    model: usesDefault ? '' : item.config.model
   }
 
   if (item.kind === 'embedding') {
-    payload.dimension = normalizeDimension(item.config.dimension)
+    payload.dimension = usesDefault ? null : normalizeDimension(item.config.dimension)
   }
 
   return payload
+}
+
+const getEffectiveModelPayload = (item) => {
+  if (!usesDefaultModel(item)) {
+    return toModelPayload(item)
+  }
+
+  const defaultItem = getDefaultModelItem(item.kind)
+  return defaultItem ? toModelPayload(defaultItem) : toModelPayload(item)
 }
 
 const buildPayload = () => ({
@@ -728,12 +802,13 @@ const saveSettings = async () => {
 
 const testModel = async (item) => {
   const key = item.config.key
-  const provider = providers.value.find(candidate => candidate.id === item.config.provider)
+  const modelPayload = getEffectiveModelPayload(item)
+  const provider = providers.value.find(candidate => candidate.id === modelPayload.provider)
 
   if (!provider) {
     testResults[key] = {
       status: 'failed',
-      message: '当前模型选择的 Provider 不存在'
+      message: usesDefaultModel(item) ? '默认配置的 Provider 不存在' : '当前模型选择的 Provider 不存在'
     }
     return
   }
@@ -746,7 +821,7 @@ const testModel = async (item) => {
   try {
     const response = await configApi.testModel({
       provider: toProviderPayload(provider),
-      model: toModelPayload(item),
+      model: modelPayload,
       model_type: item.kind === 'embedding' ? 'embedding' : 'llm'
     })
     testResults[key] = response.data
@@ -1488,6 +1563,12 @@ select:focus {
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--pa-primary) 18%, transparent);
 }
 
+input:disabled,
+select:disabled {
+  cursor: not-allowed;
+  opacity: 0.72;
+}
+
 .password-field {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -1499,13 +1580,23 @@ select:focus {
   place-items: center;
   width: 19px;
   height: 19px;
+  flex: 0 0 19px;
+  overflow: hidden;
   border: 1px solid var(--pa-border);
   border-radius: 999px;
   background: var(--pa-surface-soft);
   color: var(--pa-text-muted);
-  font-size: 0.72rem;
+  font-size: 0;
   font-weight: 900;
+  line-height: 1;
   cursor: help;
+}
+
+.hint-button::before {
+  content: '?';
+  color: currentColor;
+  font-size: 0.72rem;
+  line-height: 1;
 }
 
 .hint-button:hover,
