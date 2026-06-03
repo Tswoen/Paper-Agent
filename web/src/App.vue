@@ -1,5 +1,13 @@
 <template>
-  <div class="report-workbench" :class="{ 'right-collapsed': rightPanelCollapsed }">
+  <div
+    class="report-workbench"
+    :class="{ 'right-collapsed': rightPanelCollapsed }"
+    @focusin="handleTooltipEnter"
+    @focusout="hideTooltip"
+    @mouseleave="hideTooltip"
+    @mouseover="handleTooltipEnter"
+    @scroll.capture="hideTooltip"
+  >
     <section class="report-center">
       <header class="report-header">
         <div>
@@ -181,7 +189,7 @@
         <header class="task-panel-header">
           <div>
             <p class="eyebrow">Task Constraints</p>
-            <h2>本次任务约束</h2>
+            <h2>任务约束</h2>
           </div>
           <button class="icon-only-button" type="button" title="收起右侧栏" @click="rightPanelCollapsed = true">
             ›
@@ -327,6 +335,21 @@
         </div>
       </template>
     </aside>
+
+    <Teleport to="body">
+      <div
+        v-if="activeTooltip.text"
+        class="global-tooltip"
+        :style="{
+          left: `${activeTooltip.left}px`,
+          top: `${activeTooltip.top}px`,
+          transform: activeTooltip.transform
+        }"
+        role="tooltip"
+      >
+        {{ activeTooltip.text }}
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -353,6 +376,12 @@ const keywordError = ref('')
 const yearError = ref('')
 const paperLimitError = ref('')
 const customPromptError = ref('')
+const activeTooltip = reactive({
+  text: '',
+  left: 0,
+  top: 0,
+  transform: 'translate(-50%, -100%)'
+})
 
 const taskSettings = reactive({
   yearStart: '2021',
@@ -909,6 +938,44 @@ const handleComposerKeydown = (event) => {
     event.preventDefault()
     submitRequest()
   }
+}
+
+const handleTooltipEnter = (event) => {
+  const target = event.target
+  if (!(target instanceof Element)) {
+    hideTooltip()
+    return
+  }
+
+  const trigger = target.closest('.help-tip')
+  if (!(trigger instanceof HTMLElement) || !trigger.dataset.tooltip) {
+    if (event.type === 'mouseover') {
+      hideTooltip()
+    }
+    return
+  }
+
+  showTooltip(trigger, trigger.dataset.tooltip)
+}
+
+const showTooltip = (trigger, text) => {
+  const rect = trigger.getBoundingClientRect()
+  const estimatedWidth = Math.min(280, Math.max(200, window.innerWidth - 24))
+  const center = rect.left + rect.width / 2
+  const left = Math.min(
+    Math.max(center, estimatedWidth / 2 + 12),
+    window.innerWidth - estimatedWidth / 2 - 12
+  )
+  const shouldShowBelow = rect.top < 86
+
+  activeTooltip.text = text
+  activeTooltip.left = left
+  activeTooltip.top = shouldShowBelow ? rect.bottom + 10 : rect.top - 10
+  activeTooltip.transform = shouldShowBelow ? 'translate(-50%, 0)' : 'translate(-50%, -100%)'
+}
+
+const hideTooltip = () => {
+  activeTooltip.text = ''
 }
 
 const copyAssistantOutput = async (message) => {
@@ -1586,7 +1653,6 @@ select:focus {
 .help-tip {
   display: inline-grid;
   place-items: center;
-  position: relative;
   width: 20px;
   height: 20px;
   border: 1px solid var(--pa-border);
@@ -1599,64 +1665,30 @@ select:focus {
   transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
 }
 
-.help-tip::after {
-  position: absolute;
-  right: 0;
-  bottom: calc(100% + 8px);
-  z-index: 20;
+.help-tip:hover,
+.help-tip:focus-visible {
+  border-color: var(--pa-primary);
+  background: var(--pa-primary-soft);
+  color: var(--pa-primary);
+}
+
+.global-tooltip {
+  position: fixed;
+  z-index: 2147483647;
   width: max-content;
-  max-width: 240px;
+  max-width: min(280px, calc(100vw - 24px));
   padding: 8px 10px;
   border: 1px solid var(--pa-border);
   border-radius: 8px;
   background: var(--pa-text);
   color: var(--pa-surface);
   box-shadow: var(--pa-shadow);
-  content: attr(data-tooltip);
   font-size: 0.76rem;
   font-weight: 700;
   line-height: 1.45;
-  opacity: 0;
   pointer-events: none;
   text-align: left;
-  transform: translateY(4px);
-  transition: opacity 0.15s ease, transform 0.15s ease;
   white-space: normal;
-}
-
-.help-tip::before {
-  position: absolute;
-  right: 7px;
-  bottom: calc(100% + 3px);
-  z-index: 21;
-  width: 8px;
-  height: 8px;
-  background: var(--pa-text);
-  content: '';
-  opacity: 0;
-  pointer-events: none;
-  transform: rotate(45deg) translateY(4px);
-  transition: opacity 0.15s ease, transform 0.15s ease;
-}
-
-.help-tip:hover::after,
-.help-tip:focus-visible::after,
-.help-tip:hover::before,
-.help-tip:focus-visible::before {
-  opacity: 1;
-  transform: translateY(0);
-}
-
-.help-tip:hover::before,
-.help-tip:focus-visible::before {
-  transform: rotate(45deg) translateY(0);
-}
-
-.help-tip:hover,
-.help-tip:focus-visible {
-  border-color: transparent;
-  background: transparent;
-  color: transparent;
 }
 
 .field-error {
