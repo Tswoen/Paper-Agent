@@ -106,12 +106,6 @@ AGENT_MODEL_DEFINITIONS = [
         "kind": "llm",
     },
     {
-        "key": "subwriting-retrieval-model",
-        "label": "写作检索",
-        "description": "写作过程中调用知识库检索辅助资料。",
-        "kind": "llm",
-    },
-    {
         "key": "report-model",
         "label": "最终报告",
         "description": "将各小节组装为完整 Markdown 调研报告。",
@@ -124,12 +118,6 @@ EMBEDDING_MODEL_DEFINITIONS = [
         "key": "embedding-model",
         "label": "知识库默认嵌入",
         "description": "创建知识库和通用知识库问答时使用的嵌入模型。",
-        "kind": "embedding",
-    },
-    {
-        "key": "chroma-embedding-model",
-        "label": "Chroma 向量库",
-        "description": "ChromaDB 文档入库和相似度检索使用的嵌入模型。",
         "kind": "embedding",
     },
     {

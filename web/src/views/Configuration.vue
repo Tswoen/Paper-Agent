@@ -55,104 +55,105 @@
           </button>
         </header>
 
-        <div class="provider-grid">
-          <article v-for="provider in providers" :key="provider.localId" class="provider-card">
-            <div class="card-top">
-              <div>
-                <span class="card-kicker">Provider</span>
-                <h3>{{ provider.id || '未命名 Provider' }}</h3>
-              </div>
-              <button
-                class="danger-button"
-                type="button"
-                :disabled="providers.length <= 1"
-                @click="removeProvider(provider)"
-              >
-                删除
-              </button>
-            </div>
-
-            <div class="form-grid">
-              <label class="field">
-                <span>
-                  Provider ID
+        <div class="provider-table-card">
+          <div class="provider-table-scroll">
+            <table class="provider-table">
+              <thead>
+                <tr>
+                  <th scope="col">
+                    Provider ID
+                    <button
+                      class="hint-button"
+                      type="button"
+                      data-tooltip="Provider ID 会写入 YAML 顶层键，例如 siliconflow 或 ark，也会被模型配置引用。"
+                      aria-label="Provider ID 说明"
+                    >
+                      ?
+                    </button>
+                  </th>
+                  <th scope="col">
+                    类型
+                    <button
+                      class="hint-button"
+                      type="button"
+                      data-tooltip="用于减少输入错误。自定义服务可选择 OpenAI Compatible。"
+                      aria-label="Provider 类型说明"
+                    >
+                      ?
+                    </button>
+                  </th>
+                  <th scope="col">
+                    API URL
+                    <button
+                      class="hint-button"
+                      type="button"
+                      data-tooltip="服务商的 OpenAI-compatible base_url，后端会传给模型客户端。"
+                      aria-label="API URL 说明"
+                    >
+                      ?
+                    </button>
+                  </th>
+                  <th scope="col">
+                    API Key
+                    <button
+                      class="hint-button"
+                      type="button"
+                      data-tooltip="可以填写真实 Key，也可以填写环境变量名，例如 OPENAI_API_KEY。测试时后端会自动解析环境变量。"
+                      aria-label="API Key 说明"
+                    >
+                      ?
+                    </button>
+                  </th>
+                  <th scope="col">操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="provider in providers" :key="provider.localId">
+                  <td data-label="Provider ID">
+                    <input
+                      v-model.trim="provider.id"
+                      type="text"
+                      placeholder="siliconflow"
+                      @change="syncProviderReferences(provider)"
+                    >
+                  </td>
+                  <td data-label="类型">
+                    <select v-model="provider.type" @change="handleProviderTypeChange(provider)">
+                      <option v-for="type in providerTypeOptions" :key="type.value" :value="type.value">
+                        {{ type.label }}
+                      </option>
+                    </select>
+                  </td>
+                  <td data-label="API URL">
+                    <input v-model.trim="provider.base_url" type="url" placeholder="https://api.example.com/v1">
+                  </td>
+                  <td data-label="API Key">
+                    <div class="password-field provider-key-field">
+                      <input
+                        v-model.trim="provider.api_key"
+                        :type="visibleProviderKeys[provider.localId] ? 'text' : 'password'"
+                        placeholder="OPENAI_API_KEY 或 sk-..."
+                        autocomplete="off"
+                      >
+                      <button type="button" @click="toggleProviderKey(provider.localId)">
+                        {{ visibleProviderKeys[provider.localId] ? '隐藏' : '显示' }}
+                      </button>
+                    </div>
+                  </td>
+                  <td class="provider-action-cell" data-label="操作">
                   <button
-                    class="hint-button"
+                    class="provider-remove-button"
                     type="button"
-                    data-tooltip="Provider ID 会写入 YAML 顶层键，例如 siliconflow 或 ark，也会被模型配置引用。"
-                    aria-label="Provider ID 说明"
+                    :disabled="providers.length <= 1"
+                    @click="removeProvider(provider)"
                   >
-                    ?
+                    删除
                   </button>
-                </span>
-                <input
-                  v-model.trim="provider.id"
-                  type="text"
-                  placeholder="siliconflow"
-                  @change="syncProviderReferences(provider)"
-                >
-              </label>
-
-              <label class="field">
-                <span>
-                  Provider 类型
-                  <button
-                    class="hint-button"
-                    type="button"
-                    data-tooltip="用于减少输入错误。自定义服务可选择 OpenAI Compatible。"
-                    aria-label="Provider 类型说明"
-                  >
-                    ?
-                  </button>
-                </span>
-                <select v-model="provider.type" @change="handleProviderTypeChange(provider)">
-                  <option v-for="type in providerTypeOptions" :key="type.value" :value="type.value">
-                    {{ type.label }}
-                  </option>
-                </select>
-              </label>
-
-              <label class="field wide">
-                <span>
-                  API URL
-                  <button
-                    class="hint-button"
-                    type="button"
-                    data-tooltip="服务商的 OpenAI-compatible base_url，后端会传给模型客户端。"
-                    aria-label="API URL 说明"
-                  >
-                    ?
-                  </button>
-                </span>
-                <input v-model.trim="provider.base_url" type="url" placeholder="https://api.example.com/v1">
-              </label>
-
-              <label class="field wide">
-                <span>
-                  API Key
-                  <button
-                    class="hint-button"
-                    type="button"
-                    data-tooltip="可以填写真实 Key，也可以填写环境变量名，例如 OPENAI_API_KEY。测试时后端会自动解析环境变量。"
-                    aria-label="API Key 说明"
-                  >
-                    ?
-                  </button>
-                </span>
-                <div class="password-field">
-                  <input
-                    v-model.trim="provider.api_key"
-                    :type="visibleProviderKeys[provider.localId] ? 'text' : 'password'"
-                    placeholder="OPENAI_API_KEY 或 sk-..."
-                    autocomplete="off"
-                  >
-                  <button type="button" @click="toggleProviderKey(provider.localId)">
-                    {{ visibleProviderKeys[provider.localId] ? '隐藏' : '显示' }}
-                  </button>
-                </div>
-              </label>
-            </div>
-          </article>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
         </div>
       </section>
 
@@ -248,62 +249,76 @@
           </div>
         </header>
 
-        <div class="model-grid">
-          <article v-for="item in agentModels" :key="item.key" class="model-card">
-            <div class="model-card-header">
-              <div>
-                <span class="key-chip">{{ item.config.key }}</span>
-                <h3>{{ item.label }}</h3>
-                <p>{{ item.description }}</p>
-              </div>
-              <button class="test-button" type="button" :disabled="isTesting(item.config.key)" @click="testModel(item)">
-                {{ isTesting(item.config.key) ? '测试中' : '测试连通性' }}
-              </button>
-            </div>
-
-            <div class="model-fields">
-              <label class="field">
-                <span>
-                  Provider
-                  <button
-                    class="hint-button"
-                    type="button"
-                    data-tooltip="该阶段模型使用的 Provider，与后端 YAML 配置键保持一致。"
-                    aria-label="智能体 Provider 说明"
-                  >
-                    ?
-                  </button>
-                </span>
-                <select v-model="item.config.provider">
-                  <option v-for="provider in providerOptions" :key="provider.value" :value="provider.value">
-                    {{ provider.label }}
-                  </option>
-                </select>
-              </label>
-
-              <label class="field">
-                <span>
-                  模型名称
-                  <button
-                    class="hint-button"
-                    type="button"
-                    data-tooltip="建议复杂分析阶段选择能力更强的模型，检索或简单规划阶段可选择更快模型。"
-                    aria-label="智能体模型名称说明"
-                  >
-                    ?
-                  </button>
-                </span>
-                <input v-model.trim="item.config.model" type="text" placeholder="model-name">
-              </label>
-            </div>
-
-            <p v-if="testResults[item.config.key]" class="test-result" :class="testResults[item.config.key].status">
-              {{ testResults[item.config.key].message }}
-              <span v-if="testResults[item.config.key].latency_ms">
-                {{ testResults[item.config.key].latency_ms }} ms
-              </span>
-            </p>
-          </article>
+        <div class="agent-table-card">
+          <div class="agent-table-scroll">
+            <table class="agent-model-table">
+              <thead>
+                <tr>
+                  <th scope="col">智能体阶段</th>
+                  <th scope="col">配置键名</th>
+                  <th scope="col">
+                    Provider
+                    <button
+                      class="hint-button"
+                      type="button"
+                      data-tooltip="该阶段模型使用的 Provider，与后端 YAML 配置键保持一致。"
+                      aria-label="智能体 Provider 说明"
+                    >
+                      ?
+                    </button>
+                  </th>
+                  <th scope="col">
+                    模型名称
+                    <button
+                      class="hint-button"
+                      type="button"
+                      data-tooltip="建议复杂分析阶段选择能力更强的模型，检索或简单规划阶段可选择更快模型。"
+                      aria-label="智能体模型名称说明"
+                    >
+                      ?
+                    </button>
+                  </th>
+                  <th scope="col">连通性</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="item in agentModels" :key="item.key">
+                  <td class="agent-stage-cell" data-label="智能体阶段">
+                    <strong>{{ item.label }}</strong>
+                    <span>{{ item.description }}</span>
+                  </td>
+                  <td class="agent-key-cell" data-label="配置键名">
+                    <span class="key-chip">{{ item.config.key }}</span>
+                  </td>
+                  <td data-label="Provider">
+                    <select v-model="item.config.provider">
+                      <option v-for="provider in providerOptions" :key="provider.value" :value="provider.value">
+                        {{ provider.label }}
+                      </option>
+                    </select>
+                  </td>
+                  <td data-label="模型名称">
+                    <input v-model.trim="item.config.model" type="text" placeholder="model-name">
+                  </td>
+                  <td class="agent-test-cell" data-label="连通性">
+                    <button class="test-button" type="button" :disabled="isTesting(item.config.key)" @click="testModel(item)">
+                      {{ isTesting(item.config.key) ? '测试中' : '测试' }}
+                    </button>
+                    <p
+                      v-if="testResults[item.config.key]"
+                      class="inline-test-result"
+                      :class="testResults[item.config.key].status"
+                    >
+                      {{ testResults[item.config.key].message }}
+                      <span v-if="testResults[item.config.key].latency_ms">
+                        {{ testResults[item.config.key].latency_ms }} ms
+                      </span>
+                    </p>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
         </div>
       </section>
 
@@ -813,7 +828,6 @@ onMounted(async () => {
 
 .config-hero h1,
 .section-header h2,
-.provider-card h3,
 .model-card h3 {
   margin: 0;
   color: var(--pa-text);
@@ -980,25 +994,19 @@ onMounted(async () => {
   line-height: 1.6;
 }
 
-.provider-grid,
 .model-grid {
   display: grid;
   gap: 14px;
 }
 
-.provider-grid {
-  grid-template-columns: repeat(auto-fit, minmax(310px, 1fr));
-}
-
 .model-grid {
-  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  grid-template-columns: 1fr;
 }
 
 .default-grid {
-  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  grid-template-columns: 1fr;
 }
 
-.provider-card,
 .model-card {
   display: grid;
   gap: 14px;
@@ -1008,20 +1016,6 @@ onMounted(async () => {
   background: var(--pa-surface);
 }
 
-.provider-card {
-  position: relative;
-  overflow: hidden;
-}
-
-.provider-card::before {
-  position: absolute;
-  inset: 0 auto 0 0;
-  width: 4px;
-  background: linear-gradient(180deg, var(--pa-primary), var(--pa-success));
-  content: '';
-}
-
-.card-top,
 .model-card-header {
   display: flex;
   align-items: flex-start;
@@ -1029,7 +1023,6 @@ onMounted(async () => {
   gap: 12px;
 }
 
-.card-top h3,
 .model-card h3 {
   margin-top: 4px;
   font-size: 1rem;
@@ -1046,6 +1039,207 @@ onMounted(async () => {
   background:
     linear-gradient(180deg, color-mix(in srgb, var(--pa-primary-soft) 42%, transparent), transparent 120px),
     var(--pa-surface);
+}
+
+.provider-table-card {
+  border: 1px solid var(--pa-border);
+  border-radius: 10px;
+  background: var(--pa-surface);
+  overflow: hidden;
+}
+
+.provider-table-scroll {
+  overflow-x: auto;
+}
+
+.provider-table {
+  width: 100%;
+  min-width: 980px;
+  border-collapse: collapse;
+}
+
+.provider-table th,
+.provider-table td {
+  padding: 12px 12px;
+  border-bottom: 1px solid var(--pa-border);
+  text-align: left;
+  vertical-align: middle;
+}
+
+.provider-table th {
+  background: var(--pa-surface-soft);
+  color: var(--pa-text-muted);
+  font-size: 0.78rem;
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+.provider-table th .hint-button {
+  margin-left: 5px;
+  vertical-align: middle;
+}
+
+.provider-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.provider-table tbody tr:hover {
+  background: color-mix(in srgb, var(--pa-primary-soft) 18%, transparent);
+}
+
+.provider-table input,
+.provider-table select {
+  min-height: 36px;
+}
+
+.provider-key-field {
+  min-width: 280px;
+}
+
+.provider-action-cell {
+  width: 86px;
+}
+
+.provider-remove-button {
+  min-height: 34px;
+  padding: 0 11px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--pa-danger);
+  font: inherit;
+  font-weight: 850;
+  cursor: pointer;
+}
+
+.provider-remove-button:hover {
+  background: var(--pa-danger-soft);
+}
+
+.provider-remove-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+.agent-table-card {
+  border: 1px solid var(--pa-border);
+  border-radius: 10px;
+  background: var(--pa-surface);
+  overflow: hidden;
+}
+
+.agent-table-scroll {
+  overflow-x: auto;
+}
+
+.agent-model-table {
+  width: 100%;
+  min-width: 920px;
+  border-collapse: collapse;
+}
+
+.agent-model-table th,
+.agent-model-table td {
+  padding: 13px 14px;
+  border-bottom: 1px solid var(--pa-border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.agent-model-table th {
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--pa-primary-soft) 66%, transparent), transparent),
+    var(--pa-surface-soft);
+  color: var(--pa-text-muted);
+  font-size: 0.78rem;
+  font-weight: 900;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.agent-model-table th .hint-button {
+  margin-left: 5px;
+  vertical-align: middle;
+}
+
+.agent-model-table tbody tr {
+  transition: background 0.16s ease;
+}
+
+.agent-model-table tbody tr:hover {
+  background: color-mix(in srgb, var(--pa-primary-soft) 24%, transparent);
+}
+
+.agent-model-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.agent-model-table select,
+.agent-model-table input {
+  min-height: 36px;
+}
+
+.agent-stage-cell {
+  width: 27%;
+}
+
+.agent-stage-cell strong {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--pa-text);
+  font-size: 0.94rem;
+}
+
+.agent-stage-cell span {
+  display: block;
+  color: var(--pa-text-muted);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+.agent-key-cell {
+  width: 19%;
+}
+
+.agent-test-cell {
+  min-width: 150px;
+}
+
+.agent-test-cell .test-button {
+  width: fit-content;
+  min-height: 34px;
+}
+
+.inline-test-result {
+  display: grid;
+  gap: 3px;
+  max-width: 260px;
+  margin: 0;
+  margin-top: 8px;
+  padding: 7px 9px;
+  border-radius: 8px;
+  font-size: 0.75rem;
+  font-weight: 800;
+  line-height: 1.45;
+}
+
+.inline-test-result.running {
+  background: var(--pa-warning-soft);
+  color: var(--pa-warning);
+}
+
+.inline-test-result.success {
+  background: var(--pa-success-soft);
+  color: var(--pa-success);
+}
+
+.inline-test-result.failed {
+  background: var(--pa-danger-soft);
+  color: var(--pa-danger);
+}
+
+.inline-test-result span {
+  opacity: 0.78;
 }
 
 .form-grid,
@@ -1256,13 +1450,11 @@ select:focus {
 
   .form-grid,
   .model-fields,
-  .provider-grid,
   .model-grid,
   .default-grid {
     grid-template-columns: 1fr;
   }
 
-  .card-top,
   .model-card-header {
     flex-direction: column;
   }
