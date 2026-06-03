@@ -1,123 +1,81 @@
 <template>
-  <div 
-    class="sidebar" 
-    :class="{ 'collapsed': collapsed, 'mobile': isMobile }"
-  >
-    <div class="sidebar-header">
-      <div class="logo" v-if="!collapsed">
-        <span class="logo-icon">📊</span>
-        <span class="logo-text">Paper Agent</span>
-      </div>
-      <button 
-        class="toggle-btn"
-        @click="$emit('toggle')"
-        :title="collapsed ? '展开侧边栏' : '折叠侧边栏'"
-      >
-        {{ collapsed ? '→' : '←' }}
+  <aside class="sidebar" :class="{ collapsed }">
+    <header class="sidebar-header">
+      <button class="brand-button" type="button" title="报告生成" @click="navigate('/')">
+        <span class="brand-mark">PA</span>
+        <span v-if="!collapsed" class="brand-copy">
+          <strong>Paper Agent</strong>
+          <small>Academic Research</small>
+        </span>
       </button>
-    </div>
 
-    <nav class="sidebar-nav">
-      <div 
-        v-for="item in menuItems" 
-        :key="item.path"
-        class="nav-item"
-        :class="{ 'active': isActive(item.path), 'has-children': item.children }"
+      <button
+        class="collapse-button"
+        type="button"
+        :title="collapsed ? '展开导航' : '收起导航'"
+        @click="$emit('toggle')"
       >
-        <div 
-          class="nav-item-header"
-          @click="item.children ? toggleChildren(item) : navigate(item.path)"
-        >
-          <span class="nav-icon">{{ item.icon }}</span>
-          <span class="nav-text" v-if="!collapsed">{{ item.title }}</span>
-          <span 
-            class="expand-icon" 
-            v-if="item.children && !collapsed"
-            :class="{ 'expanded': item.expanded }"
-          >
-            ▼
-          </span>
-        </div>
+        {{ collapsed ? '›' : '‹' }}
+      </button>
+    </header>
 
-        <div 
-          class="nav-children" 
-          v-if="item.children && item.expanded && !collapsed"
-        >
-          <div 
-            v-for="child in item.children" 
-            :key="child.path"
-            class="nav-child-item"
-            :class="{ 'active': isActive(child.path) }"
-            @click="navigate(child.path)"
-          >
-            <span class="nav-icon">{{ child.icon }}</span>
-            <span class="nav-text">{{ child.title }}</span>
-          </div>
-        </div>
-      </div>
+    <nav class="nav-list" aria-label="主导航">
+      <button
+        v-for="item in navItems"
+        :key="item.path"
+        type="button"
+        class="nav-item"
+        :class="{ active: isActive(item.path) }"
+        :title="collapsed ? item.title : ''"
+        @click="navigate(item.path)"
+      >
+        <span class="nav-icon">{{ item.icon }}</span>
+        <span v-if="!collapsed" class="nav-text">{{ item.title }}</span>
+      </button>
     </nav>
 
-    <div class="sidebar-footer" v-if="!collapsed">
-      <div class="user-info">
-        <span class="user-avatar">👤</span>
-        <span class="user-name">用户</span>
-      </div>
-    </div>
-  </div>
+    <footer class="sidebar-footer">
+      <button
+        class="theme-toggle"
+        type="button"
+        :title="theme === 'light' ? '切换到 Dark' : '切换到 Light'"
+        @click="$emit('toggle-theme')"
+      >
+        <span class="theme-dot">{{ theme === 'light' ? 'L' : 'D' }}</span>
+        <span v-if="!collapsed" class="theme-label">
+          <strong>{{ theme === 'light' ? 'Light' : 'Dark' }}</strong>
+          <small>全局主题</small>
+        </span>
+      </button>
+    </footer>
+  </aside>
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref } from 'vue'
 import { useRoute } from 'vue-router'
 
-const props = defineProps({
+defineProps({
   collapsed: {
     type: Boolean,
     default: false
   },
-  isMobile: {
-    type: Boolean,
-    default: false
+  theme: {
+    type: String,
+    default: 'light'
   }
 })
 
-const emit = defineEmits(['toggle', 'navigate'])
-
+const emit = defineEmits(['toggle', 'navigate', 'toggle-theme'])
 const route = useRoute()
 
-const menuItems = ref([
-  {
-    title: '报告生成',
-    path: '/',
-    icon: '📝',
-    children: [
-      {
-        title: '新建报告',
-        path: '/',
-        icon: '➕'
-      },
-      {
-        title: '历史报告',
-        path: '/history',
-        icon: '📚'
-      }
-    ],
-    expanded: true
-  },
-  {
-    title: '知识库管理',
-    path: '/knowledge',
-    icon: '🗄️',
-    expanded: false
-  }
+const navItems = ref([
+  { title: '报告生成', path: '/', icon: 'R' },
+  { title: '系统配置', path: '/configuration', icon: 'C' }
 ])
 
 const isActive = (path) => {
-  return route.path === path || route.path.startsWith(path + '/')
-}
-
-const toggleChildren = (item) => {
-  item.expanded = !item.expanded
+  return path === '/' ? route.path === '/' : route.path.startsWith(path)
 }
 
 const navigate = (path) => {
@@ -127,252 +85,218 @@ const navigate = (path) => {
 
 <style scoped>
 .sidebar {
-  width: 12%;
-  min-width: 200px;
-  max-width: 280px;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  width: 236px;
+  min-width: 236px;
   height: 100%;
-  background: linear-gradient(180deg, #2c3e50 0%, #34495e 100%);
-  display: flex;
-  flex-direction: column;
-  transition: all 0.3s ease;
-  box-shadow: 2px 0 10px rgba(0, 0, 0, 0.1);
-  position: relative;
-  z-index: 1000;
+  background: var(--pa-surface);
+  border-right: 1px solid var(--pa-border);
+  transition: width 0.22s ease, min-width 0.22s ease;
 }
 
 .sidebar.collapsed {
-  width: 70px;
-  min-width: 70px;
-  max-width: 70px;
-}
-
-.sidebar.mobile {
-  position: fixed;
-  left: 0;
-  top: 0;
-  z-index: 2000;
-}
-
-.sidebar.mobile.collapsed {
-  transform: translateX(-100%);
+  width: 68px;
+  min-width: 68px;
 }
 
 .sidebar-header {
-  padding: 20px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
   align-items: center;
-  justify-content: space-between;
-  min-height: 70px;
+  min-height: 68px;
+  padding: 12px;
+  border-bottom: 1px solid var(--pa-border);
 }
 
-.logo {
-  display: flex;
+.sidebar.collapsed .sidebar-header {
+  grid-template-columns: 1fr;
+  justify-items: center;
+  gap: 10px;
+  padding: 10px 8px;
+}
+
+.brand-button {
+  display: inline-flex;
   align-items: center;
   gap: 10px;
-  transition: opacity 0.3s ease;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--pa-text);
+  text-align: left;
+  cursor: pointer;
 }
 
-.logo-icon {
-  font-size: 24px;
+.brand-mark,
+.nav-icon,
+.theme-dot {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  border-radius: 8px;
+  font-weight: 800;
 }
 
-.logo-text {
-  color: white;
-  font-size: 18px;
-  font-weight: 600;
+.brand-mark {
+  width: 38px;
+  height: 38px;
+  background: var(--pa-primary-soft);
+  color: var(--pa-primary);
+  letter-spacing: 0;
+}
+
+.brand-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.brand-copy strong,
+.brand-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.toggle-btn {
-  background: rgba(255, 255, 255, 0.1);
-  border: none;
-  color: white;
+.brand-copy strong {
+  color: var(--pa-text);
+  font-size: 0.98rem;
+}
+
+.brand-copy small {
+  color: var(--pa-text-subtle);
+  font-size: 0.74rem;
+}
+
+.collapse-button {
+  display: grid;
+  place-items: center;
   width: 32px;
   height: 32px;
-  border-radius: 6px;
+  border: 1px solid var(--pa-border);
+  border-radius: 8px;
+  background: var(--pa-surface);
+  color: var(--pa-text-muted);
+  font-size: 1.25rem;
   cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: all 0.2s ease;
-  font-size: 16px;
 }
 
-.toggle-btn:hover {
-  background: rgba(255, 255, 255, 0.2);
-  transform: scale(1.05);
+.collapse-button:hover {
+  background: var(--pa-surface-soft);
 }
 
-.toggle-btn:active {
-  transform: scale(0.95);
-}
-
-.sidebar.collapsed .toggle-btn {
-  margin: 0 auto;
-}
-
-.sidebar-nav {
-  flex: 1;
-  overflow-y: auto;
-  padding: 10px 0;
+.nav-list {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  min-height: 0;
+  padding: 14px 10px;
 }
 
 .nav-item {
-  margin: 4px 10px;
-  border-radius: 8px;
-  overflow: hidden;
-  transition: all 0.2s ease;
-}
-
-.nav-item-header {
-  display: flex;
-  align-items: center;
-  padding: 12px 16px;
-  cursor: pointer;
-  color: rgba(255, 255, 255, 0.8);
-  transition: all 0.2s ease;
-  border-radius: 8px;
-  position: relative;
-}
-
-.nav-item-header:hover {
-  background: rgba(255, 255, 255, 0.1);
-  color: white;
-}
-
-.nav-item-header:active {
-  transform: scale(0.98);
-}
-
-.nav-item.active > .nav-item-header {
-  background: rgba(52, 152, 219, 0.3);
-  color: white;
-  font-weight: 500;
-}
-
-.nav-item.active > .nav-item-header::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 4px;
-  height: 60%;
-  background: #3498db;
-  border-radius: 0 4px 4px 0;
-}
-
-.nav-icon {
-  font-size: 18px;
-  min-width: 24px;
-  text-align: center;
-}
-
-.nav-text {
-  flex: 1;
-  margin-left: 12px;
-  white-space: nowrap;
-  transition: opacity 0.2s ease;
-}
-
-.sidebar.collapsed .nav-text {
-  display: none;
-}
-
-.expand-icon {
-  font-size: 10px;
-  transition: transform 0.3s ease;
-  color: rgba(255, 255, 255, 0.6);
-}
-
-.expand-icon.expanded {
-  transform: rotate(180deg);
-}
-
-.nav-children {
-  margin-top: 4px;
-  padding-left: 12px;
-  background: rgba(0, 0, 0, 0.1);
-  border-radius: 0 0 8px 8px;
-}
-
-.nav-child-item {
-  display: flex;
-  align-items: center;
-  padding: 10px 16px;
-  cursor: pointer;
-  color: rgba(255, 255, 255, 0.7);
-  transition: all 0.2s ease;
-  border-radius: 6px;
-  margin: 2px 0;
-}
-
-.nav-child-item:hover {
-  background: rgba(255, 255, 255, 0.1);
-  color: white;
-}
-
-.nav-child-item.active {
-  background: rgba(52, 152, 219, 0.4);
-  color: white;
-  font-weight: 500;
-}
-
-.nav-child-item .nav-icon {
-  font-size: 14px;
-}
-
-.sidebar-footer {
-  padding: 16px;
-  border-top: 1px solid rgba(255, 255, 255, 0.1);
-}
-
-.user-info {
   display: flex;
   align-items: center;
   gap: 10px;
-  color: rgba(255, 255, 255, 0.8);
-}
-
-.user-avatar {
-  font-size: 24px;
-}
-
-.user-name {
-  font-size: 14px;
-}
-
-.sidebar.collapsed .sidebar-footer {
-  display: none;
-}
-
-.sidebar-nav::-webkit-scrollbar {
-  width: 6px;
-}
-
-.sidebar-nav::-webkit-scrollbar-track {
+  width: 100%;
+  min-height: 42px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: 8px;
   background: transparent;
+  color: var(--pa-text-muted);
+  text-align: left;
+  cursor: pointer;
 }
 
-.sidebar-nav::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.2);
-  border-radius: 3px;
+.sidebar.collapsed .nav-item {
+  justify-content: center;
+  padding: 0;
 }
 
-.sidebar-nav::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.3);
+.nav-item:hover {
+  background: var(--pa-surface-soft);
+  color: var(--pa-text);
 }
 
-@media (max-width: 768px) {
-  .sidebar {
-    width: 280px;
-    min-width: 280px;
-    max-width: 280px;
-  }
+.nav-item.active {
+  border-color: color-mix(in srgb, var(--pa-primary) 35%, transparent);
+  background: var(--pa-primary-soft);
+  color: var(--pa-primary-strong);
+}
 
-  .sidebar.collapsed {
-    transform: translateX(-100%);
-  }
+.nav-icon {
+  width: 26px;
+  height: 26px;
+  background: var(--pa-surface-muted);
+  color: currentColor;
+  font-size: 0.78rem;
+}
+
+.nav-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 700;
+}
+
+.sidebar-footer {
+  padding: 12px 10px;
+  border-top: 1px solid var(--pa-border);
+}
+
+.theme-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 44px;
+  padding: 0 10px;
+  border: 1px solid var(--pa-border);
+  border-radius: 8px;
+  background: var(--pa-surface-soft);
+  color: var(--pa-text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.sidebar.collapsed .theme-toggle {
+  justify-content: center;
+  padding: 0;
+}
+
+.theme-toggle:hover {
+  border-color: var(--pa-border-strong);
+}
+
+.theme-dot {
+  width: 26px;
+  height: 26px;
+  background: var(--pa-surface);
+  color: var(--pa-primary);
+  font-size: 0.76rem;
+}
+
+.theme-label {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.theme-label strong,
+.theme-label small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.theme-label strong {
+  font-size: 0.86rem;
+}
+
+.theme-label small {
+  color: var(--pa-text-subtle);
+  font-size: 0.72rem;
 }
 </style>

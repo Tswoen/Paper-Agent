@@ -1,8 +1,8 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import MainLayout from '../layouts/MainLayout.vue'
 import Home from '../App.vue'
-import KnowledgeBase from '../views/KnowledgeBase.vue'
 import History from '../views/History.vue'
+import Configuration from '../views/Configuration.vue'
 
 const routes = [
   {
@@ -15,7 +15,7 @@ const routes = [
         component: Home,
         meta: {
           title: '报告生成',
-          icon: '📝'
+          icon: 'R'
         }
       },
       {
@@ -24,17 +24,21 @@ const routes = [
         component: History,
         meta: {
           title: '历史报告',
-          icon: '📚'
+          icon: 'H'
+        }
+      },
+      {
+        path: 'configuration',
+        name: 'Configuration',
+        component: Configuration,
+        meta: {
+          title: '系统配置',
+          icon: 'C'
         }
       },
       {
         path: 'knowledge',
-        name: 'KnowledgeBase',
-        component: KnowledgeBase,
-        meta: {
-          title: '知识库管理',
-          icon: '🗄️'
-        }
+        redirect: '/'
       }
     ]
   }

@@ -6,6 +6,7 @@ from sse_starlette.sse import EventSourceResponse
 from src.agents.userproxy_agent import WebUserProxyAgent, userProxyAgent
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from src.core.config_router import configuration
 from src.knowledge.knowledge_router import knowledge
 from fastapi import APIRouter
 
@@ -16,6 +17,7 @@ logger = setup_logger(name='main', log_file='project.log')
 
 app = FastAPI()
 app.include_router(knowledge)
+app.include_router(configuration)
 # === CORS 配置（开发时可用 "*"，生产请限定具体域名） ===
 app.add_middleware(
     CORSMiddleware,

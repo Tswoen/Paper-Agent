@@ -34,6 +34,14 @@ class Config:
         self._resolve_config_references()
         
         self._initialized = True
+
+    def reload(self) -> None:
+        """重新加载环境变量和YAML配置，用于配置页面保存后刷新运行时参数"""
+        logger.info("重新加载配置")
+        self._config = {}
+        self._load_env()
+        self._load_yaml_config()
+        self._resolve_config_references()
     
     def _load_env(self) -> None:
         """加载.env文件中的环境变量并存储到配置字典中"""

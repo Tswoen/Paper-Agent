@@ -1,56 +1,44 @@
 <template>
-  <div class="main-layout">
-    <Sidebar 
+  <div class="main-layout" :data-theme="theme">
+    <Sidebar
       :collapsed="sidebarCollapsed"
-      :is-mobile="isMobile"
+      :theme="theme"
       @toggle="toggleSidebar"
       @navigate="handleNavigate"
+      @toggle-theme="toggleTheme"
     />
-    <MainContent 
-      :collapsed="sidebarCollapsed"
-      :is-mobile="isMobile"
-      @toggle-sidebar="toggleSidebar"
-    />
+    <MainContent :collapsed="sidebarCollapsed" />
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
-import { useRouter, useRoute } from 'vue-router'
+import { onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import Sidebar from '../components/Sidebar.vue'
 import MainContent from '../components/MainContent.vue'
 
 const router = useRouter()
-const route = useRoute()
-
 const sidebarCollapsed = ref(false)
-const isMobile = ref(false)
-
-const checkMobile = () => {
-  isMobile.value = window.innerWidth < 768
-  if (isMobile.value) {
-    sidebarCollapsed.value = true
-  }
-}
+const theme = ref('light')
 
 const toggleSidebar = () => {
   sidebarCollapsed.value = !sidebarCollapsed.value
 }
 
+const toggleTheme = () => {
+  theme.value = theme.value === 'light' ? 'dark' : 'light'
+  localStorage.setItem('paper-agent-theme', theme.value)
+}
+
 const handleNavigate = (path) => {
-  if (isMobile.value) {
-    sidebarCollapsed.value = true
-  }
   router.push(path)
 }
 
 onMounted(() => {
-  checkMobile()
-  window.addEventListener('resize', checkMobile)
-})
-
-onUnmounted(() => {
-  window.removeEventListener('resize', checkMobile)
+  const savedTheme = localStorage.getItem('paper-agent-theme')
+  if (savedTheme === 'light' || savedTheme === 'dark') {
+    theme.value = savedTheme
+  }
 })
 </script>
 
@@ -60,5 +48,7 @@ onUnmounted(() => {
   width: 100%;
   height: 100vh;
   overflow: hidden;
+  background: var(--pa-bg);
+  color: var(--pa-text);
 }
 </style>

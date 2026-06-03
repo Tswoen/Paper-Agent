@@ -1,95 +1,73 @@
 <template>
   <div class="history-container">
-    <div class="page-header">
-      <h1>历史报告 （此功能还在开发中，暂不可使用）</h1>
-      <div class="header-actions">
-        <button 
-          class="btn-refresh"
-          @click="loadHistory"
-          :disabled="isLoading"
-        >
-          🔄 刷新
-        </button>
+    <header class="history-header">
+      <div>
+        <p class="eyebrow">Conversation Archive</p>
+        <h1>历史报告</h1>
       </div>
-    </div>
+      <button class="refresh-button" type="button" :disabled="isLoading" @click="loadHistory">
+        {{ isLoading ? '刷新中' : '刷新' }}
+      </button>
+    </header>
 
-    <div class="loading-state" v-if="isLoading">
+    <section v-if="isLoading" class="center-state">
       <div class="spinner"></div>
-      <p>加载历史报告...</p>
-    </div>
+      <p>正在加载历史报告...</p>
+    </section>
 
-    <div class="empty-state" v-else-if="historyList.length === 0">
-      <div class="empty-icon">📋</div>
-      <p>暂无历史报告</p>
-      <button class="btn-create" @click="goToCreate">创建第一个报告</button>
-    </div>
+    <section v-else-if="historyList.length === 0" class="empty-state">
+      <div class="empty-mark">AI</div>
+      <h2>还没有历史报告</h2>
+      <p>完成一次对话式调研后，报告会自动保存在这里。</p>
+      <button class="primary-button" type="button" @click="goToCreate">开始对话</button>
+    </section>
 
-    <div class="history-list" v-else>
-      <div 
-        v-for="item in historyList" 
-        :key="item.id"
-        class="history-card"
-      >
-        <div class="card-header">
+    <section v-else class="history-list">
+      <article v-for="item in historyList" :key="item.id" class="history-card">
+        <div class="card-main">
           <div class="report-title">
-            <span class="report-icon">📄</span>
-            <span class="title-text">{{ item.title || '未命名报告' }}</span>
+            <span class="report-mark">{{ getTitleInitial(item.title) }}</span>
+            <div>
+              <h2>{{ item.title || '未命名报告' }}</h2>
+              <span class="report-time">{{ formatDate(item.createdAt) }}</span>
+            </div>
           </div>
-          <div class="report-status" :class="item.status">
+
+          <p class="report-query">{{ item.query }}</p>
+
+          <div class="report-preview" v-if="item.content">
+            {{ item.content }}
+          </div>
+        </div>
+
+        <div class="card-side">
+          <span class="report-status" :class="item.status">
             {{ getStatusText(item.status) }}
-          </div>
-        </div>
-
-        <div class="card-content">
-          <div class="report-query">
-            <span class="label">查询内容:</span>
-            <span class="content">{{ item.query }}</span>
-          </div>
-          
-          <div class="report-meta">
-            <div class="meta-item">
-              <span class="meta-icon">📅</span>
-              <span class="meta-text">{{ formatDate(item.createdAt) }}</span>
-            </div>
-            <div class="meta-item" v-if="item.knowledgeBase">
-              <span class="meta-icon">📚</span>
-              <span class="meta-text">{{ item.knowledgeBase }}</span>
-            </div>
-          </div>
-        </div>
-
-        <div class="card-actions">
-          <button 
-            class="btn-view"
-            @click="viewReport(item)"
-          >
-            👁️ 查看详情
+          </span>
+          <button class="text-button" type="button" @click="viewReport(item)">
+            回到对话
           </button>
-          <button 
-            class="btn-delete"
-            @click="deleteReport(item)"
-          >
-            🗑️ 删除
+          <button class="danger-button" type="button" @click="deleteReport(item)">
+            删除
           </button>
         </div>
-      </div>
-    </div>
+      </article>
+    </section>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 
 const router = useRouter()
-
 const isLoading = ref(false)
 const historyList = ref([])
 
 const loadHistory = async () => {
   isLoading.value = true
   try {
-    await new Promise(resolve => setTimeout(resolve, 500))
+    await new Promise(resolve => setTimeout(resolve, 250))
     const saved = localStorage.getItem('reportHistory')
     historyList.value = saved ? JSON.parse(saved) : []
   } catch (error) {
@@ -122,6 +100,10 @@ const formatDate = (dateString) => {
   })
 }
 
+const getTitleInitial = (title = '') => {
+  return title.trim().slice(0, 1).toUpperCase() || 'R'
+}
+
 const viewReport = (item) => {
   router.push({
     path: '/',
@@ -130,16 +112,16 @@ const viewReport = (item) => {
 }
 
 const deleteReport = (item) => {
-  if (!confirm(`确定要删除报告"${item.title || '未命名报告'}"吗？此操作不可恢复。`)) {
+  if (!window.confirm(`确定要删除报告"${item.title || '未命名报告'}"吗？此操作不可恢复。`)) {
     return
   }
-  
+
   try {
-    historyList.value = historyList.value.filter(h => h.id !== item.id)
+    historyList.value = historyList.value.filter(history => history.id !== item.id)
     localStorage.setItem('reportHistory', JSON.stringify(historyList.value))
   } catch (error) {
     console.error('删除报告失败:', error)
-    alert('删除失败，请重试')
+    window.alert('删除失败，请重试。')
   }
 }
 
@@ -154,319 +136,242 @@ onMounted(() => {
 
 <style scoped>
 .history-container {
-  max-width: 1200px;
-  margin: 0 auto;
-  padding: 20px;
-  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  height: 100%;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 6px;
+  color: #17202a;
 }
 
-.page-header {
+.history-header {
   display: flex;
+  align-items: center;
   justify-content: space-between;
-  align-items: center;
-  margin-bottom: 30px;
-  padding-bottom: 20px;
-  border-bottom: 2px solid #e9ecef;
+  gap: 14px;
+  margin-bottom: 16px;
+  padding: 18px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #ffffff;
 }
 
-.page-header h1 {
+.eyebrow {
+  margin: 0 0 5px;
+  color: #0f766e;
+  font-size: 0.76rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.history-header h1 {
   margin: 0;
-  font-size: clamp(24px, 3vw, 32px);
-  font-weight: 600;
-  color: #2c3e50;
+  color: #111827;
+  font-size: 1.45rem;
 }
 
-.header-actions {
-  display: flex;
-  gap: 12px;
-}
-
-.btn-refresh {
-  padding: 10px 20px;
-  background: #3498db;
-  color: white;
-  border: none;
-  border-radius: 6px;
-  font-size: 14px;
-  font-weight: 500;
+.refresh-button,
+.primary-button,
+.text-button,
+.danger-button {
+  min-height: 38px;
+  border: 0;
+  border-radius: 8px;
+  font: inherit;
+  font-weight: 800;
   cursor: pointer;
-  transition: all 0.2s;
 }
 
-.btn-refresh:hover:not(:disabled) {
-  background: #2980b9;
-  transform: translateY(-1px);
+.refresh-button,
+.primary-button {
+  padding: 0 16px;
+  background: #14b8a6;
+  color: #042f2e;
 }
 
-.btn-refresh:disabled {
-  background: #bdc3c7;
+.refresh-button:disabled {
   cursor: not-allowed;
-  transform: none;
+  opacity: 0.6;
 }
 
-.loading-state {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  padding: 60px 20px;
-  color: #6c757d;
+.center-state,
+.empty-state {
+  display: grid;
+  justify-items: center;
+  align-content: center;
+  gap: 12px;
+  min-height: calc(100% - 104px);
+  padding: 32px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #ffffff;
+  text-align: center;
 }
 
 .spinner {
-  width: 40px;
-  height: 40px;
-  border: 4px solid #f3f3f3;
-  border-top: 4px solid #3498db;
+  width: 42px;
+  height: 42px;
+  border: 4px solid #e5e7eb;
+  border-top-color: #14b8a6;
   border-radius: 50%;
   animation: spin 1s linear infinite;
-  margin-bottom: 16px;
 }
 
 @keyframes spin {
-  0% { transform: rotate(0deg); }
-  100% { transform: rotate(360deg); }
+  to { transform: rotate(360deg); }
 }
 
-.loading-state p {
-  margin: 0;
-  font-size: 14px;
-}
-
-.empty-state {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  padding: 80px 20px;
-  background: #f8f9fa;
-  border-radius: 12px;
-  color: #6c757d;
-}
-
-.empty-icon {
-  font-size: 64px;
-  margin-bottom: 16px;
-}
-
+.center-state p,
 .empty-state p {
-  margin: 0 0 20px 0;
-  font-size: 16px;
+  margin: 0;
+  color: #64748b;
 }
 
-.btn-create {
-  background: #3498db;
-  color: white;
-  padding: 12px 24px;
-  border: none;
+.empty-mark {
+  display: grid;
+  place-items: center;
+  width: 58px;
+  height: 58px;
   border-radius: 8px;
-  font-size: 14px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.2s;
+  background: #17202a;
+  color: #2dd4bf;
+  font-weight: 900;
 }
 
-.btn-create:hover {
-  background: #2980b9;
-  transform: translateY(-1px);
+.empty-state h2 {
+  margin: 4px 0 0;
+  color: #111827;
+  font-size: 1.35rem;
 }
 
 .history-list {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
-  gap: 20px;
+  gap: 12px;
 }
 
 .history-card {
-  background: white;
-  border-radius: 12px;
-  padding: 20px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
-  transition: all 0.3s ease;
-  border: 1px solid #e9ecef;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 140px;
+  gap: 16px;
+  padding: 16px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 12px 34px rgba(17, 24, 39, 0.06);
 }
 
-.history-card:hover {
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
-  transform: translateY(-2px);
-}
-
-.card-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 16px;
-  padding-bottom: 12px;
-  border-bottom: 1px solid #e9ecef;
+.card-main {
+  min-width: 0;
 }
 
 .report-title {
   display: flex;
+  gap: 12px;
   align-items: center;
-  gap: 8px;
-  flex: 1;
-  min-width: 0;
 }
 
-.report-icon {
-  font-size: 20px;
-  flex-shrink: 0;
+.report-mark {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  flex: 0 0 auto;
+  border-radius: 8px;
+  background: #ecfdf5;
+  color: #0f766e;
+  font-weight: 900;
 }
 
-.title-text {
-  font-size: 16px;
-  font-weight: 600;
-  color: #2c3e50;
-  white-space: nowrap;
+.report-title h2 {
+  margin: 0 0 4px;
   overflow: hidden;
+  color: #111827;
+  font-size: 1rem;
   text-overflow: ellipsis;
-}
-
-.report-status {
-  padding: 4px 12px;
-  border-radius: 12px;
-  font-size: 12px;
-  font-weight: 500;
   white-space: nowrap;
 }
 
-.report-status.completed {
-  background: #d4edda;
-  color: #155724;
-}
-
-.report-status.processing {
-  background: #cce5ff;
-  color: #004085;
-}
-
-.report-status.failed {
-  background: #f8d7da;
-  color: #721c24;
-}
-
-.report-status.pending {
-  background: #fff3cd;
-  color: #856404;
-}
-
-.card-content {
-  margin-bottom: 16px;
+.report-time {
+  color: #64748b;
+  font-size: 0.8rem;
 }
 
 .report-query {
-  margin-bottom: 12px;
+  margin: 14px 0 0;
+  color: #334155;
+  line-height: 1.6;
 }
 
-.report-query .label {
-  display: block;
-  font-size: 12px;
-  color: #6c757d;
-  margin-bottom: 4px;
+.report-preview {
+  display: -webkit-box;
+  margin-top: 10px;
+  overflow: hidden;
+  color: #64748b;
+  font-size: 0.9rem;
+  line-height: 1.55;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
-.report-query .content {
-  display: block;
-  font-size: 14px;
-  color: #2c3e50;
-  line-height: 1.5;
-  word-break: break-word;
-}
-
-.report-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 16px;
-}
-
-.meta-item {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 12px;
-  color: #6c757d;
-}
-
-.meta-icon {
-  font-size: 14px;
-}
-
-.meta-text {
-  color: #495057;
-}
-
-.card-actions {
-  display: flex;
+.card-side {
+  display: grid;
+  align-content: start;
   gap: 8px;
-  padding-top: 12px;
-  border-top: 1px solid #e9ecef;
 }
 
-.btn-view,
-.btn-delete {
-  flex: 1;
-  padding: 8px 16px;
-  border: none;
-  border-radius: 6px;
-  font-size: 13px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.2s;
+.report-status {
+  display: inline-grid;
+  place-items: center;
+  min-height: 30px;
+  padding: 0 10px;
+  border-radius: 8px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-size: 0.78rem;
+  font-weight: 900;
 }
 
-.btn-view {
-  background: #e3f2fd;
-  color: #3498db;
+.report-status.failed {
+  background: #fef2f2;
+  color: #b91c1c;
 }
 
-.btn-view:hover {
-  background: #3498db;
-  color: white;
+.report-status.processing,
+.report-status.pending {
+  background: #fff7ed;
+  color: #c2410c;
 }
 
-.btn-delete {
-  background: #f8f9fa;
-  color: #dc3545;
-  border: 1px solid #e9ecef;
+.text-button {
+  background: #eef7f4;
+  color: #0f766e;
 }
 
-.btn-delete:hover {
-  background: #dc3545;
-  color: white;
-  border-color: #dc3545;
+.danger-button {
+  background: #fef2f2;
+  color: #b91c1c;
 }
 
-@media (max-width: 768px) {
-  .history-container {
-    padding: 15px;
-  }
-
-  .page-header {
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 12px;
-  }
-
-  .history-list {
+@media (max-width: 720px) {
+  .history-header,
+  .history-card {
     grid-template-columns: 1fr;
   }
 
-  .card-actions {
+  .history-header {
+    align-items: flex-start;
     flex-direction: column;
   }
-}
 
-@media (max-width: 480px) {
-  .history-container {
-    padding: 12px;
+  .refresh-button {
+    width: 100%;
   }
 
-  .page-header h1 {
-    font-size: 24px;
+  .card-side {
+    grid-template-columns: 1fr 1fr;
   }
 
-  .history-card {
-    padding: 16px;
+  .report-status {
+    grid-column: 1 / -1;
   }
 }
 </style>
