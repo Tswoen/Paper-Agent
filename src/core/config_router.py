@@ -1,9 +1,11 @@
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any
 
 import yaml
+from dotenv import dotenv_values
 from fastapi import APIRouter, HTTPException
 from openai import OpenAI
 from pydantic import BaseModel, Field
@@ -16,6 +18,13 @@ logger = setup_logger(__name__)
 configuration = APIRouter(prefix="/config", tags=["configuration"])
 
 MODELS_CONFIG_PATH = Path(__file__).parent / "models.yaml"
+SYSTEM_PARAMS_PATH = Path(__file__).parent / "system_params.yaml"
+PROJECT_ROOT = Path(__file__).parent.parent.parent
+ENV_CONFIG_PATH = PROJECT_ROOT / ".env"
+ENV_LINE_PATTERN = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=")
+ENV_VAR_NAME_PATTERN = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+SAFE_ENV_VALUE_PATTERN = re.compile(r"^[A-Za-z0-9_./:@%+=,\-]*$")
+ARXIV_API_URL = "http://export.arxiv.org/api/query"
 
 PROVIDER_TYPE_OPTIONS = [
     {
@@ -106,6 +115,12 @@ AGENT_MODEL_DEFINITIONS = [
         "kind": "llm",
     },
     {
+        "key": "subwriting_retrieval_model",
+        "label": "小节检索",
+        "description": "负责具体报告小节相关论文检索。",
+        "kind": "llm",
+    },
+    {
         "key": "report-model",
         "label": "最终报告",
         "description": "将各小节组装为完整 Markdown 调研报告。",
@@ -115,7 +130,7 @@ AGENT_MODEL_DEFINITIONS = [
 
 EMBEDDING_MODEL_DEFINITIONS = [
     {
-        "key": "embedding-model",
+        "key": "chroma-embedding-model",
         "label": "知识库默认嵌入",
         "description": "创建知识库和通用知识库问答时使用的嵌入模型。",
         "kind": "embedding",
@@ -202,6 +217,120 @@ def _save_models_yaml(data: dict[str, Any]) -> None:
                 pass
 
 
+def _provider_api_key_env_name(provider_id: str) -> str:
+    env_prefix = re.sub(r"[^A-Za-z0-9_]", "_", provider_id.strip()).upper()
+    return f"{env_prefix}_API_KEY"
+
+
+def _provider_api_key_env_ref(provider_id: str, provider_data: dict[str, Any]) -> str:
+    configured_ref = str(provider_data.get("api_key", "")).strip()
+    if ENV_VAR_NAME_PATTERN.fullmatch(configured_ref):
+        return configured_ref
+    return _provider_api_key_env_name(provider_id)
+
+
+def _load_env_file_values() -> dict[str, str]:
+    if not ENV_CONFIG_PATH.exists():
+        return {}
+
+    values = dotenv_values(ENV_CONFIG_PATH)
+    return {key: str(value) for key, value in values.items() if value is not None}
+
+
+def _format_env_assignment(key: str, value: str) -> str:
+    if SAFE_ENV_VALUE_PATTERN.fullmatch(value):
+        return f"{key}={value}"
+    escaped = value.replace("\\", "\\\\").replace("'", "\\'")
+    return f"{key}='{escaped}'"
+
+
+def _update_env_file(updates: dict[str, str], remove_keys: set[str] | None = None) -> None:
+    remove_keys = set(remove_keys or set())
+    lines = ENV_CONFIG_PATH.read_text(encoding="utf-8").splitlines() if ENV_CONFIG_PATH.exists() else []
+    next_lines: list[str] = []
+    seen_updates: set[str] = set()
+
+    for line in lines:
+        match = ENV_LINE_PATTERN.match(line)
+        key = match.group(1) if match else ""
+
+        if key in remove_keys and key not in updates:
+            continue
+
+        if key in updates:
+            next_lines.append(_format_env_assignment(key, updates[key]))
+            seen_updates.add(key)
+        else:
+            next_lines.append(line)
+
+    missing_updates = [key for key in updates if key not in seen_updates]
+    if missing_updates and next_lines and next_lines[-1].strip():
+        next_lines.append("")
+
+    for key in missing_updates:
+        next_lines.append(_format_env_assignment(key, updates[key]))
+
+    ENV_CONFIG_PATH.write_text("\n".join(next_lines).rstrip() + "\n", encoding="utf-8")
+
+    for key, value in updates.items():
+        os.environ[key] = value
+    for key in remove_keys - set(updates):
+        os.environ.pop(key, None)
+
+
+def _ensure_arxiv_api_url_config() -> None:
+    raw: dict[str, Any] = {}
+    if SYSTEM_PARAMS_PATH.exists():
+        try:
+            with open(SYSTEM_PARAMS_PATH, "r", encoding="utf-8") as file:
+                loaded = yaml.safe_load(file) or {}
+                if isinstance(loaded, dict):
+                    raw = loaded
+        except Exception as exc:
+            logger.warning(f"读取 system_params.yaml 失败，跳过 ARXIV_API_URL 迁移: {exc}")
+            return
+
+    if raw.get("ARXIV_API_URL"):
+        return
+
+    raw["ARXIV_API_URL"] = ARXIV_API_URL
+    tmp_path = SYSTEM_PARAMS_PATH.with_suffix(".yaml.tmp")
+    with open(tmp_path, "w", encoding="utf-8") as file:
+        yaml.safe_dump(
+            raw,
+            file,
+            allow_unicode=True,
+            sort_keys=False,
+            default_flow_style=False,
+        )
+    os.replace(tmp_path, SYSTEM_PARAMS_PATH)
+
+
+def _save_provider_api_keys(payload: ModelSettingsPayload, existing: dict[str, Any]) -> None:
+    old_provider_ids = existing.get("model-provider", [])
+    if not isinstance(old_provider_ids, list):
+        old_provider_ids = []
+
+    old_env_names = set()
+    for provider_id in old_provider_ids:
+        provider_data = existing.get(str(provider_id), {})
+        if not isinstance(provider_data, dict):
+            provider_data = {}
+        old_env_names.add(_provider_api_key_env_ref(str(provider_id), provider_data))
+
+    updates = {
+        _provider_api_key_env_name(provider.id): provider.api_key
+        for provider in payload.providers
+        if provider.api_key
+    }
+    current_env_names = {_provider_api_key_env_name(provider.id) for provider in payload.providers}
+    remove_keys = old_env_names.union(current_env_names - set(updates)) - set(updates)
+    remove_keys.add("ARXIV_API_URL")
+
+    _ensure_arxiv_api_url_config()
+    _update_env_file(updates, remove_keys)
+
+
 def _provider_type(provider_id: str, provider_data: dict[str, Any]) -> str:
     configured_type = str(provider_data.get("type", "")).strip()
     if configured_type:
@@ -209,32 +338,34 @@ def _provider_type(provider_id: str, provider_data: dict[str, Any]) -> str:
     return provider_id if provider_id in KNOWN_PROVIDER_TYPES else "custom"
 
 
-def _normalize_provider(provider_id: str, raw: dict[str, Any]) -> dict[str, str]:
+def _normalize_provider(provider_id: str, raw: dict[str, Any], env_values: dict[str, str]) -> dict[str, str]:
     provider_data = raw.get(provider_id, {})
     if not isinstance(provider_data, dict):
         provider_data = {}
 
+    api_key_env = _provider_api_key_env_ref(provider_id, provider_data)
     return {
         "id": provider_id,
         "type": _provider_type(provider_id, provider_data),
         "base_url": str(provider_data.get("base_url", "")),
-        "api_key": str(provider_data.get("api_key", "")),
+        "api_key": env_values.get(api_key_env, ""),
+        "api_key_env": api_key_env,
     }
 
 
-def _normalize_providers(raw: dict[str, Any]) -> list[dict[str, str]]:
+def _normalize_providers(raw: dict[str, Any], env_values: dict[str, str]) -> list[dict[str, str]]:
     provider_ids = raw.get("model-provider", [])
     if not isinstance(provider_ids, list):
         provider_ids = []
 
-    providers = [_normalize_provider(str(provider_id), raw) for provider_id in provider_ids]
+    providers = [_normalize_provider(str(provider_id), raw, env_values) for provider_id in provider_ids]
     if providers:
         return providers
 
     inferred = []
     for key, value in raw.items():
         if isinstance(value, dict) and {"api_key", "base_url"} <= set(value.keys()):
-            inferred.append(_normalize_provider(str(key), raw))
+            inferred.append(_normalize_provider(str(key), raw, env_values))
     return inferred
 
 
@@ -303,8 +434,9 @@ def _model_items(raw: dict[str, Any], definitions: list[dict[str, str]]) -> list
 
 
 def _settings_response(raw: dict[str, Any]) -> dict[str, Any]:
+    env_values = _load_env_file_values()
     return {
-        "providers": _normalize_providers(raw),
+        "providers": _normalize_providers(raw, env_values),
         "default_models": _model_items(raw, DEFAULT_MODEL_DEFINITIONS),
         "agent_models": _model_items(raw, AGENT_MODEL_DEFINITIONS),
         "embedding_models": _model_items(raw, EMBEDDING_MODEL_DEFINITIONS),
@@ -336,8 +468,15 @@ def _validate_settings(payload: ModelSettingsPayload) -> None:
             raise HTTPException(status_code=400, detail=f"Provider ID '{provider.id}' 重复")
         if not provider.base_url:
             raise HTTPException(status_code=400, detail=f"Provider '{provider.id}' 缺少 API URL")
-        if not provider.api_key:
-            raise HTTPException(status_code=400, detail=f"Provider '{provider.id}' 缺少 API Key 或环境变量名")
+        if provider.api_key and ENV_VAR_NAME_PATTERN.fullmatch(provider.api_key):
+            api_key_env = _provider_api_key_env_name(provider.id)
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Provider '{provider.id}' 的 API Key 请填写真实密钥，不要填写环境变量名。"
+                    f"保存后后端会自动写入 .env 的 {api_key_env}。"
+                ),
+            )
         provider_ids.append(provider.id)
 
     valid_provider_ids = set(provider_ids)
@@ -400,7 +539,7 @@ def _payload_to_yaml(payload: ModelSettingsPayload, existing: dict[str, Any]) ->
     for provider in payload.providers:
         next_config[provider.id] = {
             "type": provider.type,
-            "api_key": provider.api_key,
+            "api_key": _provider_api_key_env_name(provider.id),
             "base_url": provider.base_url,
         }
 
@@ -416,10 +555,6 @@ def _payload_to_yaml(payload: ModelSettingsPayload, existing: dict[str, Any]) ->
     return next_config
 
 
-def _resolve_api_key(api_key: str) -> str:
-    return os.environ.get(api_key, api_key)
-
-
 @configuration.get("/model-settings")
 async def get_model_settings():
     """获取模型配置页面所需的规范化配置。"""
@@ -433,6 +568,7 @@ async def save_model_settings(payload: ModelSettingsPayload):
     _validate_settings(payload)
     existing = _load_models_yaml()
     next_config = _payload_to_yaml(payload, existing)
+    _save_provider_api_keys(payload, existing)
     _save_models_yaml(next_config)
     config.reload()
     logger.info("模型配置已通过配置页面保存并重新加载")
@@ -452,14 +588,19 @@ async def test_model_connectivity(payload: TestModelPayload):
     if model_type not in {"llm", "embedding"}:
         raise HTTPException(status_code=400, detail="model_type 只能是 llm 或 embedding")
 
-    api_key = _resolve_api_key(provider.api_key.strip())
     base_url = provider.base_url.strip()
     model_name = model.model.strip()
+    api_key = provider.api_key.strip()
 
-    if not api_key:
-        return {"status": "failed", "message": "API Key 为空，无法测试连通性"}
     if not base_url:
         return {"status": "failed", "message": "API URL 为空，无法测试连通性"}
+    if not api_key:
+        return {"status": "failed", "message": "API Key 为空，无法测试连通性"}
+    if ENV_VAR_NAME_PATTERN.fullmatch(api_key):
+        return {
+            "status": "failed",
+            "message": "API Key 请填写真实密钥，不要填写环境变量名。",
+        }
     if not model_name:
         return {"status": "failed", "message": "模型名称为空，无法测试连通性"}
 

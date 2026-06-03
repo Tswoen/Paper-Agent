@@ -86,7 +86,7 @@
                   <button
                     class="hint-button"
                     type="button"
-                    data-tooltip="可以填写真实 Key，也可以填写环境变量名，例如 OPENAI_API_KEY。测试时后端会自动解析环境变量。"
+                    data-tooltip="这里只填写真实 Key；保存后后端会自动写入 .env，并在 models.yaml 中使用 Provider ID 对应的环境变量名。"
                     aria-label="API Key 说明"
                   >
                   </button>
@@ -95,7 +95,7 @@
                   <input
                     v-model.trim="selectedProvider.api_key"
                     :type="visibleProviderKeys[selectedProvider.localId] ? 'text' : 'password'"
-                    placeholder="OPENAI_API_KEY 或 sk-..."
+                    placeholder="sk-..."
                     autocomplete="off"
                   >
                   <button type="button" @click="toggleProviderKey(selectedProvider.localId)">
@@ -124,7 +124,7 @@
                   <button
                     class="hint-button"
                     type="button"
-                    data-tooltip="Provider ID 会写入 YAML 顶层键，例如 siliconflow 或 ark，也会被模型配置引用。"
+                    data-tooltip="Provider ID 会写入 YAML 顶层键，并用于生成环境变量名，例如 siliconflow 对应 SILICONFLOW_API_KEY。"
                     aria-label="Provider ID 说明"
                   >
                   </button>
@@ -448,7 +448,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onActivated, reactive, ref } from 'vue'
 import { configApi } from '../api/config'
 
 const fallbackProviderTypes = [
@@ -460,6 +460,7 @@ const fallbackProviderTypes = [
 ]
 
 const DEFAULT_CONFIG_VALUE = ''
+const ENV_VAR_NAME_PATTERN = /^[A-Z_][A-Z0-9_]*$/
 const defaultModelKeys = new Set(['default-model', 'default-embedding-model'])
 
 const isLoading = ref(false)
@@ -523,15 +524,30 @@ const createLocalId = () => {
   return `provider-${Date.now()}-${Math.random().toString(16).slice(2)}`
 }
 
+const normalizeProviderApiKey = (provider) => {
+  const rawApiKey = provider.api_key || ''
+  const apiKeyEnv = provider.api_key_env || (ENV_VAR_NAME_PATTERN.test(rawApiKey) ? rawApiKey : '')
+
+  return {
+    apiKey: ENV_VAR_NAME_PATTERN.test(rawApiKey) ? '' : rawApiKey,
+    apiKeyEnv
+  }
+}
+
 const normalizeProviders = (items = []) => {
-  return items.map(provider => ({
-    localId: provider.localId || createLocalId(),
-    id: provider.id || '',
-    previousId: provider.previousId || provider.id || '',
-    type: provider.type || 'custom',
-    base_url: provider.base_url || '',
-    api_key: provider.api_key || ''
-  }))
+  return items.map(provider => {
+    const { apiKey, apiKeyEnv } = normalizeProviderApiKey(provider)
+
+    return {
+      localId: provider.localId || createLocalId(),
+      id: provider.id || '',
+      previousId: provider.previousId || provider.id || '',
+      type: provider.type || 'custom',
+      base_url: provider.base_url || '',
+      api_key: apiKey,
+      api_key_env: apiKeyEnv
+    }
+  })
 }
 
 const normalizeModelItems = (items = []) => {
@@ -805,6 +821,14 @@ const testModel = async (item) => {
     return
   }
 
+  if (!provider.api_key || ENV_VAR_NAME_PATTERN.test(provider.api_key)) {
+    testResults[key] = {
+      status: 'failed',
+      message: 'API Key 请填写真实密钥，不要填写环境变量名'
+    }
+    return
+  }
+
   testResults[key] = {
     status: 'running',
     message: '正在测试当前模型连通性...'
@@ -924,7 +948,7 @@ const showToast = (message, type = 'success') => {
   }, 2600)
 }
 
-onMounted(async () => {
+onActivated(async () => {
   await loadSettings()
 })
 </script>

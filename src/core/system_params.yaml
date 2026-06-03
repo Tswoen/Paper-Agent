@@ -1,6 +1,7 @@
 # 系统参数配置文件
 
 SAVE_DIR: "data"
+ARXIV_API_URL: "http://export.arxiv.org/api/query"
 # 知识库配置
 KB_TYPE: "chroma"
 enable_reranker: False

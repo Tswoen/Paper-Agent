@@ -1,3 +1,6 @@
+import os
+import re
+
 from autogen_ext.models.openai import OpenAIChatCompletionClient
 from autogen_core.models import ModelInfo
 from .config import config
@@ -6,6 +9,27 @@ from openai import OpenAI
 
 
 logger = setup_logger(__name__)
+
+ENV_VAR_NAME_PATTERN = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+
+
+def resolve_api_key(provider: str, api_key: str | None) -> str:
+    """Resolve real API keys and fail early when an env-var reference is missing."""
+    api_key = str(api_key or "").strip()
+    if not api_key:
+        raise ValueError(f"Provider '{provider}' 未配置 API Key 或环境变量名")
+
+    resolved_key = os.environ.get(api_key) or config.get(api_key)
+    if resolved_key:
+        return str(resolved_key).strip()
+
+    if ENV_VAR_NAME_PATTERN.fullmatch(api_key):
+        raise ValueError(
+            f"Provider '{provider}' 的 API Key 配置为环境变量 '{api_key}'，"
+            "但当前后端进程未读取到该环境变量。请在 .env 中设置该变量，或在系统配置中填写真实 API Key。"
+        )
+
+    return api_key
 
 class ModelClient:
     """OpenAIChatCompletionClient的封装类，简化模型客户端的创建和配置"""
@@ -41,10 +65,13 @@ class ModelClient:
         """
         # 从配置中加载默认值
         provider_config = config.get(provider)
+        if not isinstance(provider_config, dict):
+            raise ValueError(f"未找到模型 Provider 配置: {provider}")
 
         # 如果未提供参数，则使用配置中的默认值
         api_key = api_key or provider_config.get("api_key")
         base_url = base_url or provider_config.get("base_url")
+        api_key = resolve_api_key(provider, api_key)
         
         # 根据provider设置默认family
         if family == "Qwen" and provider != "siliconflow":
@@ -81,10 +108,13 @@ class ModelClient:
         base_url: str = None,
     ) -> OpenAI:
         provider_config = config.get(provider)
+        if not isinstance(provider_config, dict):
+            raise ValueError(f"未找到模型 Provider 配置: {provider}")
 
         # 如果未提供参数，则使用配置中的默认值
         api_key = api_key or provider_config.get("api_key")
         base_url = base_url or provider_config.get("base_url")
+        api_key = resolve_api_key(provider, api_key)
         
         # 验证必要参数
         if not model:

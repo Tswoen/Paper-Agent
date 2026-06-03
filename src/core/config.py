@@ -49,7 +49,7 @@ class Config:
         env_path = Path(__file__).parent.parent.parent / ".env"
         
         if env_path.exists():
-            load_dotenv(env_path)
+            load_dotenv(env_path, override=True)
         else:
             print(f"警告: 未找到.env文件: {env_path}")
         

@@ -79,7 +79,7 @@ def sanitize_metadata(paper: Dict[str, Any]) -> Dict[str, Any]:
 
 async def add_papers_to_kb(papers:Optional[List[Dict[str, Any]]], extracted_papers: ExtractedPapersData):
     """将提取的论文数据添加到知识库"""
-    embedding_dic = config.get("embedding-model")
+    embedding_dic = config.get("chroma-embedding-model")
     embedding_provider = embedding_dic.get("model-provider")
     provider_dic = config.get(embedding_provider)
     

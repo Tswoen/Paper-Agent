@@ -4,41 +4,13 @@ model-provider:
 - dashscope
 - ark
 default-model:
-  model-provider: ark
-  model: doubao-seed-1-6-thinking-250715
+  model-provider: dashscope
+  model: qwen3.6-flash
 default-embedding-model:
   model-provider: dashscope
   model: text-embedding-v4
   dimension: 1024
-writing-model:
-  model-provider: siliconflow
-  model: Qwen/Qwen3-32B
-subanalyse-cluster-model:
-  model-provider: dashscope
-  model: qwen3.6-27b
-subanalyse-deep-analyse-model:
-  model-provider: siliconflow
-  model: Qwen/Qwen3-32B
-subanalyse-global-analyse-model:
-  model-provider: siliconflow
-  model: Qwen/Qwen3-32B
-subwriting-writing-director-model:
-  model-provider: siliconflow
-  model: Qwen/Qwen3-32B
-subwriting-writing-model:
-  model-provider: siliconflow
-  model: Qwen/Qwen3-32B
-subwriting-retrieval-model:
-  model-provider: siliconflow
-  model: Qwen/Qwen3-32B
-report-model:
-  model-provider: ark
-  model: doubao-seed-1-6-thinking-250715
 chroma-embedding-model:
-  model-provider: siliconflow
-  model: Qwen/Qwen3-Embedding-8B
-  dimension: 1024
-cluster-embedding-model:
   model-provider: siliconflow
   model: Qwen/Qwen3-Embedding-8B
   dimension: 1024
@@ -52,7 +24,7 @@ openai:
   base_url: https://api.openai.com/v1
 dashscope:
   type: dashscope
-  api_key: sk-36c7f4e71d904a35afab94dc68747d48
+  api_key: DASHSCOPE_API_KEY
   base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
 ark:
   type: ark
