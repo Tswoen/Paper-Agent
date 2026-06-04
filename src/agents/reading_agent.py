@@ -143,7 +143,10 @@ async def reading_node(state: State) -> State:
 
     # 将papers合理分割成多个任务，交给多个read_agent并行执行，最后合并结果
     # 并行执行任务，使用asyncio.gather
-    results = await asyncio.gather(*[read_agent.run(task=str(paper)) for paper in papers])
+    results = await asyncio.gather(
+        *[read_agent.run(task=str(paper)) for paper in papers],
+        return_exceptions=True,
+    )
 
     # 合并结果
     extracted_papers = ExtractedPapersData()
@@ -156,6 +159,10 @@ async def reading_node(state: State) -> State:
     # 清洗和预处理获取的数据    
     successful_papers = []
     for i, result in enumerate(results):
+        if isinstance(result, Exception):
+            logger.error(f"Reading agent failed for paper {i}: {result}")
+            continue
+
         raw_content = result.messages[-1].content
         # logger.info(f"Reading Agent Raw Output: {raw_content}") # 打印原始输出
         

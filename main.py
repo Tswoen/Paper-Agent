@@ -51,9 +51,22 @@ async def research_stream(query: str):
 
     # 初始化业务流程控制器
     orchestrator = PaperAgentOrchestrator(state_queue = state_queue)
+
+    async def run_orchestrator():
+        try:
+            await orchestrator.run(user_request=query)
+        except Exception as exc:
+            logger.exception("Research workflow failed")
+            await state_queue.put(
+                BackToFrontData(
+                    step=ExecutionState.FAILED,
+                    state="failed",
+                    data=str(exc),
+                )
+            )
     
     # 启动异步任务
-    asyncio.create_task(orchestrator.run(user_request=query))
+    asyncio.create_task(run_orchestrator())
 
     return event_source
 
