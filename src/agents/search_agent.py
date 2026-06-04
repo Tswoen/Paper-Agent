@@ -4,6 +4,7 @@ from autogen_core import CancellationToken
 from src.agents.userproxy_agent import WebUserProxyAgent,userProxyAgent
 from pydantic import BaseModel, Field
 from typing import Optional,List
+import asyncio
 import re
 import ast
 
@@ -76,6 +77,8 @@ async def search_node(state: State) -> State:
             cancellation_token=CancellationToken()
         )
         search_query = parse_search_query(result.content)
+        await state_queue.put(BackToFrontData(step=ExecutionState.SEARCHING,state="generating",data="正在根据人工审核后的检索条件搜索论文..."))
+        await asyncio.sleep(0)
 
         # 调用检索服务
         paper_searcher = PaperSearcher()

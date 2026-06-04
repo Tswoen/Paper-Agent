@@ -140,7 +140,7 @@
                   rows="4"
                   placeholder="输入审核意见或补充要求"
                 ></textarea>
-                <button type="button" :disabled="!userReviewInput.trim()" @click="submitReviewInput">
+                <button type="button" :disabled="!userReviewInput.trim() || isReviewSubmitting" @click="submitReviewInput">
                   提交审核反馈
                 </button>
               </div>
@@ -362,6 +362,7 @@ const userInput = ref('')
 const userReviewInput = ref('')
 const isSubmitting = ref(false)
 const isReviewing = ref(false)
+const isReviewSubmitting = ref(false)
 const conversation = ref([])
 const eventSource = ref(null)
 const currentActiveStage = ref(null)
@@ -775,7 +776,32 @@ const updateAssistantStatus = (status, text) => {
 
 const submitReviewInput = async () => {
   const reviewText = userReviewInput.value.trim()
-  if (!reviewText) return
+  if (!reviewText || isReviewSubmitting.value) return
+
+  const reviewStage = currentActiveStage.value
+  const previousReviewInput = userReviewInput.value
+  const previousStage = reviewStage
+    ? {
+        content: reviewStage.content,
+        status: reviewStage.status,
+        title: reviewStage.title,
+        expanded: reviewStage.expanded
+      }
+    : null
+
+  isReviewSubmitting.value = true
+  isReviewing.value = false
+  userReviewInput.value = ''
+
+  if (reviewStage) {
+    reviewStage.content += `\n\n人工反馈：${reviewText}\n`
+    reviewStage.status = 'generating'
+    reviewStage.title = `${getStepName(reviewStage.step)}中`
+    reviewStage.expanded = true
+  }
+
+  updateAssistantStatus('processing', `${reviewStage ? getStepName(reviewStage.step) : '流程'}中`)
+  autoScroll()
 
   try {
     const response = await fetch('/send_input', {
@@ -787,20 +813,21 @@ const submitReviewInput = async () => {
     if (!response.ok) {
       throw new Error(`审核提交失败: ${response.status}`)
     }
-
-    if (currentActiveStage.value) {
-      currentActiveStage.value.content += `\n\n人工反馈：${reviewText}\n`
-      currentActiveStage.value.status = 'generating'
-      currentActiveStage.value.title = `${getStepName(currentActiveStage.value.step)}继续生成`
-    }
-
-    isReviewing.value = false
-    userReviewInput.value = ''
-    updateAssistantStatus('processing', '已提交审核反馈')
-    autoScroll()
   } catch (error) {
     console.error(error)
+    if (reviewStage && previousStage) {
+      reviewStage.content = previousStage.content
+      reviewStage.status = previousStage.status
+      reviewStage.title = previousStage.title
+      reviewStage.expanded = previousStage.expanded
+    }
+    userReviewInput.value = previousReviewInput
+    isReviewing.value = true
+    updateAssistantStatus('review', '等待人工审核')
     window.alert('提交审核反馈失败，请检查后端服务。')
+  } finally {
+    isReviewSubmitting.value = false
+    autoScroll()
   }
 }
 
@@ -832,6 +859,7 @@ const finishProcessing = () => {
   closeEventSource()
   isSubmitting.value = false
   isReviewing.value = false
+  isReviewSubmitting.value = false
   currentActiveStage.value = null
   activeSubStages.value.clear()
 }
@@ -842,6 +870,7 @@ const resetRuntimeState = () => {
   activeAssistantMessage.value = null
   userReviewInput.value = ''
   isReviewing.value = false
+  isReviewSubmitting.value = false
 }
 
 const markConnectionError = () => {
