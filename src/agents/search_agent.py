@@ -64,7 +64,7 @@ async def search_node(state: State) -> State:
         await state_queue.put(BackToFrontData(step=ExecutionState.SEARCHING,state="initializing",data=None))
 
         prompt = f"""
-        请根据用户查询需求，生成检索查询条件。
+        请根据用户查询需求，生成检索查询条件，并以合法 JSON 返回。
         用户查询需求：{current_state.user_request}
         """
         response = await search_agent.run(task = prompt)
