@@ -99,17 +99,17 @@ class AnalyseAgent(BaseChatAgent):
         # 3. 调用全局分析智能体生成整体分析报告
         await self.state_queue.put(BackToFrontData(step=ExecutionState.ANALYZING,state="thinking",data="等待全局分析\n"))
         is_thinking = None
+        global_analysis = {}
         async for chunk in self.global_analyse_agent.run(deep_analysis_results):
             if isinstance(chunk, Dict):
+                global_analysis = chunk
                 if not chunk.get("isSuccess", False):
                     await self.state_queue.put(BackToFrontData(step=ExecutionState.ANALYZING,state="error",data=chunk.get("global_analyse", "Unknown error")))
-                    break
-                global_analysis = chunk
-                break
-            state,is_thinking = handlerChunk(is_thinking,chunk)
-            if state is None:
                 continue
-            await self.state_queue.put(BackToFrontData(step=ExecutionState.ANALYZING,state=state,data=chunk))
+            chunk_state,is_thinking = handlerChunk(is_thinking,chunk)
+            if chunk_state is None:
+                continue
+            await self.state_queue.put(BackToFrontData(step=ExecutionState.ANALYZING,state=chunk_state,data=chunk))
             
         return Response(
             chat_message=TextMessage(

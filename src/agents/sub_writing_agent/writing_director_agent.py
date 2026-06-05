@@ -71,6 +71,7 @@ async def writing_director_node(state: WritingState) -> Dict[str, Any]:
         # response = await writing_director_agent.run(task = prompt)
         is_thinking = None
         is_first = True
+        outline = ""
         async for chunk in writing_director_agent.run_stream(task = prompt):
             if is_first:
                 is_first = False
@@ -80,11 +81,16 @@ async def writing_director_node(state: WritingState) -> Dict[str, Any]:
                     continue
                 if chunk.type == "TextMessage":
                     outline = chunk.content
-                    break
-                state,is_thinking = handlerChunk(is_thinking,chunk.content)
-                if state is None:
                     continue
-                await state_queue.put(BackToFrontData(step=ExecutionState.WRITING_DIRECTOR,state=state,data=chunk.content))
+                content = getattr(chunk, "content", None)
+                if content is None:
+                    continue
+                chunk_state,is_thinking = handlerChunk(is_thinking,content)
+                if chunk_state is None:
+                    continue
+                await state_queue.put(BackToFrontData(step=ExecutionState.WRITING_DIRECTOR,state=chunk_state,data=content))
+        if not outline:
+            raise ValueError("Writing director did not return outline")
         sections = parse_outline(outline)
         await state_queue.put(BackToFrontData(step=ExecutionState.WRITING_DIRECTOR,state="completed",data=None))
         return {"sections": sections}
