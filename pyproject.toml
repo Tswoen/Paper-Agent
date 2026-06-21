@@ -1,0 +1,13 @@
+[project]
+name = "papers-agents"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "anthropic>=0.111.0",
+    "fastapi>=0.116.0",
+    "httpx>=0.28.0",
+    "openai>=2.43.0",
+    "uvicorn>=0.35.0",
+]

@@ -1,0 +1,51 @@
+{
+  "providers": {
+    "openai_official": {
+      "backend": "openai",
+      "api_key_env": "OPENAI_API_KEY",
+      "api_base": "https://api.openai.com/v1",
+      "extra_headers": {},
+      "extra_body": {}
+    },
+    "openrouter_main": {
+      "backend": "openai_compat",
+      "api_key_env": "OPENROUTER_API_KEY",
+      "api_base": "https://openrouter.ai/api/v1",
+      "extra_headers": {},
+      "extra_body": {}
+    },
+    "anthropic_official": {
+      "backend": "anthropic",
+      "api_key_env": "ANTHROPIC_API_KEY",
+      "api_base": "https://api.anthropic.com/v1/messages",
+      "extra_headers": {},
+      "extra_body": {}
+    }
+  },
+  "agents": {
+    "default_agent": {
+      "label": "Default Agent",
+      "provider": "openai_official",
+      "model_name": "gpt-5",
+      "temperature": 0.7,
+      "max_tokens": 4000,
+      "context_window_tokens": 128000,
+      "reasoning_effort": "medium"
+    },
+    "paper_reader": {
+      "label": "Paper Reader",
+      "provider": "openrouter_main",
+      "model_name": "deepseek/deepseek-chat-v3-0324",
+      "temperature": 0.3
+    }
+  },
+  "embedding_profiles": {
+    "default_embedding": {
+      "label": "Default Embedding",
+      "provider": "openai_official",
+      "model_name": "text-embedding-3-small",
+      "dimensions": 1536,
+      "batch_size": 32
+    }
+  }
+}

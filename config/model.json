@@ -1,0 +1,31 @@
+{
+  "providers": {
+    "openrouter_main": {
+      "backend": "openai_compat",
+      "api_key": "sk-6vnP83DJQXcMTy4JK5wYVzjBkgjwfbodCO7c55IDKJPI8Fyt",
+      "api_base": "https://cli.999554.xyz/v1",
+      "extra_headers": {},
+      "extra_body": {}
+    }
+  },
+  "agents": {
+    "default_agent": {
+      "label": "Default Agent",
+      "provider": "openrouter_main",
+      "model_name": "DeepSeek-V4-Flash[free]",
+      "temperature": 0.7,
+      "max_tokens": 4000,
+      "context_window_tokens": 64000,
+      "reasoning_effort": "none"
+    }
+  },
+  "embedding_profiles": {
+    "default_embedding": {
+      "label": "Default Embedding",
+      "provider": "openrouter_main",
+      "model_name": "text-embedding-3-small",
+      "dimensions": null,
+      "batch_size": 32
+    }
+  }
+}

@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Papers Agents Workbench</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div id="app" class="shell">
+      <aside class="rail" aria-label="会话列表">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">PA</div>
+          <div>
+            <p class="eyebrow">Papers Agents</p>
+            <h1>论文工作台</h1>
+          </div>
+        </div>
+
+        <button id="new-session" class="command command-primary" type="button">
+          <span aria-hidden="true">+</span>
+          新会话
+        </button>
+
+        <div class="rail-section">
+          <div class="section-label">最近会话</div>
+          <div id="session-list" class="session-list" role="list"></div>
+        </div>
+
+        <div class="runtime-panel">
+          <div class="section-label">运行面</div>
+          <div id="runtime-grid" class="runtime-grid"></div>
+        </div>
+      </aside>
+
+      <main class="conversation" aria-label="论文智能体对话">
+        <header class="desk-header">
+          <div>
+            <p class="eyebrow">本地 FastAPI 网关</p>
+            <h2 id="active-title">正在连接后端</h2>
+          </div>
+          <div id="status-pill" class="status-pill">启动中</div>
+        </header>
+
+        <section id="message-list" class="message-list" aria-live="polite"></section>
+
+        <form id="composer" class="composer">
+          <label class="sr-only" for="prompt">向论文智能体发送问题</label>
+          <textarea
+            id="prompt"
+            rows="3"
+            placeholder="例如：总结这篇论文的贡献、实验设置和潜在缺陷"
+          ></textarea>
+          <div class="composer-actions">
+            <span id="composer-hint">Enter 换行，Ctrl/⌘ + Enter 发送</span>
+            <button id="send-message" class="command command-ink" type="submit">发送</button>
+          </div>
+        </form>
+      </main>
+
+      <aside class="settings" aria-label="模型设置">
+        <div class="settings-head">
+          <div>
+            <p class="eyebrow">模型配置</p>
+            <h2>当前 Agent</h2>
+          </div>
+          <button id="refresh-settings" class="icon-button" type="button" aria-label="刷新设置">↻</button>
+        </div>
+
+        <form id="agent-form" class="settings-form">
+          <label>
+            Agent
+            <select id="agent-select"></select>
+          </label>
+          <label>
+            显示名
+            <input id="agent-label" name="label" type="text" />
+          </label>
+          <label>
+            Provider
+            <select id="agent-provider"></select>
+          </label>
+          <label>
+            模型
+            <input id="agent-model" name="model" type="text" />
+          </label>
+          <div class="split-fields">
+            <label>
+              温度
+              <input id="agent-temperature" name="temperature" type="number" min="0" max="2" step="0.1" />
+            </label>
+            <label>
+              推理
+              <select id="agent-reasoning">
+                <option value="none">none</option>
+                <option value="low">low</option>
+                <option value="medium">medium</option>
+                <option value="high">high</option>
+              </select>
+            </label>
+          </div>
+          <div class="split-fields">
+            <label>
+              Max tokens
+              <input id="agent-max-tokens" name="max_tokens" type="number" min="1" step="1" />
+            </label>
+            <label>
+              Context
+              <input id="agent-context" name="context_window_tokens" type="number" min="1" step="1" />
+            </label>
+          </div>
+          <button class="command command-primary" type="submit">保存 Agent</button>
+        </form>
+
+        <form id="provider-form" class="settings-form provider-form">
+          <div class="section-label">Provider 连接</div>
+          <label>
+            Provider
+            <select id="provider-select"></select>
+          </label>
+          <label>
+            类型
+            <select id="provider-type"></select>
+          </label>
+          <label>
+            API Base
+            <input id="provider-api-base" name="api_base" type="url" placeholder="https://..." />
+          </label>
+          <label>
+            API Key
+            <input id="provider-api-key" name="api_key" type="password" placeholder="留空则不覆盖现有 Key" />
+          </label>
+          <button class="command command-ink" type="submit">保存 Provider</button>
+        </form>
+
+        <div id="toast" class="toast" role="status" aria-live="polite"></div>
+      </aside>
+    </div>
+
+    <script src="./app.js" type="module"></script>
+  </body>
+</html>

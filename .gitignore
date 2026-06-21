@@ -1,0 +1,70 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+*$py.class
+*.pyd
+*.so
+
+# Python packaging artifacts
+build/
+dist/
+site/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.eggs/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Test and coverage artifacts
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.hypothesis/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+
+# Logs and runtime files
+*.log
+*.out
+*.err
+*.pid
+
+# Local environment files
+.env
+.env.*
+!.env.example
+!.env.sample
+
+# IDE and OS files
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Frontend dependencies and build outputs
+node_modules/
+coverage/
+.npm/
+.pnpm-store/
+.yarn/
+.parcel-cache/
+.next/
+.nuxt/
+.svelte-kit/
+
+# Local caches
+.cache/
+tmp/
+temp/
