@@ -9,7 +9,7 @@ def main() -> None:
 
     import uvicorn
 
-    # 统一从 FastAPI app 暴露前端接口，避免再启用手写 HTTP 或 WebSocket 服务。
+    # 中文注释：统一由 FastAPI 暴露 API 和前端构建产物，减少本地联调时的入口分裂。
     uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
 
 

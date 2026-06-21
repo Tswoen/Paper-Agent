@@ -38,6 +38,9 @@ htmlcov/
 *.out
 *.err
 *.pid
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
 
 # Local environment files
 .env
@@ -55,14 +58,22 @@ Thumbs.db
 
 # Frontend dependencies and build outputs
 node_modules/
+front/node_modules/
+dist/
+front/dist/
 coverage/
 .npm/
 .pnpm-store/
 .yarn/
+.vite/
+front/.vite/
 .parcel-cache/
 .next/
 .nuxt/
 .svelte-kit/
+*.tsbuildinfo
+vite.svg
+*.local
 
 # Local caches
 .cache/
