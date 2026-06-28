@@ -281,6 +281,15 @@ def _provider_items(config: ModelConfig) -> list[JsonObject]:
     for name, provider_config in sorted(config.providers.items()):
         spec = match_provider_backend(provider_config.backend)
         configured = _provider_configured(spec, provider_config)
+        # 中文注释：管理端需要“可直接回填到表单”的原始配置值，避免前端只能看到脱敏摘要。
+        editable_config = {
+            "backend": provider_config.backend,
+            "api_key": provider_config.api_key,
+            "api_key_env": provider_config.api_key_env,
+            "api_base": provider_config.api_base,
+            "extra_headers": provider_config.extra_headers,
+            "extra_body": provider_config.extra_body,
+        }
         items.append(
             {
                 "name": name,
@@ -296,6 +305,7 @@ def _provider_items(config: ModelConfig) -> list[JsonObject]:
                 "provider_type": provider_config.backend,
                 "backend": spec.backend,
                 "oauth_login_supported": False,
+                "editable_config": editable_config,
             }
         )
     return items

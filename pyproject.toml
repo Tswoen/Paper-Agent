@@ -8,6 +8,7 @@ dependencies = [
     "anthropic>=0.111.0",
     "fastapi>=0.116.0",
     "httpx>=0.28.0",
+    "langgraph>=1.2.6",
     "openai>=2.43.0",
     "uvicorn>=0.35.0",
 ]
