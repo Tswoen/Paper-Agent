@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -60,23 +60,12 @@ class SearchAgent(BaseAgent):
         当前搜索阶段直接终止，不再使用基于规则的关键词兜底。
         """
 
-        keywords, raw_model_output, llm_meta = self._generate_keywords_with_llm(state)
+        keywords, _, _ = self._generate_keywords_with_llm(state)
         intent = self._build_search_intent(state, keywords or [])
         search_halted = keywords is None
-        diagnostics = {
-            "agent": self.spec.name,
-            "used_llm": llm_meta["used_llm"],
-            "llm_status": llm_meta["status"],
-            "search_halted": search_halted,
-            "intent": asdict(intent),
-        }
-        if llm_meta.get("message"):
-            diagnostics["llm_message"] = llm_meta["message"]
         return {
             "search_intent": intent,
             "search_halted": search_halted,
-            "diagnostics": diagnostics,
-            "raw_model_output": raw_model_output or "",
         }
 
     def _generate_keywords_with_llm(self, state: JsonObject) -> tuple[list[str] | None, str | None, JsonObject]:

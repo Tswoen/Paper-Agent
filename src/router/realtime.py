@@ -3,18 +3,21 @@ from __future__ import annotations
 import uuid
 from typing import Any, Callable
 
+from src.utils import get_logger, logging_context
+
 from .sessions_api import SessionRepository, utc_now
 
 
 JsonObject = dict[str, Any]
 MessageHandler = Callable[[str, str, JsonObject], list[JsonObject]]
+logger = get_logger(__name__)
 
 
 class HttpMessageGateway:
-    """基于 FastAPI HTTP 请求的消息提交网关。
+    """基于 FastAPI HTTP 请求的消息提交通道。
 
-    它保留“用户消息 -> 后端事件列表 -> 前端聚合时间线”的协议形状，但传输层
-    已经改为 POST /api/sessions/{key}/messages，不再需要 WebSocket 连接。
+    它保留“用户消息 -> 后端事件列表 -> 前端聚合时间线”的协议形状，但传输层已经改为
+    HTTP POST，适合当前单机工作台场景。
     """
 
     def __init__(
@@ -22,6 +25,8 @@ class HttpMessageGateway:
         sessions: SessionRepository,
         message_handler: MessageHandler | None = None,
     ):
+        """初始化消息网关。"""
+
         self.sessions = sessions
         self.message_handler = message_handler or self._default_message_handler
 
@@ -36,27 +41,33 @@ class HttpMessageGateway:
         self.sessions.get(session_key)
         turn_id = str(body.get("turn_id") or uuid.uuid4().hex)
         media = list(body.get("media") or [])
-        self.sessions.append_message(session_key, "user", content, media=media, turn_id=turn_id)
+        with logging_context(session_key=session_key, turn_id=turn_id):
+            logger.info(
+                "收到用户消息提交",
+                extra={"content_length": len(content), "media_count": len(media)},
+            )
+            self.sessions.append_message(session_key, "user", content, media=media, turn_id=turn_id)
 
-        started_at = utc_now()
-        self.sessions.set_run_started_at(session_key, started_at)
+            started_at = utc_now()
+            self.sessions.set_run_started_at(session_key, started_at)
 
-        # 事件列表是 HTTP 响应体的一部分，前端无需维持长连接即可完成同样的 UI 聚合。
-        events: list[JsonObject] = [
-            {"event": "message", "chat_id": session_key, "role": "user", "content": content, "media": media, "turn_id": turn_id},
-            {"event": "goal_status", "chat_id": session_key, "run_started_at": started_at, "turn_id": turn_id},
-        ]
-        events.extend(self.message_handler(session_key, content, {"turn_id": turn_id, **body}))
-        if not any(event.get("event") == "turn_end" for event in events):
-            events.append({"event": "turn_end", "chat_id": session_key, "turn_id": turn_id})
+            # 中文注释：事件列表直接作为 HTTP 响应体返回，前端无需维持长连接也能完成相同的 UI 聚合。
+            events: list[JsonObject] = [
+                {"event": "message", "chat_id": session_key, "role": "user", "content": content, "media": media, "turn_id": turn_id},
+                {"event": "goal_status", "chat_id": session_key, "run_started_at": started_at, "turn_id": turn_id},
+            ]
+            events.extend(self.message_handler(session_key, content, {"turn_id": turn_id, **body}))
+            if not any(event.get("event") == "turn_end" for event in events):
+                events.append({"event": "turn_end", "chat_id": session_key, "turn_id": turn_id})
 
-        self.sessions.set_run_started_at(session_key, None)
-        return {
-            "session_key": session_key,
-            "turn_id": turn_id,
-            "events": events,
-            "thread": self.sessions.get(session_key).thread(),
-        }
+            self.sessions.set_run_started_at(session_key, None)
+            logger.info("消息回合处理完成", extra={"event_count": len(events)})
+            return {
+                "session_key": session_key,
+                "turn_id": turn_id,
+                "events": events,
+                "thread": self.sessions.get(session_key).thread(),
+            }
 
     @staticmethod
     def _default_message_handler(chat_id: str, content: str, frame: JsonObject) -> list[JsonObject]:

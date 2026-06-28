@@ -92,5 +92,3 @@ class AgentRunOutput:
     """
 
     state_update: JsonObject = field(default_factory=dict)
-    raw_model_output: str | None = None
-    diagnostics: JsonObject = field(default_factory=dict)

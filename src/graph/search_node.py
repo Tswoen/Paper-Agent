@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any
 
 from src.agents.base import AgentContext
 from src.agents.searchAgent import SearchAgent, SearchIntent, load_search_agent_llm
@@ -12,16 +11,9 @@ from src.paper_retrieval import PaperSearchService
 from src.paper_retrieval.models import PaperDocument
 
 
-JsonObject = dict[str, Any]
-
-
 @dataclass(slots=True)
 class ScoredPaper:
-    """表示带评分明细的候选论文。
-
-    search node 在完成检索后，会按标题和摘要命中情况为每篇论文打分，
-    这个结构用于保存排序和诊断所需的评分细节。
-    """
+    """表示带有相关性评分明细的候选论文。"""
 
     paper: PaperDocument
     score: float
@@ -38,11 +30,11 @@ def run_search_agent_node(
 ):
     """生成搜索图中的搜索节点。
 
-    当前节点承担完整的编排职责：
-    1. 调用 SearchAgent 生成搜索意图；
-    2. 调用 PaperSearchService 执行查询；
-    3. 对召回论文进行相关度打分、筛选和排序；
-    4. 把最终结果写回共享 State。
+    中文说明：
+    1. 先调用 `SearchAgent` 生成结构化检索意图；
+    2. 再调用检索服务执行查询；
+    3. 对候选论文打分、排序并截断；
+    4. 只把后续节点真正需要的业务字段写回共享 `State`。
     """
 
     resolved_service = service or PaperSearchService()
@@ -58,35 +50,17 @@ def run_search_agent_node(
         scored_papers = _score_papers(state["request"].topic, papers)
         max_results = max(1, intent.max_results)
         search_results = [item.paper for item in scored_papers[:max_results]]
-        search_scores = [_scored_paper_to_dict(item) for item in scored_papers]
-        diagnostics = dict(state.get("diagnostics") or {})
-        diagnostics.update(agent_update.get("diagnostics") or {})
-        diagnostics["search_node"] = {
-            "candidate_count": len(papers),
-            "selected_count": len(search_results),
-            "score_threshold": _score_threshold(state["request"].topic),
-            "search_halted": bool(agent_update.get("search_halted")),
-            "scores": search_scores,
-        }
         return State(
             request=state["request"],
-            search_intent=intent,
             search_results=search_results,
-            search_scores=search_scores,
             current_step="search",
-            diagnostics=diagnostics,
-            raw_model_output=agent_update.get("raw_model_output", ""),
         )
 
     return _node
 
 
 def _execute_search_intent(service: PaperSearchService, intent: SearchIntent) -> list[PaperDocument]:
-    """按检索意图调用检索服务，并汇总去重后的论文结果。
-
-    中文注释：指定多个来源时，每个来源都使用完整 max_results 检索，不再按来源均分数量。
-    这里仅负责召回与去重，最终排序和截断交给评分阶段统一处理。
-    """
+    """按照检索意图调用检索服务，并汇总去重后的论文结果。"""
 
     collected: list[PaperDocument] = []
     seen: set[str] = set()
@@ -113,14 +87,7 @@ def _execute_search_intent(service: PaperSearchService, intent: SearchIntent) ->
 
 
 def _score_papers(topic: str, papers: list[PaperDocument]) -> list[ScoredPaper]:
-    """根据主题对候选论文打分并排序。
-
-    评分规则沿用当前文件原始需求说明：
-    - 标题命中词数 * 2.0
-    - 摘要命中词数 * 1.0
-    - 主题整句出现在标题中 +3.0
-    - 主题整句出现在摘要中 +1.5
-    """
+    """根据主题对候选论文打分并排序。"""
 
     tokens = _extract_query_terms(topic)
     topic_text = _normalize_text(topic)
@@ -152,7 +119,7 @@ def _score_papers(topic: str, papers: list[PaperDocument]) -> list[ScoredPaper]:
         )
     selected = [item for item in scored_items if item.score >= threshold]
     if not selected:
-        # 中文注释：若阈值过滤后为空，则保留全部候选，避免当前主题过短时结果被全部筛掉。
+        # 中文注释：当主题过短导致阈值筛选后为空时，回退到全部候选，避免出现“明明搜到了却全被过滤”的情况。
         selected = list(scored_items)
     selected.sort(
         key=lambda item: (
@@ -165,25 +132,8 @@ def _score_papers(topic: str, papers: list[PaperDocument]) -> list[ScoredPaper]:
     return selected
 
 
-def _scored_paper_to_dict(item: ScoredPaper) -> JsonObject:
-    """把评分结果转换成普通字典，便于写入状态和调试输出。"""
-
-    payload = item.paper.to_dict()
-    payload.update(
-        {
-            "score": item.score,
-            "title_hits": item.title_hits,
-            "abstract_hits": item.abstract_hits,
-            "topic_in_title": item.topic_in_title,
-            "topic_in_abstract": item.topic_in_abstract,
-            "matched_terms": list(item.matched_terms),
-        }
-    )
-    return payload
-
-
 def _paper_dedupe_key(paper: PaperDocument) -> str:
-    """为论文生成稳定去重键，优先使用 DOI，其次回退到标题。"""
+    """为论文生成稳定的去重键，优先使用 DOI，其次回退到标题。"""
 
     doi = (paper.doi or "").strip().lower()
     if doi:
