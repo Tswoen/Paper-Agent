@@ -4,17 +4,18 @@ import copy
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
-from src.utils import get_logger
+from src.utils import get_logger, logging_context
 
 
 JsonObject = dict[str, Any]
+MessageHandler = Callable[[str, str, JsonObject], list[JsonObject]]
 logger = get_logger(__name__)
 
 
 class SessionError(Exception):
-    """会话业务错误，HTTP 网关层会把它转换成统一 error payload。"""
+    """会话业务错误，HTTP 层会把它转换成统一错误响应。"""
 
     def __init__(self, message: str, status: int = 400):
         """初始化会话业务异常。"""
@@ -31,10 +32,11 @@ def utc_now() -> str:
 
 @dataclass(slots=True)
 class SessionRecord:
-    """单个聊天会话的持久化模型。
+    """单个会话的持久化模型。
 
-    这里故意只保留与前后端交互协议相关的数据，真正 Agent 的运行逻辑仍然通过
-    `message_handler` 注入，避免把会话仓库做成杂糅的“万能类”。
+    中文说明：
+    这里故意只保留会话本身的数据字段，不把“提交消息并触发工作流”的应用逻辑塞进数据对象，
+    这样仓库层仍然只负责存取，会更容易在未来替换成数据库实现。
     """
 
     key: str
@@ -74,8 +76,9 @@ class SessionRecord:
 class SessionRepository:
     """内存会话仓库。
 
-    当前实现服务于前后端交互模块的核心协议；若未来需要落盘，只需要替换这一个仓库，
-    Gateway/Realtime 层不需要跟着改动。
+    中文说明：
+    当前实现主要服务于前后端联调与单机运行场景；如果以后要切到数据库，只需要替换这一层，
+    上层的路由与会话应用服务不必跟着改接口。
     """
 
     def __init__(self, initial: list[JsonObject] | None = None):
@@ -197,3 +200,108 @@ def delete_session(repo: SessionRepository, key: str) -> JsonObject:
 
     repo.delete(key)
     return {"deleted": True, "key": key}
+
+
+def submit_message(
+    repo: SessionRepository,
+    session_key: str,
+    body: JsonObject | None = None,
+    message_handler: MessageHandler | None = None,
+) -> JsonObject:
+    """提交一条用户消息并触发一次后端处理流程。
+
+    中文说明：
+    这里是会话模块的应用服务入口，而不是仓库方法。
+    它负责把“校验输入、写入用户消息、标记运行状态、调用工作流处理器、整理事件返回”串起来，
+    但不会把 graph/agent 的真实执行细节耦合进 SessionRepository。
+    """
+
+    body = body or {}
+    content = str(body.get("content") or "")
+    if not content.strip() and not body.get("media"):
+        raise ValueError("content is required")
+
+    # 中文注释：先确认会话存在，避免把消息写进一个无效的 session。
+    repo.get(session_key)
+
+    turn_id = str(body.get("turn_id") or uuid.uuid4().hex)
+    media = list(body.get("media") or [])
+    started_at = utc_now()
+    events: list[JsonObject] = []
+    resolved_handler = message_handler or _default_message_handler
+
+    try:
+        with logging_context(session_key=session_key, turn_id=turn_id):
+            logger.info(
+                "收到用户消息提交",
+                extra={"content_length": len(content), "media_count": len(media)},
+            )
+
+            # 中文注释：先落库用户消息，保证 thread 快照和事件流引用的是同一份输入。
+            repo.append_message(session_key, "user", content, media=media, turn_id=turn_id)
+
+            # 中文注释：登记本轮运行开始时间，便于前端判断当前会话是否仍在执行。
+            repo.set_run_started_at(session_key, started_at)
+
+            events = [
+                {
+                    "event": "message",
+                    "chat_id": session_key,
+                    "role": "user",
+                    "content": content,
+                    "media": media,
+                    "turn_id": turn_id,
+                },
+                {
+                    "event": "goal_status",
+                    "chat_id": session_key,
+                    "run_started_at": started_at,
+                    "turn_id": turn_id,
+                },
+            ]
+
+            # 中文注释：真正的 agent/graph 执行逻辑依然通过注入完成，方便未来替换实现。
+            events.extend(resolved_handler(session_key, content, {"turn_id": turn_id, **body}))
+
+            # 中文注释：保底补齐 turn_end，避免前端因为外部处理器漏收尾而一直显示“执行中”。
+            if not any(event.get("event") == "turn_end" for event in events):
+                events.append({"event": "turn_end", "chat_id": session_key, "turn_id": turn_id})
+
+            logger.info("消息回合处理完成", extra={"event_count": len(events)})
+    finally:
+        # 中文注释：无论成功还是失败都清理运行状态，避免前端残留运行中状态。
+        repo.set_run_started_at(session_key, None)
+
+    return {
+        "session_key": session_key,
+        "turn_id": turn_id,
+        "events": events,
+        "thread": repo.get(session_key).thread(),
+    }
+
+
+def _default_message_handler(chat_id: str, content: str, frame: JsonObject) -> list[JsonObject]:
+    """默认消息处理器。
+
+    中文说明：
+    这是一个演示型占位实现，用来保证 HTTP 提交接口在没有接入真实工作流时也能形成完整事件闭环。
+    当后续接入真正的 graph/agent 时，可以直接通过 submit_message 的 message_handler 参数替换。
+    """
+
+    turn_id = frame.get("turn_id")
+    return [
+        {
+            "event": "reasoning_delta",
+            "chat_id": chat_id,
+            "content": "收到问题，开始整理回答。",
+            "turn_id": turn_id,
+        },
+        {"event": "reasoning_end", "chat_id": chat_id, "turn_id": turn_id},
+        {
+            "event": "delta",
+            "chat_id": chat_id,
+            "content": f"已收到：{content}",
+            "turn_id": turn_id,
+        },
+        {"event": "stream_end", "chat_id": chat_id, "turn_id": turn_id},
+    ]

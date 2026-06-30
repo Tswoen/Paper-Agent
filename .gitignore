@@ -79,3 +79,8 @@ vite.svg
 .cache/
 tmp/
 temp/
+
+
+# other
+doc/*
+paper-search-mcp/

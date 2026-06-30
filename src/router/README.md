@@ -45,7 +45,7 @@ main.py
 
 前端请求 /api/sessions/{key}/messages
   -> sessions_router.py
-  -> realtime.py:HttpMessageGateway
+  -> sessions_api.py:submit_message
   -> SessionRepository
   -> 返回 events + thread
 
@@ -90,15 +90,15 @@ main.py
 
 关键函数：`create_app(...)`
 
-### 2. `gateway.py`
+### 2. `/webui/bootstrap` 逻辑
 
-这个文件现在只负责“启动信息”，不再负责 token 管理。
+这部分逻辑现在已经并入 `app.py`，不再单独保留 `gateway.py`。
 
 它存在的意义是：
 
 - 给前端一个稳定的 bootstrap 入口
 - 告诉前端当前运行能力
-- 把启动相关配置集中起来
+- 把启动相关配置集中在应用层
 
 ### 3. `settings_router.py`
 
@@ -144,48 +144,31 @@ main.py
 - 读取线程
 - 删除会话
 - 持久化用户消息
+- 处理消息提交流程并生成事件列表
 
-### 7. `realtime.py`
-
-虽然文件名还叫 `realtime.py`，但现在它已经不是 WebSocket 层了。
-
-当前它真正做的是：
-
-- 接收一条消息提交
-- 生成这一轮的事件列表
-- 返回线程快照
-
-核心类：`HttpMessageGateway`
-
-### 8. `stream_aggregator.py`
+### 7. `stream_aggregator.py`
 
 这是给前端消费后端事件用的。
 
 如果后端返回的是很多碎片事件，这个文件就负责把它们整理成前端真正想展示的消息时间线。
 
-### 9. `protocol.py`
+### 8. `protocol.py`
 
-这个文件放的是通用协议数据结构。
+这个文件现在只保留前端时间线消息模型 `UIMessage`。
 
-包含几个关键对象：
-
-- `ApiResponse`
-- `BootstrapPayload`
-- `UIMessage`
-
-### 10. `__init__.py`
+### 9. `__init__.py`
 
 这是 `router` 包的统一导出入口。
 
-### 11. `config_router.py`
+### 10. `config_router.py`
 
 这个文件目前本质上是 `__init__.py` 的重复导出版本，更像兼容层。
 
-### 12. `front_to_back.md`
+### 11. `front_to_back.md`
 
 这是对前后端接口的补充说明文档，不是运行时代码。
 
-### 13. `README.md`
+### 12. `README.md`
 
 也就是你现在正在看的这个文件。
 

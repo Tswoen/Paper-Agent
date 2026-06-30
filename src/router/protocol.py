@@ -5,41 +5,15 @@ from typing import Any, Literal
 
 
 JsonObject = dict[str, Any]
-ConnectionState = Literal["idle", "connecting", "open", "reconnecting", "closed", "error"]
-
-
-@dataclass(slots=True)
-class ApiResponse:
-    """框架无关的 HTTP 响应对象。"""
-
-    status: int
-    body: JsonObject
-    headers: dict[str, str] = field(default_factory=lambda: {"content-type": "application/json"})
-
-
-@dataclass(slots=True)
-class BootstrapPayload:
-    """前端启动所需的最小网关信息。"""
-
-    expires_in: int
-    api_base: str = ""
-    runtime_surface: str = "paper_agent_workspace"
-    runtime_capabilities: JsonObject = field(default_factory=dict)
-
-    def to_dict(self) -> JsonObject:
-        """转换为前端可直接消费的 JSON 字典。"""
-
-        return {
-            "expires_in": self.expires_in,
-            "api_base": self.api_base,
-            "runtime_surface": self.runtime_surface,
-            "runtime_capabilities": self.runtime_capabilities,
-        }
 
 
 @dataclass(slots=True)
 class UIMessage:
-    """前端时间线消息模型。"""
+    """前端时间线里的单条消息模型。
+
+    这个结构只保留前端渲染真正会用到的字段，负责承载用户消息、
+    assistant 消息以及流式过程中附带的 reasoning、tool、media 等内容。
+    """
 
     id: str
     role: Literal["user", "assistant", "system"]
@@ -56,7 +30,11 @@ class UIMessage:
     turn_seq: int | None = None
 
     def to_dict(self) -> JsonObject:
-        """转换为前端渲染层使用的普通 JSON 字典。"""
+        """把消息对象转换成前端可直接消费的普通字典。
+
+        这里保留显式转换方法，是为了让 `stream_aggregator.py` 在生成快照时
+        不需要关心 dataclass 细节。
+        """
 
         return {
             "id": self.id,

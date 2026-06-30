@@ -4,8 +4,15 @@ from typing import Any
 
 from fastapi import APIRouter, Request
 
-from .realtime import HttpMessageGateway
-from .sessions_api import SessionRepository, create_session, delete_session, fetch_thread, list_sessions
+from .sessions_api import (
+    MessageHandler,
+    SessionRepository,
+    create_session,
+    delete_session,
+    fetch_thread,
+    list_sessions,
+    submit_message,
+)
 
 
 JsonObject = dict[str, Any]
@@ -13,7 +20,7 @@ JsonObject = dict[str, Any]
 
 def create_sessions_router(
     repo: SessionRepository,
-    message_gateway: HttpMessageGateway,
+    message_handler: MessageHandler | None = None,
 ) -> APIRouter:
     """创建会话相关的 FastAPI 路由。"""
 
@@ -37,7 +44,8 @@ def create_sessions_router(
 
     @router.post("/{session_key}/messages")
     async def post_message(session_key: str, request: Request) -> JsonObject:
-        return message_gateway.submit_message(session_key, await _json_body(request))
+        # 中文注释：消息提交和其他 session 接口一样，直接下沉到 sessions_api 应用服务层处理。
+        return submit_message(repo, session_key, await _json_body(request), message_handler=message_handler)
 
     return router
 

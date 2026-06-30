@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
@@ -11,9 +12,7 @@ from fastapi.staticfiles import StaticFiles
 
 from src.utils import get_logger, logging_context, setup_logging
 
-from .gateway import GatewayConfig, bootstrap_payload
-from .realtime import HttpMessageGateway
-from .sessions_api import SessionError, SessionRepository
+from .sessions_api import MessageHandler, SessionError, SessionRepository
 from .sessions_router import create_sessions_router
 from .settings_api import SettingsRepository
 from .settings_router import create_settings_router
@@ -23,11 +22,23 @@ JsonObject = dict[str, Any]
 logger = get_logger(__name__)
 
 
+@dataclass(slots=True)
+class GatewayConfig:
+    """单机版前端启动配置。
+
+    这个配置对象只负责描述当前运行环境提供给前端的基础信息。
+    目前项目只需要 `api_base` 这一个字段，但把它保留成独立数据类，
+    以后如果 bootstrap 还要补充更多运行时信息，也能继续沿用同一个入口。
+    """
+
+    api_base: str = ""
+
+
 def create_app(
     settings_repo: SettingsRepository | None = None,
     sessions_repo: SessionRepository | None = None,
     config: GatewayConfig | None = None,
-    message_handler: Callable[[str, str, JsonObject], list[JsonObject]] | None = None,
+    message_handler: MessageHandler | None = None,
 ) -> FastAPI:
     """创建面向前端工作台的 FastAPI 应用。
 
@@ -39,11 +50,10 @@ def create_app(
     settings_repo = settings_repo or SettingsRepository(_default_settings_path())
     sessions_repo = sessions_repo or SessionRepository()
     config = config or GatewayConfig()
-    message_gateway = HttpMessageGateway(sessions_repo, message_handler=message_handler)
 
     app = FastAPI(title="Papers Agents API")
     app.include_router(create_settings_router(settings_repo))
-    app.include_router(create_sessions_router(sessions_repo, message_gateway))
+    app.include_router(create_sessions_router(sessions_repo, message_handler=message_handler))
 
     @app.middleware("http")
     async def access_log_middleware(request: Request, call_next):
@@ -94,7 +104,21 @@ def create_app(
         """前端启动入口：返回本地运行时能力声明。"""
 
         logger.debug("返回前端 bootstrap 配置")
-        return bootstrap_payload(config)
+        # 这里直接在应用层组装 bootstrap payload，避免再拆出一个过薄的中间文件。
+        return {
+            "expires_in": 0,
+            "api_base": config.api_base,
+            "runtime_surface": "paper_agent_workspace",
+            "runtime_capabilities": {
+                "fastapi_rest": True,
+                "rest_management": True,
+                "http_message_submit": True,
+                "websocket_stream": False,
+                "multi_chat_socket": False,
+                "settings_snapshot": True,
+                "auth_required": False,
+            },
+        }
 
     _mount_frontend(app)
     logger.info(
