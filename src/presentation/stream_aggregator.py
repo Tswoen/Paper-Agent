@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from .protocol import UIMessage
+from src.models.protocol import UIMessage
 
 
 JsonObject = dict[str, Any]
@@ -12,11 +12,14 @@ JsonObject = dict[str, Any]
 class ChatStreamAggregator:
     """把后端事件聚合成前端可渲染的消息时间线。
 
-    事件列表可以来自 FastAPI HTTP 响应；事件不等于 UI 消息，这个类负责把
-    delta、reasoning、tool 等片段合并成稳定的前端时间线。
+    中文说明：
+    后端返回的是事件流，前端真正想渲染的是稳定的消息列表。这个聚合器负责把
+    delta、reasoning、tool、file_edit 等碎片事件整合成一条条 UIMessage。
     """
 
     def __init__(self):
+        """初始化一个空的时间线聚合器。"""
+
         self.messages: list[UIMessage] = []
         self.is_streaming = False
         self.run_started_at: str | None = None
@@ -116,7 +119,7 @@ class ChatStreamAggregator:
     def _append_delta(self, text: str, event: JsonObject) -> None:
         """把回答正文增量追加到当前 assistant 消息。"""
 
-        # delta 只追加到当前 assistant 消息，避免每个片段都生成一条新消息。
+        # 中文注释：delta 只追加到当前 assistant 消息，避免每个片段都生成一条新消息。
         assistant = self._ensure_active_assistant(event)
         assistant.content += text
         assistant.is_streaming = True
@@ -132,7 +135,7 @@ class ChatStreamAggregator:
         self.is_streaming = True
 
     def _append_message_event(self, event: JsonObject) -> None:
-        """处理普通 message 事件，按 role 写入时间线。"""
+        """处理普通 message 事件，并按 role 写入时间线。"""
 
         kind = str(event.get("kind") or "message")
         if kind in {"tool_hint", "progress", "tool"}:

@@ -1,60 +1,30 @@
 from __future__ import annotations
 
 import copy
-import json
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
-from src.llm.config import AgentConfig, EmbeddingProfile, ModelConfig, ProviderConfig, SystemConfig
+from src.llm.config import AgentConfig, EmbeddingProfile, ModelConfig, ProviderConfig
 from src.llm.registry import PROVIDERS, ProviderSpec, match_provider_backend
+from src.repositories.settings.json import SettingsRepository
 
 
 JsonObject = dict[str, Any]
 
 
 class SettingsError(Exception):
-    """设置接口的业务错误，router 层会统一转换成 HTTP 响应。"""
+    """设置接口的业务错误，HTTP 层会统一转换成错误响应。"""
 
     def __init__(self, message: str, status: int = 400):
+        """初始化设置业务异常。"""
+
         super().__init__(message)
         self.status = status
 
 
-class SettingsRepository:
-    """极简配置仓库，只负责 JSON 文件或内存配置的 load/save。"""
-
-    def __init__(
-        self,
-        path: str | Path | None = None,
-        initial: JsonObject | None = None,
-        system_path: str | Path | None = None,
-        system: SystemConfig | JsonObject | None = None,
-    ):
-        self.path = Path(path) if path else None
-        self.system_path = Path(system_path) if system_path else Path("config/system.yaml")
-        self._memory = copy.deepcopy(initial or {})
-        self._system = system if isinstance(system, SystemConfig) else SystemConfig.from_dict(system)
-
-    def load(self) -> JsonObject:
-        if self.path and self.path.exists():
-            return json.loads(self.path.read_text(encoding="utf-8"))
-        return copy.deepcopy(self._memory)
-
-    def save(self, data: JsonObject) -> None:
-        normalized = copy.deepcopy(data)
-        if self.path:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.path.write_text(json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8")
-        self._memory = normalized
-
-    def system(self) -> SystemConfig:
-        if self.path:
-            return SystemConfig.load(self.system_path)
-        return self._system
-
-
 def settings_payload(repo: SettingsRepository, agent_name: str | None = None) -> JsonObject:
+    """返回给前端的完整设置快照。"""
+
     data = _normalized_config(repo.load())
     config = ModelConfig.from_dict(data, repo.system())
     resolved_agent_name = _resolve_agent_name(config, agent_name)
@@ -72,7 +42,7 @@ def settings_payload(repo: SettingsRepository, agent_name: str | None = None) ->
             "llm": _dataclass_like(config.system.llm),
             "embedding": _dataclass_like(config.system.embedding),
         },
-        # 当前实现保存后下一轮请求即可生效，不需要进程重启。
+        # 中文注释：当前实现保存后下一轮请求即可生效，不需要进程重启。
         "requires_restart": False,
         "restart_required_sections": [],
         "apply_state": "applied_next_request",
@@ -86,6 +56,8 @@ def settings_payload(repo: SettingsRepository, agent_name: str | None = None) ->
 
 
 def update_agent_settings(repo: SettingsRepository, patch: JsonObject) -> JsonObject:
+    """更新默认 agent 的配置。"""
+
     data = _normalized_config(repo.load())
     name = str(patch.get("name") or patch.get("agent") or patch.get("agent_name") or patch.get("agentName") or "default_agent").strip()
     if not name:
@@ -100,12 +72,16 @@ def update_agent_settings(repo: SettingsRepository, patch: JsonObject) -> JsonOb
 
 
 def create_or_update_agent(repo: SettingsRepository, name: str, patch: JsonObject) -> JsonObject:
+    """按名称创建或更新一个 agent 配置。"""
+
     body = dict(patch)
     body["name"] = name
     return update_agent_settings(repo, body)
 
 
 def update_provider_settings(repo: SettingsRepository, name: str, patch: JsonObject) -> JsonObject:
+    """更新 provider 配置。"""
+
     data = _normalized_config(repo.load())
     provider = _providers(data).setdefault(name, {})
     if "backend" in patch or "provider_type" in patch or "providerType" in patch:
@@ -132,6 +108,8 @@ def update_provider_settings(repo: SettingsRepository, name: str, patch: JsonObj
 
 
 def update_embedding_profile(repo: SettingsRepository, name: str, patch: JsonObject) -> JsonObject:
+    """更新嵌入模型配置。"""
+
     data = _normalized_config(repo.load())
     profile = _embedding_profiles(data).setdefault(name, {})
     allowed = {
@@ -153,6 +131,8 @@ def update_embedding_profile(repo: SettingsRepository, name: str, patch: JsonObj
 
 
 def provider_models_payload(repo: SettingsRepository, provider: str, client: Any | None = None) -> JsonObject:
+    """读取指定 provider 的模型目录载荷。"""
+
     data = _normalized_config(repo.load())
     config = ModelConfig.from_dict(data, repo.system())
     if provider not in config.providers:
@@ -186,6 +166,8 @@ def provider_models_payload(repo: SettingsRepository, provider: str, client: Any
 
 
 def _normalized_config(data: JsonObject) -> JsonObject:
+    """把原始配置标准化成统一内部结构。"""
+
     data = copy.deepcopy(data)
     data.setdefault("providers", {})
     data.setdefault("agents", {})
@@ -194,18 +176,26 @@ def _normalized_config(data: JsonObject) -> JsonObject:
 
 
 def _providers(data: JsonObject) -> JsonObject:
+    """返回 provider 配置字典，并在缺失时补空对象。"""
+
     return data.setdefault("providers", {})
 
 
 def _agents(data: JsonObject) -> JsonObject:
+    """返回 agent 配置字典，并在缺失时补空对象。"""
+
     return data.setdefault("agents", {})
 
 
 def _embedding_profiles(data: JsonObject) -> JsonObject:
+    """返回 embedding profile 配置字典，并在缺失时补空对象。"""
+
     return data.setdefault("embedding_profiles", {})
 
 
 def _resolve_agent_name(config: ModelConfig, requested: str | None) -> str:
+    """根据请求参数与默认值解析当前生效的 agent 名称。"""
+
     if requested and requested in config.agents:
         return requested
     if config.default_agent in config.agents:
@@ -217,6 +207,8 @@ def _resolve_agent_name(config: ModelConfig, requested: str | None) -> str:
 
 
 def _agent_payload(name: str, agent: AgentConfig, provider_config: ProviderConfig) -> JsonObject:
+    """构造当前活动 agent 的前端响应结构。"""
+
     return {
         "name": name,
         "label": agent.label or name,
@@ -233,6 +225,8 @@ def _agent_payload(name: str, agent: AgentConfig, provider_config: ProviderConfi
 
 
 def _agent_items(config: ModelConfig) -> list[JsonObject]:
+    """构造全部 agent 列表响应。"""
+
     return [
         _agent_item(name, agent, name == config.default_agent)
         for name, agent in config.agents.items()
@@ -240,6 +234,8 @@ def _agent_items(config: ModelConfig) -> list[JsonObject]:
 
 
 def _agent_item(name: str, agent: AgentConfig, is_default: bool) -> JsonObject:
+    """构造单个 agent 的列表项结构。"""
+
     return {
         "name": name,
         "label": agent.label or name,
@@ -257,6 +253,8 @@ def _agent_item(name: str, agent: AgentConfig, is_default: bool) -> JsonObject:
 
 
 def _embedding_items(config: ModelConfig) -> list[JsonObject]:
+    """构造全部 embedding profile 列表响应。"""
+
     return [
         _embedding_item(name, profile, name == config.default_embedding_profile)
         for name, profile in config.embedding_profiles.items()
@@ -264,6 +262,8 @@ def _embedding_items(config: ModelConfig) -> list[JsonObject]:
 
 
 def _embedding_item(name: str, profile: EmbeddingProfile, is_default: bool) -> JsonObject:
+    """构造单个 embedding profile 的列表项结构。"""
+
     return {
         "name": name,
         "label": profile.label or name,
@@ -277,6 +277,8 @@ def _embedding_item(name: str, profile: EmbeddingProfile, is_default: bool) -> J
 
 
 def _provider_items(config: ModelConfig) -> list[JsonObject]:
+    """构造全部 provider 的前端响应列表。"""
+
     items = []
     for name, provider_config in sorted(config.providers.items()):
         spec = match_provider_backend(provider_config.backend)
@@ -312,6 +314,8 @@ def _provider_items(config: ModelConfig) -> list[JsonObject]:
 
 
 def _apply_agent_patch(agent: JsonObject, patch: JsonObject) -> None:
+    """把请求补丁映射到内部 agent 配置字段。"""
+
     allowed = {
         "label": "label",
         "provider": "provider",
@@ -332,6 +336,8 @@ def _apply_agent_patch(agent: JsonObject, patch: JsonObject) -> None:
 
 
 def _validate_agent(data: JsonObject, agent: JsonObject) -> None:
+    """校验 agent 配置是否完整且引用了合法 provider。"""
+
     provider = agent.get("provider")
     model_name = agent.get("model_name") or agent.get("model")
     if not provider:
@@ -342,6 +348,8 @@ def _validate_agent(data: JsonObject, agent: JsonObject) -> None:
 
 
 def _validate_embedding(data: JsonObject, profile: JsonObject) -> None:
+    """校验 embedding profile 配置是否完整。"""
+
     provider = profile.get("provider")
     model_name = profile.get("model_name") or profile.get("model")
     if not provider:
@@ -352,6 +360,8 @@ def _validate_embedding(data: JsonObject, profile: JsonObject) -> None:
 
 
 def _validate_provider_for_save(data: JsonObject, provider: str | None) -> None:
+    """校验引用的 provider 是否存在且已完成基础配置。"""
+
     if not provider or provider == "auto":
         return
     config = ModelConfig.from_dict(data)
@@ -364,26 +374,36 @@ def _validate_provider_for_save(data: JsonObject, provider: str | None) -> None:
 
 
 def _provider_configured(spec: ProviderSpec, config: ProviderConfig) -> bool:
+    """判断 provider 是否已具备最基本的可用条件。"""
+
     if spec.default_api_base or config.api_base:
         return bool(config.api_key) if _provider_requires_key(spec) else True
     return False
 
 
 def _provider_requires_key(spec: ProviderSpec) -> bool:
+    """判断指定 provider backend 是否需要 API Key。"""
+
     return spec.backend in {"openai_compat", "anthropic"}
 
 
 def _api_key_hint(api_key: str | None) -> str | None:
+    """把 API Key 转成脱敏后的提示文本。"""
+
     if not api_key:
         return None
     return f"{api_key[:4]}...{api_key[-4:]}" if len(api_key) > 8 else "configured"
 
 
 def _provider_label(name: str) -> str:
+    """把 provider 名称转换成更友好的展示标签。"""
+
     return name.replace("_", " ").title()
 
 
 def _provider_type_items() -> list[JsonObject]:
+    """返回全部 provider 类型说明。"""
+
     items = []
     for name, spec in PROVIDERS.items():
         items.append(
@@ -399,6 +419,8 @@ def _provider_type_items() -> list[JsonObject]:
 
 
 def _models_status(provider: str, status: str, message: str) -> JsonObject:
+    """构造模型目录拉取失败或受限时的统一响应结构。"""
+
     return {
         "provider": provider,
         "label": _provider_label(provider),
@@ -412,6 +434,8 @@ def _models_status(provider: str, status: str, message: str) -> JsonObject:
 
 
 def _make_model_list_client(spec: ProviderSpec, config: ProviderConfig, api_base: str) -> Any:
+    """按 provider backend 创建模型目录客户端。"""
+
     if spec.backend == "openai_compat":
         from openai import OpenAI
 
@@ -420,6 +444,8 @@ def _make_model_list_client(spec: ProviderSpec, config: ProviderConfig, api_base
 
 
 def _parse_model_list(response: Any) -> list[JsonObject]:
+    """把 provider 返回的模型目录解析成统一列表结构。"""
+
     raw = response.model_dump() if hasattr(response, "model_dump") else response
     data = raw.get("data", raw) if isinstance(raw, dict) else raw
     models = []
@@ -438,6 +464,8 @@ def _parse_model_list(response: Any) -> list[JsonObject]:
 
 
 def _dataclass_like(value: Any) -> JsonObject:
+    """把 dataclass 风格对象转成普通字典。"""
+
     return {
         key: getattr(value, key)
         for key in getattr(value, "__dataclass_fields__", {})

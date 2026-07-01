@@ -10,12 +10,14 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from src.repositories.sessions.base import SessionRepository
+from src.repositories.sessions.sqlite import SQLiteSessionRepository
+from src.repositories.settings.json import SettingsRepository
+from src.services.sessions import MessageHandler, SessionError
 from src.utils import get_logger, logging_context, setup_logging
 
-from .sessions_api import MessageHandler, SessionError, SessionRepository
-from .sessions_router import create_sessions_router
-from .settings_api import SettingsRepository
-from .settings_router import create_settings_router
+from .routers.sessions import create_sessions_router
+from .routers.settings import create_settings_router
 
 
 JsonObject = dict[str, Any]
@@ -24,11 +26,12 @@ logger = get_logger(__name__)
 
 @dataclass(slots=True)
 class GatewayConfig:
-    """单机版前端启动配置。
+    """前端网关配置对象。
 
-    这个配置对象只负责描述当前运行环境提供给前端的基础信息。
-    目前项目只需要 `api_base` 这一个字段，但把它保留成独立数据类，
-    以后如果 bootstrap 还要补充更多运行时信息，也能继续沿用同一个入口。
+    中文说明：
+    这个数据类只负责承载前端在启动阶段需要读取的最小运行时配置，
+    目前主要是 `api_base`。之所以单独保留一层对象，是为了后续补充
+    bootstrap 字段时仍然维持统一的应用装配入口。
     """
 
     api_base: str = ""
@@ -42,13 +45,17 @@ def create_app(
 ) -> FastAPI:
     """创建面向前端工作台的 FastAPI 应用。
 
-    该入口除了组装路由外，还负责在应用层接入统一日志系统和请求访问日志，这样无论
-    是业务模块、错误处理还是静态资源访问，都能落到同一套日志观测链路里。
+    中文说明：
+    该函数是后端 HTTP 层唯一的总装配入口，负责：
+    1. 初始化统一日志系统。
+    2. 组装设置仓储与会话仓储。
+    3. 注册 settings/sessions 路由。
+    4. 统一配置异常处理与静态前端挂载。
     """
 
     setup_logging()
     settings_repo = settings_repo or SettingsRepository(_default_settings_path())
-    sessions_repo = sessions_repo or SessionRepository()
+    sessions_repo = sessions_repo or SQLiteSessionRepository()
     config = config or GatewayConfig()
 
     app = FastAPI(title="Papers Agents API")
@@ -59,8 +66,9 @@ def create_app(
     async def access_log_middleware(request: Request, call_next):
         """记录每一次 HTTP 请求的访问日志。
 
-        中文注释：这里把 request_id、方法、路径、状态码和耗时统一记录下来，后续排查
-        “某次请求为什么慢、为什么报错、落到了哪个会话”时会顺手很多。
+        中文说明：
+        这里统一补充 request_id、方法、路径、客户端地址、状态码与耗时，
+        方便后续排查前后端联调问题以及某次请求落到了哪个会话。
         """
 
         request_id = request.headers.get("X-Request-ID") or uuid.uuid4().hex[:12]
@@ -89,7 +97,7 @@ def create_app(
 
     @app.exception_handler(SessionError)
     async def session_error_handler(_: Request, exc: SessionError) -> JSONResponse:
-        """把会话业务错误转换成统一的前端错误结构。"""
+        """把会话业务异常转换成统一的前端错误结构。"""
 
         return JSONResponse(status_code=exc.status, content={"error": {"message": str(exc), "status": exc.status}})
 
@@ -101,10 +109,14 @@ def create_app(
 
     @app.get("/webui/bootstrap")
     async def bootstrap() -> JsonObject:
-        """前端启动入口：返回本地运行时能力声明。"""
+        """返回前端启动所需的最小运行时能力声明。
+
+        中文说明：
+        这里不做鉴权协商，只告诉前端当前后端支持哪些调用方式，
+        让单机版界面可以在启动时一次性拿到能力快照。
+        """
 
         logger.debug("返回前端 bootstrap 配置")
-        # 这里直接在应用层组装 bootstrap payload，避免再拆出一个过薄的中间文件。
         return {
             "expires_in": 0,
             "api_base": config.api_base,
@@ -140,7 +152,7 @@ def _mount_frontend(app: FastAPI) -> None:
     assets_dir = dist_dir / "assets"
 
     if assets_dir.exists():
-        # 中文注释：构建产物里的静态资源单独挂载，浏览器可以直接按指纹路径命中资源文件。
+        # 中文注释：构建产物中的静态资源单独挂载，浏览器可以直接命中资源文件。
         app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="front-assets")
 
     if not index_file.exists():
@@ -160,7 +172,7 @@ def _mount_frontend(app: FastAPI) -> None:
         candidate = dist_dir / full_path
         if full_path and candidate.is_file():
             return FileResponse(candidate)
-        # 中文注释：未知前端路由统一回退到 index.html，由前端路由系统接管页面切换。
+        # 中文注释：未知前端路径统一回退到 index.html，由前端路由系统接管。
         return FileResponse(index_file)
 
 

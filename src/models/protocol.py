@@ -11,8 +11,10 @@ JsonObject = dict[str, Any]
 class UIMessage:
     """前端时间线里的单条消息模型。
 
-    这个结构只保留前端渲染真正会用到的字段，负责承载用户消息、
-    assistant 消息以及流式过程中附带的 reasoning、tool、media 等内容。
+    中文说明：
+    这个结构只保留前端真正会消费的字段，用于承载用户消息、助手消息、
+    reasoning 增量、工具事件与文件改动等展示数据，避免让前端直接依赖
+    后端原始事件结构。
     """
 
     id: str
@@ -30,11 +32,7 @@ class UIMessage:
     turn_seq: int | None = None
 
     def to_dict(self) -> JsonObject:
-        """把消息对象转换成前端可直接消费的普通字典。
-
-        这里保留显式转换方法，是为了让 `stream_aggregator.py` 在生成快照时
-        不需要关心 dataclass 细节。
-        """
+        """把消息对象转换成前端可直接消费的普通字典。"""
 
         return {
             "id": self.id,

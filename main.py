@@ -3,7 +3,7 @@ from src.utils import get_logger, setup_logging
 
 setup_logging()
 
-from src.router import create_app
+from src.api import create_app
 
 
 app = create_app()
