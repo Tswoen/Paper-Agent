@@ -1,7 +1,7 @@
 import tempfile
 import unittest
 
-from graph import build_search_graph, run_search_graph
+from graph import build_graph, run_graph
 from src.agents import ReviewRequest
 from src.llm.base import LLMResponse
 from src.paper_retrieval.models import PaperDocument, SearchResponse
@@ -9,16 +9,16 @@ from src.repositories.sessions.sqlite import SQLiteSessionRepository
 
 
 class _FakeProvider:
-    """为图测试提供稳定的关键词输出，避免依赖真实模型配置。"""
+    """为图测试提供稳定关键词输出，避免依赖真实模型配置。"""
 
     def chat_with_retry(self, messages, **kwargs):
-        """返回固定 JSON，保证搜索节点不会因为缺少 LLM 而终止。"""
+        """返回固定 JSON，确保搜索节点不会因为缺少 LLM 而终止。"""
 
         return LLMResponse(content='{"keywords":["paper search","literature review"]}', finish_reason="stop")
 
 
 class _FakeSnapshot:
-    """最小化 LLM 快照，只暴露 SearchAgent 需要的 provider。"""
+    """最小化 LLM 快照，仅暴露 SearchAgent 需要的 provider。"""
 
     def __init__(self):
         """初始化测试用 provider。"""
@@ -27,7 +27,7 @@ class _FakeSnapshot:
 
 
 class _StubService:
-    """用于测试搜索图流程的桩检索服务。"""
+    """用于测试论文处理图流程的桩检索服务。"""
 
     def __init__(self):
         """记录搜索调用参数，便于验证节点确实执行了检索。"""
@@ -55,19 +55,21 @@ class _StubService:
         )
 
 
-class SearchGraphTest(unittest.TestCase):
-    def test_build_search_graph_returns_compiled_graph(self):
+class GraphTest(unittest.TestCase):
+    """验证通用图入口在当前搜索场景下的行为稳定性。"""
+
+    def test_build_graph_returns_compiled_graph(self):
         """验证图可以成功编译。"""
 
-        graph = build_search_graph()
+        graph = build_graph()
 
         self.assertTrue(hasattr(graph, "invoke"))
 
-    def test_run_search_graph_returns_ranked_papers(self):
-        """验证搜索图执行后会把论文结果写入共享状态与稳定返回值。"""
+    def test_run_graph_returns_ranked_papers(self):
+        """验证图执行后会把论文结果写入共享状态与稳定返回值。"""
 
         stub = _StubService()
-        result = run_search_graph(
+        result = run_graph(
             ReviewRequest(
                 topic="multi-agent literature review",
                 constraints={"sources": ["openalex"], "max_results": 5},
@@ -86,11 +88,11 @@ class SearchGraphTest(unittest.TestCase):
         self.assertIn("search_scores", result.state)
         self.assertGreaterEqual(len(result.state["search_scores"]), 1)
 
-    def test_run_search_graph_executes_each_requested_source_with_full_limit(self):
+    def test_run_graph_executes_each_requested_source_with_full_limit(self):
         """验证多个来源都会执行，且每个来源都使用完整 max_results。"""
 
         stub = _StubService()
-        result = run_search_graph(
+        result = run_graph(
             ReviewRequest(
                 topic="multi-agent literature review",
                 constraints={"sources": ["openalex", "arxiv"], "max_results": 5},
@@ -105,14 +107,14 @@ class SearchGraphTest(unittest.TestCase):
         self.assertEqual([call["limit"] for call in stub.calls], [5, 5])
         self.assertLessEqual(len(result.papers), 5)
 
-    def test_run_search_graph_persists_artifacts_when_session_context_is_provided(self):
-        """验证提供会话上下文后，搜索图会把结果落入产物存储。"""
+    def test_run_graph_persists_artifacts_when_session_context_is_provided(self):
+        """验证提供会话上下文后，图会把结果落入产物存储。"""
 
         stub = _StubService()
         with tempfile.TemporaryDirectory() as temp_dir:
             repo = SQLiteSessionRepository(storage_root=temp_dir)
             session = repo.create("Paper search")
-            result = run_search_graph(
+            result = run_graph(
                 ReviewRequest(
                     topic="multi-agent literature review",
                     constraints={"sources": ["openalex"], "max_results": 3},

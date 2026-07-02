@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from src.agents import ReviewRequest
-from src.graph import run_search_graph
+from src.graph import run_graph
 from src.repositories.sessions.base import SessionRepository
 
 
@@ -11,13 +11,17 @@ JsonObject = dict[str, Any]
 
 
 def build_search_message_handler(repo: SessionRepository):
-    """构建基于论文检索图的消息处理器。"""
+    """构建基于论文处理图的消息处理器。
+
+    该处理器目前仍然服务于“搜索”场景，但底层执行入口已经统一切换为
+    通用图接口，方便后续把筛选、总结和综述生成步骤平滑纳入同一流程。
+    """
 
     def _handler(chat_id: str, content: str, frame: JsonObject) -> list[JsonObject]:
-        """把一次用户消息转成真实检索流程，并返回前端事件流。"""
+        """将一次用户消息转换为图执行结果并产出前端事件流。"""
 
         turn_id = str(frame.get("turn_id") or "")
-        result = run_search_graph(
+        result = run_graph(
             ReviewRequest(topic=content),
             session_repo=repo,
             session_key=chat_id,
@@ -26,6 +30,7 @@ def build_search_message_handler(repo: SessionRepository):
         papers = result.papers
         summary = result.state.get("search_summary") or {}
         artifact_refs = result.state.get("search_artifact_refs") or []
+
         if not papers:
             assistant_text = "未检索到符合条件的论文结果。"
         else:
@@ -36,6 +41,7 @@ def build_search_message_handler(repo: SessionRepository):
                 source_text = paper.source or "unknown"
                 lines.append(f"{index}. {paper.title} | {author_text} | {year_text} | {source_text}")
             assistant_text = "\n".join(lines)
+
         reasoning_text = (
             f"已完成论文检索：原始候选 {summary.get('raw_paper_count', 0)} 篇，"
             f"最终保留 {summary.get('selected_paper_count', 0)} 篇。"
