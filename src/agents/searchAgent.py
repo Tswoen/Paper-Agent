@@ -60,12 +60,16 @@ class SearchAgent(BaseAgent):
         当前搜索阶段直接终止，不再使用基于规则的关键词兜底。
         """
 
-        keywords, _, _ = self._generate_keywords_with_llm(state)
+        keywords, raw_model_output, diagnostics = self._generate_keywords_with_llm(state)
         intent = self._build_search_intent(state, keywords or [])
         search_halted = keywords is None
         return {
             "search_intent": intent,
             "search_halted": search_halted,
+            "diagnostics": {
+                **diagnostics,
+                "raw_model_output": raw_model_output,
+            },
         }
 
     def _generate_keywords_with_llm(self, state: JsonObject) -> tuple[list[str] | None, str | None, JsonObject]:

@@ -1,18 +1,21 @@
 from __future__ import annotations
 
-from typing import TypedDict
+from typing import Any, TypedDict
 
 from src.agents.contracts import ReviewRequest
 from src.paper_retrieval.models import PaperDocument
 
 
-class State(TypedDict, total=False):
-    """LangGraph 兼容的共享图状态。
+JsonObject = dict[str, Any]
 
-    当前设计改为以 `State` 作为节点之间唯一共享载体。这样后续新增阅读、分析、规划、写作节点时，
-    每个节点都可以只读取自己关心的字段，并把产出写回共享状态。
-    """
+
+class State(TypedDict, total=False):
+    """LangGraph 兼容的共享图状态。"""
 
     request: ReviewRequest
     search_results: list[PaperDocument]
+    search_scores: list[JsonObject]
+    search_summary: JsonObject
+    search_artifact_refs: list[JsonObject]
+    diagnostics: JsonObject
     current_step: str

@@ -10,13 +10,7 @@ JsonObject = dict[str, Any]
 
 
 class SessionRepository(ABC):
-    """会话仓储抽象接口。
-
-    中文说明：
-    这一层定义“会话数据应该如何被读取与写入”，但不绑定具体实现。
-    服务层只依赖这套稳定接口，就可以把 SQLite、内存仓储甚至远端存储
-    实现隔离在仓储层下面。
-    """
+    """会话仓储抽象接口。"""
 
     @abstractmethod
     def create(self, title: str = "New chat", workspace_scope: JsonObject | None = None) -> SessionRecord:
@@ -48,6 +42,21 @@ class SessionRepository(ABC):
         created_at: str | None = None,
     ) -> JsonObject:
         """向指定会话追加一条结构化事件。"""
+
+    @abstractmethod
+    def write_artifact(
+        self,
+        key: str,
+        artifact_type: str,
+        name: str,
+        content: str | bytes,
+        *,
+        relative_path: str,
+        metadata: JsonObject | None = None,
+        created_at: str | None = None,
+        encoding: str = "utf-8",
+    ) -> JsonObject:
+        """向指定会话写入产物文件，并在仓储中登记元数据。"""
 
     @abstractmethod
     def set_workspace_scope(self, key: str, workspace_scope: JsonObject | None) -> JsonObject:

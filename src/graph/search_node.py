@@ -2,13 +2,31 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import Protocol
 
 from src.agents.base import AgentContext
 from src.agents.searchAgent import SearchAgent, SearchIntent, load_search_agent_llm
-from src.graph.state_models import State
+from src.graph.search_persistence import SearchPersistenceSink
+from src.graph.state_models import JsonObject, State
 from src.llm import ProviderSnapshot
 from src.paper_retrieval import PaperSearchService
 from src.paper_retrieval.models import PaperDocument
+
+
+class SearchNodeSink(Protocol):
+    """描述检索节点可选的持久化 sink 协议。"""
+
+    def persist(
+        self,
+        *,
+        topic: str,
+        intent: SearchIntent,
+        raw_papers: list[PaperDocument],
+        scored_papers: list[JsonObject],
+        selected_papers: list[PaperDocument],
+        agent_diagnostics: JsonObject,
+        search_halted: bool,
+    ): ...
 
 
 @dataclass(slots=True)
@@ -23,36 +41,71 @@ class ScoredPaper:
     topic_in_abstract: bool
     matched_terms: list[str]
 
+    def to_dict(self) -> JsonObject:
+        """把评分结果转换为便于落盘和回传的普通字典。"""
+
+        return {
+            "paper": self.paper.to_dict(),
+            "score": self.score,
+            "title_hits": self.title_hits,
+            "abstract_hits": self.abstract_hits,
+            "topic_in_title": self.topic_in_title,
+            "topic_in_abstract": self.topic_in_abstract,
+            "matched_terms": list(self.matched_terms),
+        }
+
 
 def run_search_agent_node(
     service: PaperSearchService | None = None,
     llm: ProviderSnapshot | None | str = "auto",
+    sink: SearchNodeSink | None = None,
 ):
-    """生成搜索图中的搜索节点。
-
-    中文说明：
-    1. 先调用 `SearchAgent` 生成结构化检索意图；
-    2. 再调用检索服务执行查询；
-    3. 对候选论文打分、排序并截断；
-    4. 只把后续节点真正需要的业务字段写回共享 `State`。
-    """
+    """生成搜索图中的论文检索节点。"""
 
     resolved_service = service or PaperSearchService()
     resolved_llm = load_search_agent_llm() if llm == "auto" else llm
 
     def _node(state: State) -> State:
-        """执行搜索节点主逻辑，并返回新的局部状态更新。"""
+        """执行检索节点主逻辑，并返回新的局部状态更新。"""
 
         agent = SearchAgent(AgentContext(spec=SearchAgent.spec, llm=resolved_llm))
         agent_update = agent.run(state)
         intent = agent_update["search_intent"]
-        papers = [] if agent_update.get("search_halted") else _execute_search_intent(resolved_service, intent)
-        scored_papers = _score_papers(state["request"].topic, papers)
+        search_halted = bool(agent_update.get("search_halted"))
+        agent_diagnostics = dict(agent_update.get("diagnostics") or {})
+        raw_papers = [] if search_halted else _execute_search_intent(resolved_service, intent)
+        scored_papers = _score_papers(state["request"].topic, raw_papers)
         max_results = max(1, intent.max_results)
         search_results = [item.paper for item in scored_papers[:max_results]]
+        search_scores = [item.to_dict() for item in scored_papers]
+        search_summary = {
+            "topic": state["request"].topic,
+            "search_halted": search_halted,
+            "raw_paper_count": len(raw_papers),
+            "selected_paper_count": len(search_results),
+            "max_results": max_results,
+            "sources": list(intent.sources),
+        }
+        search_artifact_refs: list[JsonObject] = []
+        if sink is not None:
+            persistence_result = sink.persist(
+                topic=state["request"].topic,
+                intent=intent,
+                raw_papers=raw_papers,
+                scored_papers=search_scores,
+                selected_papers=search_results,
+                agent_diagnostics=agent_diagnostics,
+                search_halted=search_halted,
+            )
+            search_artifact_refs = persistence_result.to_state_refs()
+            search_summary["manifest"] = dict(persistence_result.manifest)
         return State(
             request=state["request"],
             search_results=search_results,
+            search_scores=search_scores,
+            search_summary=search_summary,
+            search_artifact_refs=search_artifact_refs,
+            diagnostics={"agent": agent_diagnostics},
             current_step="search",
         )
 

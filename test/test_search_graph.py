@@ -1,9 +1,11 @@
+import tempfile
 import unittest
 
 from graph import build_search_graph, run_search_graph
 from src.agents import ReviewRequest
 from src.llm.base import LLMResponse
 from src.paper_retrieval.models import PaperDocument, SearchResponse
+from src.repositories.sessions.sqlite import SQLiteSessionRepository
 
 
 class _FakeProvider:
@@ -43,8 +45,8 @@ class _StubService:
             source_results={source: 1},
             papers=[
                 PaperDocument(
-                    id="graph-paper-1",
-                    title="LangGraph Powered Paper Search",
+                    id=f"graph-paper-{source}",
+                    title=f"LangGraph Powered Paper Search {source}",
                     authors=["Graph Tester"],
                     year=2026,
                     source=source,
@@ -77,10 +79,10 @@ class SearchGraphTest(unittest.TestCase):
         self.assertGreaterEqual(len(stub.calls), 1)
         self.assertEqual(stub.calls[0]["limit"], 5)
         self.assertGreaterEqual(len(result.papers), 1)
-        self.assertEqual(result.papers[0].title, "LangGraph Powered Paper Search")
         self.assertEqual(result.state["current_step"], "search")
         self.assertIn("agent", result.diagnostics)
         self.assertIn("search_scores", result.state)
+        self.assertGreaterEqual(len(result.state["search_scores"]), 1)
 
     def test_run_search_graph_executes_each_requested_source_with_full_limit(self):
         """验证多个来源都会执行，且每个来源都使用完整 max_results。"""
@@ -98,6 +100,33 @@ class SearchGraphTest(unittest.TestCase):
         self.assertEqual([call["source"] for call in stub.calls], ["openalex", "arxiv"])
         self.assertEqual([call["limit"] for call in stub.calls], [5, 5])
         self.assertLessEqual(len(result.papers), 5)
+
+    def test_run_search_graph_persists_artifacts_when_session_context_is_provided(self):
+        """验证提供会话上下文后，检索图会把结果落入产物存储。"""
+
+        stub = _StubService()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = SQLiteSessionRepository(storage_root=temp_dir)
+            session = repo.create("Paper search")
+            result = run_search_graph(
+                ReviewRequest(
+                    topic="multi-agent literature review",
+                    constraints={"sources": ["openalex"], "max_results": 3},
+                ),
+                service=stub,
+                llm=_FakeSnapshot(),
+                session_repo=repo,
+                session_key=session.key,
+                turn_id="turn-search-1",
+            )
+
+            thread = repo.get(session.key).thread()
+            artifact_names = [artifact["name"] for artifact in thread["artifacts"]]
+            event_types = [event["event_type"] for event in thread["events"]]
+
+            self.assertIn("search_manifest.json", artifact_names)
+            self.assertIn("paper_search_completed", event_types)
+            self.assertGreaterEqual(len(result.state["search_artifact_refs"]), 1)
 
 
 if __name__ == "__main__":

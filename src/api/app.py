@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from src.repositories.sessions.base import SessionRepository
 from src.repositories.sessions.sqlite import SQLiteSessionRepository
 from src.repositories.settings.json import SettingsRepository
+from src.services.search_runtime import build_search_message_handler
 from src.services.sessions import MessageHandler, SessionError
 from src.utils import get_logger, logging_context, setup_logging
 
@@ -57,6 +58,7 @@ def create_app(
     settings_repo = settings_repo or SettingsRepository(_default_settings_path())
     sessions_repo = sessions_repo or SQLiteSessionRepository()
     config = config or GatewayConfig()
+    message_handler = message_handler or build_search_message_handler(sessions_repo)
 
     app = FastAPI(title="Papers Agents API")
     app.include_router(create_settings_router(settings_repo))

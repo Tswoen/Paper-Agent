@@ -1,3 +1,4 @@
+import tempfile
 import unittest
 
 from fastapi.testclient import TestClient
@@ -7,7 +8,6 @@ from src.presentation.stream_aggregator import ChatStreamAggregator
 from src.repositories.sessions.sqlite import SQLiteSessionRepository
 from src.repositories.settings.json import SettingsRepository
 
-# 中文注释：兼容 unittest 的两种入口方式，既支持 discover，也支持直接模块运行。
 try:
     from .frontend_api_client import FrontendApiClient
 except ImportError:
@@ -15,22 +15,44 @@ except ImportError:
 
 
 class FrontToBackFastApiTest(unittest.TestCase):
-    """前后端网关联调测试。
+    """前后端网关联调测试。"""
 
-    中文说明：
-    这一组测试主要覆盖单机版 FastAPI 网关的核心链路，包括：
-    1. bootstrap 启动信息。
-    2. session 的创建、查询与消息提交流程。
-    3. 事件流聚合成前端时间线的行为。
-    """
+    @staticmethod
+    def _fake_message_handler_factory(repo: SQLiteSessionRepository):
+        """构造一个稳定的测试消息处理器，避免测试依赖外部检索服务。"""
+
+        def _handler(chat_id, content, frame):
+            turn_id = frame.get("turn_id")
+            repo.write_artifact(
+                chat_id,
+                artifact_type="paper_search_manifest",
+                name="search_manifest.json",
+                content='{"status":"ok"}',
+                relative_path=f"artifacts/search/{turn_id}/search_manifest.json",
+                metadata={"turn_id": turn_id},
+            )
+            return [
+                {
+                    "event": "reasoning_delta",
+                    "chat_id": chat_id,
+                    "content": "已完成论文检索：原始候选 2 篇，最终保留 1 篇。",
+                    "turn_id": turn_id,
+                },
+                {"event": "reasoning_end", "chat_id": chat_id, "turn_id": turn_id},
+                {
+                    "event": "message",
+                    "chat_id": chat_id,
+                    "role": "assistant",
+                    "content": f"已完成论文检索，主题：{content}",
+                    "turn_id": turn_id,
+                },
+                {"event": "stream_end", "chat_id": chat_id, "turn_id": turn_id},
+            ]
+
+        return _handler
 
     def _client(self):
-        """构造测试用应用与仓储对象。
-
-        中文说明：
-        这里显式注入 settings 仓储和 sessions 仓储，确保测试只依赖当前
-        进程内的固定初始数据，不受外部真实配置文件影响。
-        """
+        """构造测试用应用与仓储对象。"""
 
         settings = SettingsRepository(
             initial={
@@ -39,24 +61,22 @@ class FrontToBackFastApiTest(unittest.TestCase):
                 "embedding_profiles": {},
             }
         )
-        sessions = SQLiteSessionRepository()
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        sessions = SQLiteSessionRepository(storage_root=temp_dir.name)
         app = create_app(
             settings_repo=settings,
             sessions_repo=sessions,
             config=GatewayConfig(),
+            message_handler=self._fake_message_handler_factory(sessions),
         )
         return TestClient(app), sessions
 
     def _api(self, client: TestClient) -> FrontendApiClient:
-        """把 FastAPI TestClient 包装成前端 API 客户端约定的 transport。
-
-        中文说明：
-        测试中统一走 `FrontendApiClient`，这样可以尽量模拟真实前端访问后端
-        的方式，而不是在测试里手写大量重复请求细节。
-        """
+        """把 FastAPI TestClient 包装成前端 API 客户端约定的 transport。"""
 
         def transport(method, url, body, timeout):
-            """执行单次 HTTP 调用并返回客户端约定的结果格式。"""
+            """执行单次 HTTP 调用并返回客户端约定的数据结构。"""
 
             response = client.request(method, url, json=body)
             return response.status_code, response.json()
@@ -104,6 +124,7 @@ class FrontToBackFastApiTest(unittest.TestCase):
         self.assertEqual(result["events"][-1]["event"], "turn_end")
         self.assertEqual(thread["messages"][0]["role"], "user")
         self.assertEqual(thread["messages"][0]["content"], "总结这篇论文")
+        self.assertEqual(thread["messages"][-1]["role"], "assistant")
 
     def test_http_events_can_be_aggregated_into_ui_timeline(self):
         """验证 HTTP 返回的事件流能够被聚合成前端时间线。"""
@@ -122,8 +143,21 @@ class FrontToBackFastApiTest(unittest.TestCase):
 
         self.assertFalse(snapshot["is_streaming"])
         self.assertEqual(assistant["role"], "assistant")
-        self.assertIn("已收到：hello", assistant["content"])
-        self.assertIn("收到问题", assistant["reasoning"])
+        self.assertIn("已完成论文检索", assistant["content"])
+        self.assertIn("已完成论文检索", assistant["reasoning"])
+
+    def test_http_message_submit_persists_search_artifacts(self):
+        """验证通过 HTTP 提交消息后，会话线程中能看到检索产物。"""
+
+        client, sessions = self._client()
+        api = self._api(client)
+        created = api.create_session("Artifacts")["session"]
+
+        api.send_message(created["key"], "multi-agent literature review")
+        thread = sessions.get(created["key"]).thread()
+
+        self.assertGreaterEqual(len(thread["artifacts"]), 1)
+        self.assertIn("search_manifest.json", [artifact["name"] for artifact in thread["artifacts"]])
 
 
 if __name__ == "__main__":

@@ -5,7 +5,9 @@ import json
 import shutil
 import sqlite3
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
+from posixpath import normpath
 from typing import Any
 
 from src.models.sessions import SessionRecord, utc_now
@@ -19,16 +21,10 @@ logger = get_logger(__name__)
 
 
 class SessionStoreBackend:
-    """基于 SQLite 与文件系统的会话存储后端。
-
-    中文说明：
-    1. SQLite 负责保存会话主表、消息表、事件表、产物表等结构化数据。
-    2. 文件系统负责为每个会话保留独立目录，并把事件额外写入 `events.jsonl`。
-    3. 该类只关心“如何持久化”，不直接承载 HTTP 或 Agent 业务逻辑。
-    """
+    """基于 SQLite 与文件系统的会话存储后端。"""
 
     def __init__(self, storage_root: Path | str):
-        """初始化持久化后端并确保基础目录与表结构存在。"""
+        """初始化持久化后端，并确保基础目录与表结构存在。"""
 
         self.storage_root = Path(storage_root)
         self.storage_root.mkdir(parents=True, exist_ok=True)
@@ -40,7 +36,7 @@ class SessionStoreBackend:
     def has_sessions(self) -> bool:
         """判断当前数据库中是否已经存在会话记录。"""
 
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute("SELECT COUNT(1) AS count FROM session").fetchone()
         return bool(row and int(row["count"]) > 0)
 
@@ -60,7 +56,7 @@ class SessionStoreBackend:
         payload = dict(metadata or {})
         payload.setdefault("schema_version", 1)
         payload["workspace_scope"] = workspace_scope
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.execute(
                 """
                 INSERT INTO session (
@@ -85,7 +81,7 @@ class SessionStoreBackend:
     def get_session(self, session_id: str) -> JsonObject | None:
         """读取单条会话主记录，并把 JSON 字段还原为普通对象。"""
 
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute("SELECT * FROM session WHERE id = ?", (session_id,)).fetchone()
         if row is None:
             return None
@@ -94,14 +90,14 @@ class SessionStoreBackend:
     def list_sessions(self) -> list[JsonObject]:
         """按更新时间倒序返回全部会话摘要原始数据。"""
 
-        with self._connect() as connection:
+        with self._connection() as connection:
             rows = connection.execute("SELECT * FROM session ORDER BY updated_at DESC").fetchall()
         return [self._row_to_session(row) for row in rows]
 
     def delete_session(self, session_id: str) -> None:
         """删除指定会话的数据库记录和文件系统目录。"""
 
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.execute("DELETE FROM session WHERE id = ?", (session_id,))
         session_dir = self.sessions_dir / session_id
         if session_dir.exists():
@@ -115,7 +111,7 @@ class SessionStoreBackend:
             return
         metadata = dict(record.get("metadata") or {})
         metadata["workspace_scope"] = workspace_scope
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.execute(
                 "UPDATE session SET metadata = ?, updated_at = ? WHERE id = ?",
                 (self._dump_json(metadata), updated_at, session_id),
@@ -124,7 +120,7 @@ class SessionStoreBackend:
     def update_run_started_at(self, session_id: str, run_started_at: str | None, updated_at: str) -> None:
         """更新当前会话的运行中时间戳。"""
 
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.execute(
                 "UPDATE session SET run_started_at = ?, updated_at = ? WHERE id = ?",
                 (run_started_at, updated_at, session_id),
@@ -133,7 +129,7 @@ class SessionStoreBackend:
     def update_status(self, session_id: str, status: str, updated_at: str) -> None:
         """更新会话状态，并把更新时间一并写回数据库。"""
 
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.execute(
                 "UPDATE session SET status = ?, updated_at = ? WHERE id = ?",
                 (status, updated_at, session_id),
@@ -142,7 +138,7 @@ class SessionStoreBackend:
     def update_title(self, session_id: str, title: str, updated_at: str) -> None:
         """更新会话标题，通常用于首次用户输入后的自动命名。"""
 
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.execute(
                 "UPDATE session SET title = ?, updated_at = ? WHERE id = ?",
                 (title, updated_at, session_id),
@@ -160,7 +156,7 @@ class SessionStoreBackend:
     ) -> None:
         """向消息表追加一条会话消息，并维护会话摘要字段。"""
 
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.execute(
                 """
                 INSERT INTO session_message (id, session_id, role, content, created_at, parent_id, metadata)
@@ -188,7 +184,7 @@ class SessionStoreBackend:
     def list_messages(self, session_id: str) -> list[JsonObject]:
         """按时间顺序读取某个会话下的全部消息。"""
 
-        with self._connect() as connection:
+        with self._connection() as connection:
             rows = connection.execute(
                 """
                 SELECT id, role, content, created_at, parent_id, metadata
@@ -213,7 +209,7 @@ class SessionStoreBackend:
 
         normalized_event_id = event_id or uuid.uuid4().hex
         payload = metadata or {}
-        with self._connect() as connection:
+        with self._connection() as connection:
             seq_row = connection.execute(
                 "SELECT COALESCE(MAX(seq_no), 0) + 1 AS next_seq FROM session_event WHERE session_id = ?",
                 (session_id,),
@@ -249,7 +245,7 @@ class SessionStoreBackend:
     def list_events(self, session_id: str) -> list[JsonObject]:
         """按序号顺序读取指定会话的完整事件流。"""
 
-        with self._connect() as connection:
+        with self._connection() as connection:
             rows = connection.execute(
                 """
                 SELECT id, event_type, content, created_at, seq_no, metadata
@@ -261,10 +257,52 @@ class SessionStoreBackend:
             ).fetchall()
         return [self._row_to_event(row) for row in rows]
 
+    def append_artifact_record(
+        self,
+        session_id: str,
+        artifact_type: str,
+        name: str,
+        path: str,
+        size: int,
+        created_at: str,
+        metadata: JsonObject | None = None,
+        artifact_id: str | None = None,
+    ) -> JsonObject:
+        """向产物表追加一条产物登记记录。"""
+
+        normalized_artifact_id = artifact_id or uuid.uuid4().hex
+        payload = metadata or {}
+        with self._connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO session_artifact (id, session_id, artifact_type, name, path, size, created_at, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    normalized_artifact_id,
+                    session_id,
+                    artifact_type,
+                    name,
+                    path,
+                    size,
+                    created_at,
+                    self._dump_json(payload),
+                ),
+            )
+        return {
+            "id": normalized_artifact_id,
+            "artifact_type": artifact_type,
+            "name": name,
+            "path": path,
+            "size": size,
+            "created_at": created_at,
+            "metadata": payload,
+        }
+
     def list_artifacts(self, session_id: str) -> list[JsonObject]:
         """读取会话关联的全部产物记录。"""
 
-        with self._connect() as connection:
+        with self._connection() as connection:
             rows = connection.execute(
                 """
                 SELECT id, artifact_type, name, path, size, created_at, metadata
@@ -288,10 +326,32 @@ class SessionStoreBackend:
             events_file.touch()
         return session_dir
 
+    def write_artifact_file(
+        self,
+        session_id: str,
+        relative_path: str,
+        content: str | bytes,
+        *,
+        encoding: str = "utf-8",
+    ) -> Path:
+        """把产物内容写入会话目录，并返回最终文件路径。"""
+
+        session_dir = self.ensure_session_layout(session_id)
+        normalized_relative_path = normpath(relative_path).replace("\\", "/").lstrip("/")
+        if normalized_relative_path in {"", "."} or normalized_relative_path.startswith("../"):
+            raise ValueError(f"invalid artifact path: {relative_path}")
+        target_path = session_dir / Path(normalized_relative_path)
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        if isinstance(content, bytes):
+            target_path.write_bytes(content)
+        else:
+            target_path.write_text(content, encoding=encoding)
+        return target_path
+
     def _initialize_schema(self) -> None:
         """初始化 SQLite 表结构与必要索引。"""
 
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS session (
@@ -346,6 +406,7 @@ class SessionStoreBackend:
                 CREATE INDEX IF NOT EXISTS idx_session_user_id ON session(user_id);
                 CREATE INDEX IF NOT EXISTS idx_session_event_session_seq ON session_event(session_id, seq_no);
                 CREATE INDEX IF NOT EXISTS idx_session_message_session_created ON session_message(session_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_session_artifact_session_created ON session_artifact(session_id, created_at);
                 """
             )
 
@@ -356,6 +417,17 @@ class SessionStoreBackend:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
+
+    @contextmanager
+    def _connection(self):
+        """提供会自动关闭的 SQLite 连接上下文。"""
+
+        connection = self._connect()
+        try:
+            yield connection
+            connection.commit()
+        finally:
+            connection.close()
 
     def _append_event_jsonl(self, session_id: str, event_record: JsonObject) -> None:
         """把结构化事件同步追加写入磁盘 JSONL 文件。"""
@@ -384,7 +456,7 @@ class SessionStoreBackend:
         }
 
     def _row_to_message(self, row: sqlite3.Row) -> JsonObject:
-        """把消息表记录还原为线程视图兼容的消息对象。"""
+        """把消息表记录还原成线程视图兼容的消息对象。"""
 
         metadata = self._load_json(row["metadata"])
         return {
@@ -436,12 +508,7 @@ class SessionStoreBackend:
 
 
 class SQLiteSessionRepository(SessionRepository):
-    """基于 SQLite 后端实现的会话仓储。
-
-    中文说明：
-    这一层向上暴露稳定的会话仓储接口，向下把真实的持久化细节委托给
-    `SessionStoreBackend`。这样路由层和服务层都不需要知道底层是如何存储的。
-    """
+    """基于 SQLite 后端实现的会话仓储。"""
 
     def __init__(
         self,
@@ -551,6 +618,48 @@ class SQLiteSessionRepository(SessionRepository):
             metadata=copy.deepcopy(metadata or {}),
         )
 
+    def write_artifact(
+        self,
+        key: str,
+        artifact_type: str,
+        name: str,
+        content: str | bytes,
+        *,
+        relative_path: str,
+        metadata: JsonObject | None = None,
+        created_at: str | None = None,
+        encoding: str = "utf-8",
+    ) -> JsonObject:
+        """向指定会话写入产物文件，并在仓储中登记元数据。"""
+
+        self.get(key)
+        resolved_created_at = created_at or utc_now()
+        target_path = self.backend.write_artifact_file(
+            session_id=key,
+            relative_path=relative_path,
+            content=content,
+            encoding=encoding,
+        )
+        artifact_record = self.backend.append_artifact_record(
+            session_id=key,
+            artifact_type=artifact_type,
+            name=name,
+            path=str(target_path),
+            size=target_path.stat().st_size,
+            created_at=resolved_created_at,
+            metadata=copy.deepcopy(metadata or {}),
+        )
+        logger.info(
+            "写入会话产物",
+            extra={
+                "session_key": key,
+                "artifact_type": artifact_type,
+                "artifact_name": name,
+                "artifact_path": str(target_path),
+            },
+        )
+        return artifact_record
+
     def set_workspace_scope(self, key: str, workspace_scope: JsonObject | None) -> JsonObject:
         """更新会话的工作区范围信息。"""
 
@@ -637,7 +746,7 @@ class SQLiteSessionRepository(SessionRepository):
                 )
 
     def _hydrate_record(self, payload: JsonObject) -> SessionRecord:
-        """把底层后端读出的原始字典组装成 `SessionRecord`。"""
+        """把底层后端读取出的原始字典组装成 `SessionRecord`。"""
 
         messages = self.backend.list_messages(payload["key"])
         events = self.backend.list_events(payload["key"])
