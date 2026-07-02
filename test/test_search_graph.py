@@ -18,7 +18,7 @@ class _FakeProvider:
 
 
 class _FakeSnapshot:
-    """最小 LLM 快照，只暴露 SearchAgent 需要的 provider。"""
+    """最小化 LLM 快照，只暴露 SearchAgent 需要的 provider。"""
 
     def __init__(self):
         """初始化测试用 provider。"""
@@ -59,7 +59,7 @@ class SearchGraphTest(unittest.TestCase):
     def test_build_search_graph_returns_compiled_graph(self):
         """验证图可以成功编译。"""
 
-        graph = build_search_graph(service=_StubService(), llm=_FakeSnapshot())
+        graph = build_search_graph()
 
         self.assertTrue(hasattr(graph, "invoke"))
 
@@ -72,8 +72,10 @@ class SearchGraphTest(unittest.TestCase):
                 topic="multi-agent literature review",
                 constraints={"sources": ["openalex"], "max_results": 5},
             ),
-            service=stub,
-            llm=_FakeSnapshot(),
+            state_overrides={
+                "search_node_service": stub,
+                "search_node_llm": _FakeSnapshot(),
+            },
         )
 
         self.assertGreaterEqual(len(stub.calls), 1)
@@ -93,8 +95,10 @@ class SearchGraphTest(unittest.TestCase):
                 topic="multi-agent literature review",
                 constraints={"sources": ["openalex", "arxiv"], "max_results": 5},
             ),
-            service=stub,
-            llm=_FakeSnapshot(),
+            state_overrides={
+                "search_node_service": stub,
+                "search_node_llm": _FakeSnapshot(),
+            },
         )
 
         self.assertEqual([call["source"] for call in stub.calls], ["openalex", "arxiv"])
@@ -102,7 +106,7 @@ class SearchGraphTest(unittest.TestCase):
         self.assertLessEqual(len(result.papers), 5)
 
     def test_run_search_graph_persists_artifacts_when_session_context_is_provided(self):
-        """验证提供会话上下文后，检索图会把结果落入产物存储。"""
+        """验证提供会话上下文后，搜索图会把结果落入产物存储。"""
 
         stub = _StubService()
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -113,11 +117,13 @@ class SearchGraphTest(unittest.TestCase):
                     topic="multi-agent literature review",
                     constraints={"sources": ["openalex"], "max_results": 3},
                 ),
-                service=stub,
-                llm=_FakeSnapshot(),
                 session_repo=repo,
                 session_key=session.key,
                 turn_id="turn-search-1",
+                state_overrides={
+                    "search_node_service": stub,
+                    "search_node_llm": _FakeSnapshot(),
+                },
             )
 
             thread = repo.get(session.key).thread()

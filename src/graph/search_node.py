@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol, cast
 
 from src.agents.base import AgentContext
 from src.agents.searchAgent import SearchAgent, SearchIntent, load_search_agent_llm
@@ -11,6 +11,7 @@ from src.graph.state_models import JsonObject, State
 from src.llm import ProviderSnapshot
 from src.paper_retrieval import PaperSearchService
 from src.paper_retrieval.models import PaperDocument
+from src.repositories.sessions.base import SessionRepository
 
 
 class SearchNodeSink(Protocol):
@@ -55,18 +56,22 @@ class ScoredPaper:
         }
 
 
-def run_search_agent_node(
-    service: PaperSearchService | None = None,
-    llm: ProviderSnapshot | None | str = "auto",
-    sink: SearchNodeSink | None = None,
-):
-    """生成搜索图中的论文检索节点。"""
+def run_search_agent_node():
+    """生成搜索图中的论文检索节点。
 
-    resolved_service = service or PaperSearchService()
-    resolved_llm = load_search_agent_llm() if llm == "auto" else llm
+    中文说明：
+    1. 检索服务、LLM 与持久化 sink 都在节点内部解析；
+    2. 默认情况下节点自行创建依赖；
+    3. 只有测试或特殊调用时，才通过图状态放入覆盖项。
+    """
 
     def _node(state: State) -> State:
         """执行检索节点主逻辑，并返回新的局部状态更新。"""
+
+        # 中文注释：节点优先从 state 里读取覆盖依赖，若没有则回退到内部默认装配。
+        resolved_service = _resolve_search_service(state)
+        resolved_llm = _resolve_search_llm(state)
+        resolved_sink = _resolve_search_sink(state)
 
         agent = SearchAgent(AgentContext(spec=SearchAgent.spec, llm=resolved_llm))
         agent_update = agent.run(state)
@@ -87,8 +92,8 @@ def run_search_agent_node(
             "sources": list(intent.sources),
         }
         search_artifact_refs: list[JsonObject] = []
-        if sink is not None:
-            persistence_result = sink.persist(
+        if resolved_sink is not None:
+            persistence_result = resolved_sink.persist(
                 topic=state["request"].topic,
                 intent=intent,
                 raw_papers=raw_papers,
@@ -110,6 +115,44 @@ def run_search_agent_node(
         )
 
     return _node
+
+
+def _resolve_search_service(state: State) -> PaperSearchService:
+    """解析检索节点要使用的检索服务实例。"""
+
+    # 中文注释：测试可以通过 state 注入 stub；生产环境没有覆盖项时直接创建默认服务。
+    return cast(PaperSearchService, state.get("search_node_service") or PaperSearchService())
+
+
+def _resolve_search_llm(state: State) -> ProviderSnapshot | None:
+    """解析检索节点要使用的 LLM 快照。"""
+
+    candidate = state.get("search_node_llm", "auto")
+    if candidate == "auto":
+        return load_search_agent_llm()
+    return cast(ProviderSnapshot | None, candidate)
+
+
+def _resolve_search_sink(state: State) -> SearchNodeSink | None:
+    """解析检索节点的持久化 sink。"""
+
+    explicit_sink = cast(SearchNodeSink | None, state.get("search_node_sink"))
+    if explicit_sink is not None:
+        return explicit_sink
+    session_repo = cast(SessionRepository | None, state.get("session_repo"))
+    session_key = _normalize_optional_str(state.get("session_key"))
+    turn_id = _normalize_optional_str(state.get("turn_id"))
+    if session_repo is None or session_key is None or turn_id is None:
+        return None
+    # 中文注释：只有具备完整会话上下文时，才内部创建搜索结果持久化 sink。
+    return SearchPersistenceSink(session_repo, session_key=session_key, turn_id=turn_id)
+
+
+def _normalize_optional_str(value: Any) -> str | None:
+    """把任意可选值规整为非空字符串。"""
+
+    text = str(value).strip() if value is not None else ""
+    return text or None
 
 
 def _execute_search_intent(service: PaperSearchService, intent: SearchIntent) -> list[PaperDocument]:
@@ -172,7 +215,7 @@ def _score_papers(topic: str, papers: list[PaperDocument]) -> list[ScoredPaper]:
         )
     selected = [item for item in scored_items if item.score >= threshold]
     if not selected:
-        # 中文注释：当主题过短导致阈值筛选后为空时，回退到全部候选，避免出现“明明搜到了却全被过滤”的情况。
+        # 中文注释：当主题过短导致阈值筛选后为空时，回退到全部候选，避免“明明搜到了却全部被过滤”。
         selected = list(scored_items)
     selected.sort(
         key=lambda item: (
@@ -195,7 +238,7 @@ def _paper_dedupe_key(paper: PaperDocument) -> str:
 
 
 def _extract_query_terms(text: str) -> list[str]:
-    """从主题文本中抽取关键词，供评分阶段计算命中数。"""
+    """从主题文本中提取关键词，供评分阶段计算命中数。"""
 
     seen: set[str] = set()
     results: list[str] = []
