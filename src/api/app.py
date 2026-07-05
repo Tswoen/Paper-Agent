@@ -127,7 +127,6 @@ def create_app(
                 "fastapi_rest": True,
                 "rest_management": True,
                 "http_message_submit": True,
-                "websocket_stream": False,
                 "multi_chat_socket": False,
                 "settings_snapshot": True,
                 "auth_required": False,
