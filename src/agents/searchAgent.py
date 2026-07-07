@@ -38,19 +38,19 @@ class SearchAgent(BaseAgent):
     真正的 query 拼接和来源适配由 paper_retrieval 层完成。
     """
 
+
     spec = AgentSpec(
         name="search_agent",
         role="search",
         description="根据主题与约束生成论文检索计划的代理。",
         llm_profile="default_agent",
-        tools=(),
-        skills=("query_rewrite", "source_routing"),
-        input_keys=("request",),
+        skills=(),
+        input_keys=("request",),  # 当前 Agent 所必须的输入字段
     )
 
     def __init__(self, context: AgentContext):
         """初始化 SearchAgent，并保存依赖上下文。"""
-
+        context.spec = self.spec  # 确保上下文里有当前 Agent 的 spec
         super().__init__(context)
 
     def _run(self, state: JsonObject) -> JsonObject:

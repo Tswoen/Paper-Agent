@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from src.repositories.sessions.base import SessionRepository
 from src.repositories.sessions.sqlite import SQLiteSessionRepository
 from src.repositories.settings.json import SettingsRepository
+from src.services.session_runs import SessionRunService
 from src.services.search_runtime import build_search_message_handler
 from src.services.sessions import MessageHandler, SessionError
 from src.utils import get_logger, logging_context, setup_logging
@@ -59,10 +60,17 @@ def create_app(
     sessions_repo = sessions_repo or SQLiteSessionRepository()
     config = config or GatewayConfig()
     message_handler = message_handler or build_search_message_handler(sessions_repo)
+    run_service = SessionRunService(repo=sessions_repo, message_handler=message_handler)
 
     app = FastAPI(title="Papers Agents API")
     app.include_router(create_settings_router(settings_repo))
-    app.include_router(create_sessions_router(sessions_repo, message_handler=message_handler))
+    app.include_router(
+        create_sessions_router(
+            sessions_repo,
+            message_handler=message_handler,
+            run_service=run_service,
+        )
+    )
 
     @app.middleware("http")
     async def access_log_middleware(request: Request, call_next):
@@ -127,6 +135,8 @@ def create_app(
                 "fastapi_rest": True,
                 "rest_management": True,
                 "http_message_submit": True,
+                "session_runs": True,
+                "sse_streaming": True,
                 "multi_chat_socket": False,
                 "settings_snapshot": True,
                 "auth_required": False,

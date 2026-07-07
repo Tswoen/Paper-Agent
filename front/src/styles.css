@@ -642,6 +642,272 @@ a {
   gap: 6px;
 }
 
+.session-workspace-shell {
+  display: grid;
+  gap: 18px;
+}
+
+.session-hero-card {
+  min-height: 180px;
+  background:
+    radial-gradient(circle at top right, rgba(31, 143, 181, 0.16), transparent 34%),
+    linear-gradient(160deg, rgba(255, 255, 255, 0.96), rgba(241, 248, 252, 0.84));
+}
+
+.session-workspace-grid {
+  display: grid;
+  grid-template-columns: minmax(280px, 340px) minmax(0, 1fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.session-main-column {
+  display: grid;
+  gap: 18px;
+}
+
+.session-sidebar-card,
+.session-timeline-card,
+.session-composer-card {
+  border: 1px solid var(--border);
+  border-radius: 28px;
+  background: var(--surface);
+  box-shadow: var(--shadow-md);
+  backdrop-filter: blur(12px);
+}
+
+.session-sidebar-card,
+.session-composer-card {
+  padding: 22px;
+}
+
+.session-timeline-card {
+  padding: 22px;
+  min-height: 620px;
+}
+
+.session-sidebar-head,
+.session-timeline-head,
+.session-composer-head,
+.session-artifact-panel-head,
+.session-message-meta,
+.session-list-row,
+.session-artifact-item-head,
+.session-composer-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.session-list {
+  display: grid;
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.session-list-item {
+  width: 100%;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 22px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(248, 251, 253, 0.9));
+  text-align: left;
+  transition: transform 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
+}
+
+.session-list-item:hover {
+  transform: translateY(-1px);
+  border-color: rgba(31, 143, 181, 0.16);
+}
+
+.session-list-item.active {
+  border-color: rgba(31, 143, 181, 0.24);
+  box-shadow: 0 18px 36px rgba(31, 143, 181, 0.08);
+}
+
+.session-list-main {
+  display: grid;
+  gap: 10px;
+  padding: 18px;
+}
+
+.session-list-main p,
+.session-empty span,
+.session-composer-status,
+.session-message-meta span,
+.session-artifact-item span,
+.session-streaming-hint span {
+  margin: 0;
+  color: var(--text-soft);
+}
+
+.session-list-main p,
+.session-message-content,
+.session-reasoning-card pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.session-list-meta {
+  font-size: 0.88rem;
+}
+
+.session-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 120px;
+  margin-top: 18px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 24px;
+  background: rgba(248, 251, 253, 0.66);
+}
+
+.session-empty-large {
+  min-height: 420px;
+}
+
+.session-timeline-stream {
+  display: grid;
+  gap: 16px;
+  margin-top: 20px;
+}
+
+.session-message-card {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  gap: 14px;
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: 24px;
+  background: rgba(255, 255, 255, 0.88);
+}
+
+.session-message-card[data-role="user"] {
+  margin-left: 72px;
+  background: linear-gradient(180deg, rgba(31, 143, 181, 0.12), rgba(255, 255, 255, 0.92));
+}
+
+.session-message-card[data-role="assistant"] {
+  margin-right: 32px;
+}
+
+.session-message-card[data-kind="progress"] {
+  background: rgba(248, 251, 253, 0.92);
+}
+
+.session-message-card[data-kind="error"] {
+  border-color: rgba(177, 67, 67, 0.18);
+  background: rgba(255, 247, 247, 0.92);
+}
+
+.session-message-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  height: 42px;
+  border-radius: 14px;
+  background: rgba(31, 143, 181, 0.08);
+  color: var(--accent);
+}
+
+.session-message-body {
+  display: grid;
+  gap: 12px;
+}
+
+.session-message-content,
+.session-reasoning-card pre {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: 0.95rem;
+  line-height: 1.7;
+}
+
+.session-reasoning-card {
+  padding: 12px 14px;
+  border-radius: 18px;
+  background: rgba(15, 23, 38, 0.04);
+}
+
+.session-reasoning-card summary {
+  cursor: pointer;
+  font-family: var(--font-mono);
+  color: var(--text-soft);
+}
+
+.session-streaming-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(31, 143, 181, 0.08);
+}
+
+.session-artifact-inline,
+.session-artifact-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.session-artifact-panel {
+  padding: 20px;
+  border: 1px solid var(--border);
+  border-radius: 24px;
+  background: rgba(248, 251, 253, 0.8);
+}
+
+.session-artifact-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.session-artifact-item {
+  display: grid;
+  gap: 8px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.88);
+}
+
+.session-composer-status {
+  padding: 8px 12px;
+  border-radius: 999px;
+  background: rgba(15, 23, 38, 0.05);
+}
+
+.session-composer-textarea {
+  width: 100%;
+  margin-top: 18px;
+  padding: 16px 18px;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.92);
+  color: var(--text);
+  resize: vertical;
+  min-height: 146px;
+  line-height: 1.7;
+  outline: none;
+  transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+
+.session-composer-textarea:focus {
+  border-color: rgba(31, 143, 181, 0.35);
+  box-shadow: 0 0 0 4px rgba(31, 143, 181, 0.08);
+}
+
+.session-composer-actions {
+  margin-top: 18px;
+  justify-content: flex-end;
+}
+
 .spinning {
   animation: spin 1s linear infinite;
 }
@@ -661,7 +927,8 @@ a {
   }
 
   .metrics-grid,
-  .catalog-grid {
+  .catalog-grid,
+  .session-artifact-grid {
     grid-template-columns: 1fr;
   }
 
@@ -680,6 +947,10 @@ a {
     grid-template-columns: 1fr;
   }
 
+  .session-workspace-grid {
+    grid-template-columns: 1fr;
+  }
+
   .sidebar {
     margin: 16px;
     margin-bottom: 8px;
@@ -693,7 +964,11 @@ a {
   .section-heading,
   .provider-header-row,
   .editor-head,
-  .page-footer {
+  .page-footer,
+  .session-sidebar-head,
+  .session-timeline-head,
+  .session-composer-head,
+  .session-composer-actions {
     flex-direction: column;
     align-items: flex-start;
   }
@@ -704,6 +979,11 @@ a {
 
   .table-card {
     overflow-x: auto;
+  }
+
+  .session-message-card[data-role="user"],
+  .session-message-card[data-role="assistant"] {
+    margin-inline: 0;
   }
 }
 

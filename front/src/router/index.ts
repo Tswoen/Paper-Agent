@@ -1,5 +1,6 @@
 import { createRouter, createWebHistory } from "vue-router";
 
+import SessionWorkspaceView from "../views/SessionWorkspaceView.vue";
 import SystemSettingsView from "../views/SystemSettingsView.vue";
 
 const router = createRouter({
@@ -7,7 +8,12 @@ const router = createRouter({
   routes: [
     {
       path: "/",
-      redirect: "/settings",
+      redirect: "/sessions",
+    },
+    {
+      path: "/sessions",
+      name: "sessions",
+      component: SessionWorkspaceView,
     },
     {
       path: "/settings",

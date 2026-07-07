@@ -6,7 +6,9 @@ from typing import Any
 
 from .base import JsonObject, LLMProvider, LLMResponse, Message, StreamCallbacks, ToolCallRequest
 from .registry import ProviderSpec
+from src.utils import get_logger
 
+logger = get_logger(__name__)
 
 class OpenAICompatProvider(LLMProvider):
     # 所有 OpenAI Chat Completions 兼容协议都走这一条 SDK 调用链。
@@ -62,6 +64,7 @@ class OpenAICompatProvider(LLMProvider):
             response = self.client.chat.completions.create(
                 **self._build_kwargs(messages, tools, False, temperature, max_tokens, reasoning_effort)
             )
+            logger.info(f"OpenAICompatProvider.chat: response={response}")
             return self._parse_response(response)
         except Exception as exc:
             return self._error_response(exc)

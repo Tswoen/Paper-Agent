@@ -36,7 +36,7 @@ class AgentContext:
     而具体业务输入统一从图状态 `State` 中读取。
     """
 
-    spec: AgentSpec
+    spec: AgentSpec = None
     llm: ProviderSnapshot | None = None
     tools: ToolRegistry = field(default_factory=ToolRegistry)
     skills: SkillRegistry = field(default_factory=SkillRegistry)

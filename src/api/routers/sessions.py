@@ -3,8 +3,10 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Request
+from fastapi.responses import StreamingResponse
 
 from src.repositories.sessions.base import SessionRepository
+from src.services.session_runs import SessionRunService, encode_sse
 from src.services.sessions import (
     MessageHandler,
     create_session,
@@ -21,18 +23,17 @@ JsonObject = dict[str, Any]
 def create_sessions_router(
     repo: SessionRepository,
     message_handler: MessageHandler | None = None,
+    run_service: SessionRunService | None = None,
 ) -> APIRouter:
     """创建会话相关的 FastAPI 路由。
 
     中文说明：
-    这里是纯路由适配层，只负责：
-    1. 解析 HTTP 请求。
-    2. 调用会话服务函数。
-    3. 返回标准 JSON 结构。
-    不在这里直接写持久化与业务编排逻辑。
+    该模块只负责请求解析与响应适配，不直接承载会话落库、run 编排和
+    SSE 事件管理逻辑，核心业务统一委托给 service 层处理。
     """
 
     router = APIRouter(prefix="/api/sessions", tags=["sessions"])
+    resolved_run_service = run_service or SessionRunService(repo=repo, message_handler=message_handler)
 
     @router.get("")
     async def get_sessions() -> JsonObject:
@@ -60,9 +61,41 @@ def create_sessions_router(
 
     @router.post("/{session_key}/messages")
     async def post_message(session_key: str, request: Request) -> JsonObject:
-        """向指定会话提交一条用户消息。"""
+        """兼容旧版同步消息接口，提交后等待整次运行完成。"""
 
         return submit_message(repo, session_key, await _json_body(request), message_handler=message_handler)
+
+    @router.post("/{session_key}/runs", status_code=202)
+    async def post_run(session_key: str, request: Request) -> JsonObject:
+        """创建一次新的后台运行，并返回对应的流地址。"""
+
+        return await resolved_run_service.start_run(session_key, await _json_body(request))
+
+    @router.get("/{session_key}/runs/{run_id}/stream")
+    async def stream_run(session_key: str, run_id: str) -> StreamingResponse:
+        """以 SSE 形式持续返回指定 run 的实时事件。"""
+
+        async def _event_generator():
+            """持续输出 SSE 事件，同时定期发送心跳避免连接被中间层回收。"""
+
+            event_iterator = resolved_run_service.stream_events(session_key, run_id)
+            while True:
+                try:
+                    event = await anext(event_iterator)
+                except StopAsyncIteration:
+                    break
+                yield encode_sse(event)
+            yield ": stream closed\n\n"
+
+        return StreamingResponse(
+            _event_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     return router
 

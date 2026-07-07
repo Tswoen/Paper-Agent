@@ -4,23 +4,46 @@ from typing import Any
 
 from src.agents import ReviewRequest
 from src.graph import run_graph
+from src.models.sessions import utc_now
 from src.repositories.sessions.base import SessionRepository
+from src.services.sessions import RuntimeEventEmitter
 
 
 JsonObject = dict[str, Any]
 
 
 def build_search_message_handler(repo: SessionRepository):
-    """构建基于论文处理图的消息处理器。
+    """构建基于论文处理图的流式消息处理器。
 
-    该处理器目前仍然服务于“搜索”场景，但底层执行入口已经统一切换为
-    通用图接口，方便后续把筛选、总结和综述生成步骤平滑纳入同一流程。
+    中文说明：
+    该处理器把用户输入的论文主题交给既有图执行层处理，并在关键阶段持续
+    `emit(...)` 事件，供同步接口和新的 `/runs + SSE` 统一复用。
     """
 
-    def _handler(chat_id: str, content: str, frame: JsonObject) -> list[JsonObject]:
-        """将一次用户消息转换为图执行结果并产出前端事件流。"""
+    def _handler(chat_id: str, content: str, frame: JsonObject, emit: RuntimeEventEmitter) -> None:
+        """执行论文检索工作流，并把过程事件增量发给上层。"""
 
         turn_id = str(frame.get("turn_id") or "")
+        emit(
+            {
+                "event": "message",
+                "kind": "progress",
+                "role": "system",
+                "content": "正在解析主题并规划检索策略",
+                "step": "plan",
+                "turn_id": turn_id,
+                "timestamp": utc_now(),
+            }
+        )
+        emit(
+            {
+                "event": "reasoning_delta",
+                "content": "正在根据主题生成检索关键词、来源约束与筛选范围。",
+                "turn_id": turn_id,
+                "timestamp": utc_now(),
+            }
+        )
+
         result = run_graph(
             ReviewRequest(topic=content),
             session_repo=repo,
@@ -29,7 +52,37 @@ def build_search_message_handler(repo: SessionRepository):
         )
         papers = result.papers
         summary = result.state.get("search_summary") or {}
-        artifact_refs = result.state.get("search_artifact_refs") or []
+        artifact_refs = list(result.state.get("search_artifact_refs") or [])
+
+        emit(
+            {
+                "event": "reasoning_delta",
+                "content": (
+                    f"检索已完成：原始候选 {summary.get('raw_paper_count', 0)} 篇，"
+                    f"最终保留 {summary.get('selected_paper_count', 0)} 篇。"
+                ),
+                "turn_id": turn_id,
+                "timestamp": utc_now(),
+            }
+        )
+        emit(
+            {
+                "event": "reasoning_end",
+                "turn_id": turn_id,
+                "timestamp": utc_now(),
+            }
+        )
+        emit(
+            {
+                "event": "message",
+                "kind": "progress",
+                "role": "system",
+                "content": "正在整理候选论文摘要与产物清单",
+                "step": "summarize",
+                "turn_id": turn_id,
+                "timestamp": utc_now(),
+            }
+        )
 
         if not papers:
             assistant_text = "未检索到符合条件的论文结果。"
@@ -42,21 +95,9 @@ def build_search_message_handler(repo: SessionRepository):
                 lines.append(f"{index}. {paper.title} | {author_text} | {year_text} | {source_text}")
             assistant_text = "\n".join(lines)
 
-        reasoning_text = (
-            f"已完成论文检索：原始候选 {summary.get('raw_paper_count', 0)} 篇，"
-            f"最终保留 {summary.get('selected_paper_count', 0)} 篇。"
-        )
-        return [
-            {
-                "event": "reasoning_delta",
-                "chat_id": chat_id,
-                "content": reasoning_text,
-                "turn_id": turn_id,
-            },
-            {"event": "reasoning_end", "chat_id": chat_id, "turn_id": turn_id},
+        emit(
             {
                 "event": "message",
-                "chat_id": chat_id,
                 "role": "assistant",
                 "content": assistant_text,
                 "turn_id": turn_id,
@@ -66,12 +107,28 @@ def build_search_message_handler(repo: SessionRepository):
                     "search_summary": summary,
                     "search_artifact_refs": artifact_refs,
                 },
-            },
+                "timestamp": utc_now(),
+            }
+        )
+
+        # 中文注释：artifact 事件不负责重新写文件，只是把已落库的产物信息实时推给前端。
+        for artifact in artifact_refs:
+            emit(
+                {
+                    "event": "artifact",
+                    "artifact": artifact,
+                    "turn_id": turn_id,
+                    "timestamp": utc_now(),
+                }
+            )
+
+        emit(
             {
-                "event": "stream_end",
-                "chat_id": chat_id,
+                "event": "turn_end",
+                "status": "completed",
                 "turn_id": turn_id,
-            },
-        ]
+                "timestamp": utc_now(),
+            }
+        )
 
     return _handler

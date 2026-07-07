@@ -15,8 +15,10 @@ from src.repositories.sessions.base import SessionRepository
 
 
 class SearchNodeSink(Protocol):
-    """描述检索节点可选的持久化 sink 协议。"""
-
+    """
+    描述检索节点可选的持久化 sink 协议。
+    Protocol：无需显式继承，只要类拥有协议里定义的全部方法 / 签名，就自动视为实现了该协议
+    """
     def persist(
         self,
         *,
@@ -38,8 +40,8 @@ class ScoredPaper:
     score: float
     title_hits: int
     abstract_hits: int
-    topic_in_title: bool
-    topic_in_abstract: bool
+    keyword_phrase_in_title: bool
+    keyword_phrase_in_abstract: bool
     matched_terms: list[str]
 
     def to_dict(self) -> JsonObject:
@@ -50,8 +52,8 @@ class ScoredPaper:
             "score": self.score,
             "title_hits": self.title_hits,
             "abstract_hits": self.abstract_hits,
-            "topic_in_title": self.topic_in_title,
-            "topic_in_abstract": self.topic_in_abstract,
+            "keyword_phrase_in_title": self.keyword_phrase_in_title,
+            "keyword_phrase_in_abstract": self.keyword_phrase_in_abstract,
             "matched_terms": list(self.matched_terms),
         }
 
@@ -69,17 +71,20 @@ def run_search_agent_node():
         """执行检索节点主逻辑，并返回新的局部状态更新。"""
 
         # 中文注释：节点优先从 state 里读取覆盖依赖，若没有则回退到内部默认装配。
-        resolved_service = _resolve_search_service(state)
-        resolved_llm = _resolve_search_llm(state)
+        resolved_service = PaperSearchService()
+        resolved_llm = load_search_agent_llm()
         resolved_sink = _resolve_search_sink(state)
 
-        agent = SearchAgent(AgentContext(spec=SearchAgent.spec, llm=resolved_llm))
+        agent = SearchAgent(AgentContext(llm=resolved_llm))
         agent_update = agent.run(state)
         intent = agent_update["search_intent"]
         search_halted = bool(agent_update.get("search_halted"))
         agent_diagnostics = dict(agent_update.get("diagnostics") or {})
+        # 开始检索相关论文
         raw_papers = [] if search_halted else _execute_search_intent(resolved_service, intent)
-        scored_papers = _score_papers(state["request"].topic, raw_papers)
+        # 中文注释：排序阶段只复用搜索阶段已经解析出的英文关键词，
+        # 明确避免把用户原始 topic 直接带入评分，防止中文主题匹配英文论文时整批归零。
+        scored_papers = _score_papers(intent, raw_papers)
         max_results = max(1, intent.max_results)
         search_results = [item.paper for item in scored_papers[:max_results]]
         search_scores = [item.to_dict() for item in scored_papers]
@@ -117,28 +122,9 @@ def run_search_agent_node():
     return _node
 
 
-def _resolve_search_service(state: State) -> PaperSearchService:
-    """解析检索节点要使用的检索服务实例。"""
-
-    # 中文注释：测试可以通过 state 注入 stub；生产环境没有覆盖项时直接创建默认服务。
-    return cast(PaperSearchService, state.get("search_node_service") or PaperSearchService())
-
-
-def _resolve_search_llm(state: State) -> ProviderSnapshot | None:
-    """解析检索节点要使用的 LLM 快照。"""
-
-    candidate = state.get("search_node_llm", "auto")
-    if candidate == "auto":
-        return load_search_agent_llm()
-    return cast(ProviderSnapshot | None, candidate)
-
-
 def _resolve_search_sink(state: State) -> SearchNodeSink | None:
     """解析检索节点的持久化 sink。"""
 
-    explicit_sink = cast(SearchNodeSink | None, state.get("search_node_sink"))
-    if explicit_sink is not None:
-        return explicit_sink
     session_repo = cast(SessionRepository | None, state.get("session_repo"))
     session_key = _normalize_optional_str(state.get("session_key"))
     turn_id = _normalize_optional_str(state.get("turn_id"))
@@ -182,34 +168,42 @@ def _execute_search_intent(service: PaperSearchService, intent: SearchIntent) ->
     return collected
 
 
-def _score_papers(topic: str, papers: list[PaperDocument]) -> list[ScoredPaper]:
-    """根据主题对候选论文打分并排序。"""
+def _score_papers(intent: SearchIntent, papers: list[PaperDocument]) -> list[ScoredPaper]:
+    """
+    根据检索意图对候选论文打分并排序。
 
-    tokens = _extract_query_terms(topic)
-    topic_text = _normalize_text(topic)
-    threshold = _score_threshold(topic)
+    中文说明：
+    1. 评分阶段完全抛弃用户原始 topic，只使用 SearchAgent 生成的 keywords；
+    2. 这样可以保证“检索使用什么语义，排序就使用什么语义”，避免输入语言不一致带来的噪声；
+    3. 若后续需要排查排序问题，直接查看 keywords 与 matched_terms 即可，链路更单纯。
+    """
+
+    tokens = _build_scoring_tokens(intent.keywords)
+    phrase_terms = _build_scoring_phrases(intent.keywords)
+    threshold = _score_threshold(tokens)
     scored_items: list[ScoredPaper] = []
     for paper in papers:
         title_text = _normalize_text(paper.title)
         abstract_text = _normalize_text(paper.abstract or "")
         title_hits = sum(1 for token in tokens if token in title_text)
         abstract_hits = sum(1 for token in tokens if token in abstract_text)
-        topic_in_title = bool(topic_text) and topic_text in title_text
-        topic_in_abstract = bool(topic_text) and topic_text in abstract_text
+        # 中文注释：这里直接使用新字段名，明确表达“关键词短语是否在标题、摘要中命中”。
+        keyword_phrase_in_title = any(term in title_text for term in phrase_terms)
+        keyword_phrase_in_abstract = any(term in abstract_text for term in phrase_terms)
         score = float(title_hits * 2.0 + abstract_hits * 1.0)
-        if topic_in_title:
+        if keyword_phrase_in_title:
             score += 3.0
-        if topic_in_abstract:
+        if keyword_phrase_in_abstract:
             score += 1.5
-        matched_terms = [token for token in tokens if token in title_text or token in abstract_text]
+        matched_terms = _collect_matched_terms(tokens, phrase_terms, title_text, abstract_text)
         scored_items.append(
             ScoredPaper(
                 paper=paper,
                 score=score,
                 title_hits=title_hits,
                 abstract_hits=abstract_hits,
-                topic_in_title=topic_in_title,
-                topic_in_abstract=topic_in_abstract,
+                keyword_phrase_in_title=keyword_phrase_in_title,
+                keyword_phrase_in_abstract=keyword_phrase_in_abstract,
                 matched_terms=matched_terms,
             )
         )
@@ -251,16 +245,89 @@ def _extract_query_terms(text: str) -> list[str]:
     return results
 
 
+def _build_scoring_tokens(keywords: list[str]) -> list[str]:
+    """
+    构建用于 token 命中的评分词列表。
+
+    中文说明：
+    1. 每个 keyword 会继续拆成 token，便于统计 title_hits / abstract_hits；
+    2. 该函数返回去重后的稳定顺序列表，便于后续调试 matched_terms。
+    """
+
+    seen: set[str] = set()
+    scoring_tokens: list[str] = []
+    for candidate in keywords:
+        for token in _extract_query_terms(candidate):
+            if token in seen:
+                continue
+            seen.add(token)
+            scoring_tokens.append(token)
+    return scoring_tokens
+
+
+def _build_scoring_phrases(keywords: list[str]) -> list[str]:
+    """
+    构建用于短语级命中的评分短语列表。
+
+    中文说明：
+    1. 这里保留完整 keyword 短语，主要服务于 keyword_phrase_in_title / keyword_phrase_in_abstract 这两个字段；
+    2. 因为评分阶段已明确抛弃 topic，所以这里只看 keywords；
+    3. 只保留长度大于 1 的非空短语，避免噪声匹配。
+    """
+
+    seen: set[str] = set()
+    phrase_terms: list[str] = []
+    for candidate in keywords:
+        normalized = _normalize_text(candidate)
+        if len(normalized) <= 1 or normalized in seen:
+            continue
+        seen.add(normalized)
+        phrase_terms.append(normalized)
+    return phrase_terms
+
+
+def _collect_matched_terms(
+    tokens: list[str],
+    phrase_terms: list[str],
+    title_text: str,
+    abstract_text: str,
+) -> list[str]:
+    """
+    汇总当前论文命中的关键词与短语。
+
+    中文说明：
+    1. 优先返回完整短语，方便观察“autonomous driving”这类核心主题是否直接命中；
+    2. 再补充 token 级命中，便于解释 score 的来源；
+    3. 保持返回顺序稳定，便于前端和 artifact 做差异对比。
+    """
+
+    matched_terms: list[str] = []
+    seen: set[str] = set()
+    for candidate in [*phrase_terms, *tokens]:
+        if candidate in seen:
+            continue
+        if candidate in title_text or candidate in abstract_text:
+            seen.add(candidate)
+            matched_terms.append(candidate)
+    return matched_terms
+
+
 def _normalize_text(text: str) -> str:
     """统一文本大小写和空白，减少匹配噪声。"""
 
     return " ".join(text.lower().split())
 
 
-def _score_threshold(topic: str) -> float:
-    """根据主题长度给出一个温和的最低分阈值。"""
+def _score_threshold(tokens: list[str]) -> float:
+    """
+    根据评分 token 数量给出一个温和的最低分阈值。
 
-    token_count = len(_extract_query_terms(topic))
+    中文说明：
+    这里不再只看原始 topic 的长度，而是看最终真正参与评分的 token 数量，
+    这样阈值才能和新的“topic + keywords 联合打分”策略保持一致。
+    """
+
+    token_count = len(tokens)
     if token_count >= 6:
         return 4.0
     if token_count >= 3:

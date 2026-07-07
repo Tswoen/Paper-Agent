@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ChevronLeft, PanelsTopLeft } from "lucide-vue-next";
+import { ChevronLeft, PanelsTopLeft, Workflow } from "lucide-vue-next";
 import { RouterLink, useRoute } from "vue-router";
 
 defineProps<{
@@ -36,6 +36,15 @@ const route = useRoute();
     <nav class="sidebar-nav" aria-label="主导航">
       <RouterLink
         class="nav-item"
+        :class="{ active: route.name === 'sessions' }"
+        to="/sessions"
+      >
+        <Workflow :size="18" />
+        <span v-if="!collapsed">会话工作台</span>
+      </RouterLink>
+
+      <RouterLink
+        class="nav-item"
         :class="{ active: route.name === 'settings' }"
         to="/settings"
       >
@@ -45,7 +54,7 @@ const route = useRoute();
     </nav>
 
     <div v-if="!collapsed" class="sidebar-foot">
-      <p>配置改动会即时写回后端配置文件。</p>
+      <p>工作流会话台支持按主题发起检索，并通过流式时间线展示运行过程。</p>
     </div>
   </aside>
 </template>
