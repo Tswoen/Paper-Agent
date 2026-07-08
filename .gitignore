@@ -26,6 +26,7 @@ Thumbs.db
 
 # Python开发
 ## 编译文件
+.runtime/
 __pycache__/
 *.py[cod]
 *$py.class
@@ -108,3 +109,9 @@ data/knowledge_base_data/chroma_data/chromadb/c63cc355-56fc-4a3a-8df2-4c5d0c8c14
 .trae/documents/左右分栏布局主界面实现.md
 data/knowledge_base_data/chroma_data/chromadb/c63cc355-56fc-4a3a-8df2-4c5d0c8c1423/link_lists.bin
 data/knowledge_base_data/chroma_data/kb_8f70a13918811436348933387ee5c158/uploads/测试_1bc5.txt
+
+# 本地配置（避免覆盖）
+src/core/models.yaml
+
+# 其他
+error_resolution_manual.md
