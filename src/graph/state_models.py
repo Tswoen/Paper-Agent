@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Protocol, TypedDict
 
 from src.agents.contracts import ReviewRequest
+from src.graph.runtime import WorkflowRuntimeContext
 from src.llm import ProviderSnapshot
 from src.paper_retrieval import PaperSearchService
 from src.paper_retrieval.models import PaperDocument
@@ -22,9 +23,12 @@ class State(TypedDict, total=False):
     search_artifact_refs: list[JsonObject]
     diagnostics: JsonObject
     current_step: str
+    assistant_message: str
+    assistant_message_metadata: JsonObject
     session_repo: SessionRepository
     session_key: str
     turn_id: str
+    runtime_context: WorkflowRuntimeContext
     search_node_service: PaperSearchService
     search_node_llm: ProviderSnapshot | None | str
     # 中文注释：这里使用本地协议占位类型，避免在运行时导入 `search_node`

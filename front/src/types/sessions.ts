@@ -78,6 +78,7 @@ export interface SessionRuntimeEvent {
   turn_id?: string;
   timestamp?: string;
   stream_seq?: number;
+  event_id?: string;
   role?: "user" | "assistant" | "system";
   kind?: string;
   content?: string;
@@ -85,10 +86,20 @@ export interface SessionRuntimeEvent {
   status?: string;
   run_started_at?: string | null;
   step?: string;
+  node_key?: string;
+  node_title?: string;
+  stage?: string;
   media?: Array<Record<string, unknown>>;
   message?: string;
   artifact?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
+  keywords?: string[];
+  sources?: string[];
+  max_results?: number;
+  raw_paper_count?: number;
+  selected_paper_count?: number;
+  artifact_count?: number;
+  search_halted?: boolean;
 }
 
 export interface UISessionMessage {

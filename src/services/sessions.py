@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import inspect
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -11,22 +12,16 @@ from src.utils import get_logger, logging_context
 
 
 JsonObject = dict[str, Any]
-RuntimeEventEmitter = Callable[[JsonObject], None]
-MessageHandler = Callable[[str, str, JsonObject, RuntimeEventEmitter], None]
+RuntimeEventEmitter = Callable[[JsonObject], JsonObject]
+MessageHandler = Callable[..., Any]
 logger = get_logger(__name__)
 
 
 class SessionError(Exception):
-    """会话业务异常。
-
-    中文说明：
-    该异常用于表达服务层里的可预期失败，例如会话不存在、请求参数非法、
-    或当前会话仍在运行中不能再次发起新任务。HTTP 层会统一把它转换为
-    标准 JSON 错误响应。
-    """
+    """表示会话服务层里可预期的业务异常。"""
 
     def __init__(self, message: str, status: int = 400):
-        """初始化业务异常并记录对应的 HTTP 状态码。"""
+        """保存错误信息和对应的 HTTP 状态码。"""
 
         super().__init__(message)
         self.status = status
@@ -34,12 +29,7 @@ class SessionError(Exception):
 
 @dataclass(slots=True)
 class AssistantMessageBuffer:
-    """聚合一次运行中的助手输出片段。
-
-    中文说明：
-    运行期间的正文增量、reasoning 增量和媒体信息会先以事件形式逐条落库，
-    最后再汇总为一条 assistant message，便于历史线程直接按消息维度渲染。
-    """
+    """把一次运行里的助手输出片段聚合成最终消息。"""
 
     content_chunks: list[str] = field(default_factory=list)
     reasoning_chunks: list[str] = field(default_factory=list)
@@ -61,7 +51,7 @@ class AssistantMessageBuffer:
             self.media = list(copy.deepcopy(event.get("media") or []))
 
     def persist(self, repo: SessionRepository, session_key: str, turn_id: str) -> None:
-        """把缓冲区中的助手输出写回会话消息表。"""
+        """把缓冲区里的内容回写成一条正式的 assistant 消息。"""
 
         assistant_content = "".join(self.content_chunks).strip()
         assistant_reasoning = "".join(self.reasoning_chunks).strip()
@@ -78,7 +68,7 @@ class AssistantMessageBuffer:
 
 
 def list_sessions(repo: SessionRepository) -> JsonObject:
-    """返回前端会话列表载荷。"""
+    """返回会话列表给前端。"""
 
     return {"sessions": repo.list()}
 
@@ -90,7 +80,7 @@ def fetch_thread(repo: SessionRepository, key: str) -> JsonObject:
 
 
 def create_session(repo: SessionRepository, body: JsonObject | None = None) -> JsonObject:
-    """创建会话并返回标准响应载荷。"""
+    """创建一个新会话。"""
 
     body = body or {}
     record = repo.create(title=str(body.get("title") or "New chat"), workspace_scope=body.get("workspace_scope"))
@@ -98,7 +88,7 @@ def create_session(repo: SessionRepository, body: JsonObject | None = None) -> J
 
 
 def delete_session(repo: SessionRepository, key: str) -> JsonObject:
-    """删除会话并返回标准响应载荷。"""
+    """删除一个会话，并返回统一响应。"""
 
     repo.delete(key)
     return {"deleted": True, "key": key}
@@ -110,20 +100,14 @@ def submit_message(
     body: JsonObject | None = None,
     message_handler: MessageHandler | None = None,
 ) -> JsonObject:
-    """同步提交一条用户消息并完整返回事件结果。
-
-    中文说明：
-    该函数保留给旧的 `POST /messages` 接口使用，会在一次 HTTP 请求内同步完成
-    用户消息入库、工作流执行、事件落库和线程快照返回。新的 `/runs + SSE`
-    也会复用同一套 `message_handler + emit` 协议，因此这里仍然是有效的兼容入口。
-    """
+    """同步提交一条消息，并完整返回这次运行产生的事件。"""
 
     body = body or {}
     content = str(body.get("content") or "")
     if not content.strip() and not body.get("media"):
         raise ValueError("content is required")
 
-    # 中文注释：先确认会话存在，避免将消息误写到不存在的会话里。
+    # 中文注释：先确认会话存在，避免把消息误写到不存在的会话里。
     repo.get(session_key)
 
     turn_id = str(body.get("turn_id") or uuid.uuid4().hex)
@@ -133,12 +117,13 @@ def submit_message(
     assistant_buffer = AssistantMessageBuffer()
     resolved_handler = message_handler or _default_message_handler
 
-    def emit(event: JsonObject) -> None:
-        """收集同步运行中的事件，并顺手更新助手消息缓冲区。"""
+    def emit(event: JsonObject) -> JsonObject:
+        """收集同步运行中的事件，并顺手维护助手消息缓冲区。"""
 
         event_copy = copy.deepcopy(event)
         events.append(event_copy)
         assistant_buffer.apply(event_copy)
+        return event_copy
 
     try:
         with logging_context(session_key=session_key, turn_id=turn_id):
@@ -175,9 +160,9 @@ def submit_message(
                 }
             )
 
-            resolved_handler(session_key, content, {"turn_id": turn_id, **body}, emit)
+            invoke_message_handler(resolved_handler, session_key, content, {"turn_id": turn_id, **body}, emit)
 
-            # 中文注释：无论处理器是否主动收尾，都补齐 turn_end，避免前端状态悬空。
+            # 中文注释：无论处理器有没有主动收尾，这里都兜底补一个 turn_end，防止前端一直停在运行中。
             if not any(str(event.get("event") or "") == "turn_end" for event in events):
                 emit(
                     {
@@ -204,7 +189,7 @@ def submit_message(
         repo.set_status(session_key, "failed")
         raise
     finally:
-        # 中文注释：运行结束后必须清理运行状态，否则前端会一直认为会话仍在执行。
+        # 中文注释：运行结束后必须清掉 run_started_at，否则前端会一直以为当前会话还在执行。
         repo.set_run_started_at(session_key, None)
 
     return {
@@ -215,17 +200,53 @@ def submit_message(
     }
 
 
+def invoke_message_handler(
+    handler: MessageHandler,
+    chat_id: str,
+    content: str,
+    frame: JsonObject,
+    emit: RuntimeEventEmitter,
+) -> None:
+    """兼容新旧两种消息处理器，统一触发运行逻辑。"""
+
+    parameter_count = _parameter_count(handler)
+    if parameter_count >= 4 or parameter_count < 0:
+        result = handler(chat_id, content, frame, emit)
+        if result is not None:
+            _emit_legacy_result(result, emit)
+        return
+
+    result = handler(chat_id, content, frame)
+    _emit_legacy_result(result, emit)
+
+
+def _emit_legacy_result(result: Any, emit: RuntimeEventEmitter) -> None:
+    """兼容旧处理器返回的事件列表，把它逐条重新走一次统一通道。"""
+
+    if result is None:
+        return
+    if not isinstance(result, list):
+        raise TypeError("legacy message handler must return a list of events")
+    for item in result:
+        if isinstance(item, dict):
+            emit(item)
+
+
+def _parameter_count(handler: MessageHandler) -> int:
+    """读取处理器参数个数，拿不到时返回 -1，表示按新协议处理。"""
+
+    try:
+        return len(inspect.signature(handler).parameters)
+    except (TypeError, ValueError):
+        return -1
+
+
 def _persist_runtime_events(
     repo: SessionRepository,
     session_key: str,
     events: list[JsonObject],
 ) -> None:
-    """把运行期事件逐条写入事件存储。
-
-    中文说明：
-    这里仅负责 event 级别的持久化，不直接拼装 assistant message。
-    这样同步接口和异步 SSE 运行都可以复用同样的聚合逻辑。
-    """
+    """把运行期事件逐条写入持久化存储。"""
 
     for event in events:
         event_name = str(event.get("event") or "unknown")
@@ -239,12 +260,7 @@ def _persist_runtime_events(
 
 
 def _default_message_handler(chat_id: str, content: str, frame: JsonObject, emit: RuntimeEventEmitter) -> None:
-    """默认消息处理器。
-
-    中文说明：
-    当真实论文工作流尚未注入时，该占位实现会生成一组最小事件，
-    便于本地联调 `/messages` 与 `/runs` 两条调用链。
-    """
+    """提供一个最小可运行的占位消息处理器。"""
 
     turn_id = frame.get("turn_id")
     emit(
@@ -252,7 +268,7 @@ def _default_message_handler(chat_id: str, content: str, frame: JsonObject, emit
             "event": "reasoning_delta",
             "chat_id": chat_id,
             "session_key": chat_id,
-            "content": "已收到主题，正在整理一个最小演示结果。",
+            "content": "已收到主题，正在整理一份最小演示结果。",
             "turn_id": turn_id,
             "timestamp": utc_now(),
         }
@@ -286,3 +302,4 @@ def _default_message_handler(chat_id: str, content: str, frame: JsonObject, emit
             "timestamp": utc_now(),
         }
     )
+

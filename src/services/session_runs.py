@@ -7,9 +7,10 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
+from src.graph.runtime import InlineWorkflowSyncPort, WorkflowRuntimeContext
 from src.models.sessions import utc_now
 from src.repositories.sessions.base import SessionRepository
-from src.services.sessions import AssistantMessageBuffer, MessageHandler, SessionError
+from src.services.sessions import AssistantMessageBuffer, MessageHandler, SessionError, invoke_message_handler
 from src.utils import get_logger, logging_context
 
 
@@ -19,12 +20,7 @@ logger = get_logger(__name__)
 
 @dataclass(slots=True)
 class RunBrokerState:
-    """描述一次运行在内存中的流式状态。
-
-    中文说明：
-    该结构只负责服务进程存活期间的 SSE 分发，不承担长期持久化职责。
-    事件的长期保存仍由 `SessionRepository.append_event` 负责。
-    """
+    """保存单次 run 在当前服务进程中的流式状态。"""
 
     session_key: str
     run_id: str
@@ -36,21 +32,16 @@ class RunBrokerState:
 
 
 class SessionRunBroker:
-    """为每个 run 提供内存事件通道与订阅能力。
-
-    中文说明：
-    后台工作流通过 broker 发布事件，SSE 接口通过 broker 订阅事件。
-    这样可以把“实时推送”与“会话落库”解耦，避免路由层直接感知仓储细节。
-    """
+    """负责 run 级别的内存事件分发。"""
 
     def __init__(self):
-        """初始化运行期事件 broker。"""
+        """初始化内存 broker。"""
 
         self._runs: dict[str, RunBrokerState] = {}
         self._lock = asyncio.Lock()
 
     async def open_run(self, session_key: str, run_id: str, turn_id: str, created_at: str) -> None:
-        """注册一条新的运行记录，使其可以被后续发布和订阅。"""
+        """注册一条新的 run 记录，让后续事件可以被订阅。"""
 
         async with self._lock:
             self._runs[run_id] = RunBrokerState(
@@ -61,7 +52,7 @@ class SessionRunBroker:
             )
 
     async def publish(self, run_id: str, event: JsonObject) -> JsonObject:
-        """向指定 run 发布一条事件，并广播给所有在线订阅者。"""
+        """向指定 run 广播一条事件，并保留一份内存历史。"""
 
         async with self._lock:
             state = self._runs.get(run_id)
@@ -77,7 +68,7 @@ class SessionRunBroker:
         return event_copy
 
     async def close_run(self, run_id: str) -> None:
-        """标记指定 run 已结束，并唤醒所有订阅者退出。"""
+        """标记指定 run 已经结束，并通知所有订阅者退出。"""
 
         async with self._lock:
             state = self._runs.get(run_id)
@@ -90,7 +81,7 @@ class SessionRunBroker:
             await queue.put(None)
 
     async def subscribe(self, run_id: str):
-        """订阅指定 run 的事件流，并先补发历史缓存。"""
+        """订阅指定 run 的事件流，并在订阅开始时补发已有历史。"""
 
         queue: asyncio.Queue[JsonObject | None] = asyncio.Queue()
         async with self._lock:
@@ -120,12 +111,7 @@ class SessionRunBroker:
 
 
 class SessionRunService:
-    """负责启动后台 run、发布事件并对接 SSE。
-
-    中文说明：
-    该服务是 `/runs + SSE` 的核心编排层，负责校验会话状态、创建 run 元数据、
-    启动后台任务、把事件同时落库并推给 broker，以及在结束时收口状态。
-    """
+    """负责启动后台 run、持久化事件并对接 SSE。"""
 
     def __init__(
         self,
@@ -133,14 +119,14 @@ class SessionRunService:
         message_handler: MessageHandler | None = None,
         broker: SessionRunBroker | None = None,
     ):
-        """初始化会话运行服务并注入仓储、事件处理器与 broker。"""
+        """初始化 run service。"""
 
         self.repo = repo
         self.message_handler = message_handler
         self.broker = broker or SessionRunBroker()
 
     async def start_run(self, session_key: str, body: JsonObject | None = None) -> JsonObject:
-        """创建一次新的后台运行并立即返回可订阅的流地址。"""
+        """创建一次新的后台运行，并立即返回 SSE 地址。"""
 
         body = body or {}
         content = str(body.get("content") or "")
@@ -209,7 +195,7 @@ class SessionRunService:
         }
 
     async def stream_events(self, session_key: str, run_id: str):
-        """返回指定 run 的事件异步迭代器，并校验会话归属。"""
+        """返回指定 run 的异步事件流。"""
 
         async for event in self.broker.subscribe(run_id):
             if str(event.get("session_key") or "") != session_key:
@@ -226,7 +212,7 @@ class SessionRunService:
         content: str,
         body: JsonObject,
     ) -> None:
-        """在线程池中执行阻塞工作流，并确保异常和收尾被正确处理。"""
+        """在线程池里执行阻塞工作流，避免占住主事件循环。"""
 
         await asyncio.to_thread(
             self._run_sync,
@@ -247,21 +233,21 @@ class SessionRunService:
         content: str,
         body: JsonObject,
     ) -> None:
-        """在工作线程中运行同步工作流，并通过线程安全桥接发布事件。"""
+        """在线程里执行同步工作流，并通过线程安全桥接回主循环。"""
 
         resolved_handler = self.message_handler
         assistant_buffer = AssistantMessageBuffer()
         saw_turn_end = False
 
-        def emit(event: JsonObject) -> None:
-            """把工作线程中的事件安全地投递回主事件循环。"""
+        def emit(event: JsonObject) -> JsonObject:
+            """把工作线程里的事件交回主循环，同时更新本地助手缓冲区。"""
 
             nonlocal saw_turn_end
             event_copy = copy.deepcopy(event)
             assistant_buffer.apply(event_copy)
             if str(event_copy.get("event") or "") == "turn_end":
                 saw_turn_end = True
-            asyncio.run_coroutine_threadsafe(
+            return asyncio.run_coroutine_threadsafe(
                 self._publish_runtime_event(
                     session_key,
                     run_id,
@@ -271,6 +257,20 @@ class SessionRunService:
                 ),
                 loop,
             ).result()
+
+        runtime_context = WorkflowRuntimeContext(
+            session_key=session_key,
+            run_id=run_id,
+            turn_id=turn_id,
+            workflow_name="paper_graph",
+            sync_port=InlineWorkflowSyncPort(
+                emit,
+                session_key=session_key,
+                run_id=run_id,
+                turn_id=turn_id,
+                workflow_name="paper_graph",
+            ),
+        )
 
         try:
             with logging_context(session_key=session_key, turn_id=turn_id, run_id=run_id):
@@ -288,7 +288,13 @@ class SessionRunService:
                 )
                 if resolved_handler is None:
                     raise SessionError("message handler is not configured", 500)
-                resolved_handler(session_key, content, {"run_id": run_id, "turn_id": turn_id, **body}, emit)
+                invoke_message_handler(
+                    resolved_handler,
+                    session_key,
+                    content,
+                    {"run_id": run_id, "turn_id": turn_id, "runtime_context": runtime_context, **body},
+                    emit,
+                )
                 if not saw_turn_end:
                     emit(
                         {
@@ -324,7 +330,7 @@ class SessionRunService:
         turn_id: str,
         assistant_buffer: AssistantMessageBuffer,
     ) -> None:
-        """在运行成功时写回助手消息、更新状态并关闭事件流。"""
+        """在 run 成功时写回助手消息，并关闭事件流。"""
 
         assistant_buffer.persist(self.repo, session_key, turn_id)
         self.repo.set_status(session_key, "completed")
@@ -341,7 +347,7 @@ class SessionRunService:
         error: Exception,
         already_closed: bool,
     ) -> None:
-        """在运行失败时补发错误与终止事件，并统一收口状态。"""
+        """在 run 失败时补发错误和终止事件，并统一收口状态。"""
 
         await self._publish_runtime_event(
             session_key,
@@ -384,11 +390,11 @@ class SessionRunService:
         *,
         persist_event: bool,
     ) -> JsonObject:
-        """标准化单条运行事件，并按需同时落库和广播。"""
+        """标准化一条运行事件，并同时完成落库和广播。"""
 
         normalized_event = self._normalize_event(session_key, run_id, turn_id, event)
         if persist_event:
-            self.repo.append_event(
+            event_record = self.repo.append_event(
                 session_key,
                 str(normalized_event.get("event") or "unknown"),
                 content=str(
@@ -404,11 +410,13 @@ class SessionRunService:
                 },
                 created_at=str(normalized_event["timestamp"]),
             )
-        await self.broker.publish(run_id, normalized_event)
-        return normalized_event
+            normalized_event["event_id"] = str(event_record.get("id") or "")
+            normalized_event["stream_seq"] = int(event_record.get("seq_no") or 0)
+        published_event = await self.broker.publish(run_id, normalized_event)
+        return published_event
 
     def _normalize_event(self, session_key: str, run_id: str, turn_id: str, event: JsonObject) -> JsonObject:
-        """补齐运行事件的统一字段，保证历史和实时口径一致。"""
+        """补齐统一字段，保证历史事件和实时事件结构一致。"""
 
         normalized_event = copy.deepcopy(event)
         normalized_event.setdefault("event", "message")
@@ -421,12 +429,7 @@ class SessionRunService:
 
 
 def encode_sse(event: JsonObject) -> str:
-    """把结构化事件编码为 SSE 文本块。
-
-    中文说明：
-    这里显式输出 `event:` 和 `id:`，前端既能按事件名订阅，也能在需要时
-    利用 `stream_seq` 做断线恢复的基础准备。
-    """
+    """把结构化事件编码成 SSE 文本块。"""
 
     event_name = str(event.get("event") or "message")
     payload = json.dumps(event, ensure_ascii=False)
@@ -437,3 +440,4 @@ def encode_sse(event: JsonObject) -> str:
     lines.append(f"event: {event_name}")
     lines.append(f"data: {payload}")
     return "\n".join(lines) + "\n\n"
+

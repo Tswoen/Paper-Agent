@@ -6,6 +6,7 @@ from typing import Any, Protocol, cast
 
 from src.agents.base import AgentContext
 from src.agents.searchAgent import SearchAgent, SearchIntent, load_search_agent_llm
+from src.graph.runtime import WorkflowRuntimeContext
 from src.graph.search_persistence import SearchPersistenceSink
 from src.graph.state_models import JsonObject, State
 from src.llm import ProviderSnapshot
@@ -15,10 +16,8 @@ from src.repositories.sessions.base import SessionRepository
 
 
 class SearchNodeSink(Protocol):
-    """
-    描述检索节点可选的持久化 sink 协议。
-    Protocol：无需显式继承，只要类拥有协议里定义的全部方法 / 签名，就自动视为实现了该协议
-    """
+    """描述检索节点可选的写盘能力。"""
+
     def persist(
         self,
         *,
@@ -34,7 +33,7 @@ class SearchNodeSink(Protocol):
 
 @dataclass(slots=True)
 class ScoredPaper:
-    """表示带有相关性评分明细的候选论文。"""
+    """表示带评分细节的候选论文。"""
 
     paper: PaperDocument
     score: float
@@ -45,7 +44,7 @@ class ScoredPaper:
     matched_terms: list[str]
 
     def to_dict(self) -> JsonObject:
-        """把评分结果转换为便于落盘和回传的普通字典。"""
+        """把评分结果转成普通字典，方便写盘和调试。"""
 
         return {
             "paper": self.paper.to_dict(),
@@ -59,31 +58,55 @@ class ScoredPaper:
 
 
 def run_search_agent_node():
-    """生成搜索图中的论文检索节点。
-
-    中文说明：
-    1. 检索服务、LLM 与持久化 sink 都在节点内部解析；
-    2. 默认情况下节点自行创建依赖；
-    3. 只有测试或特殊调用时，才通过图状态放入覆盖项。
-    """
+    """生成执行图里的检索节点。"""
 
     def _node(state: State) -> State:
-        """执行检索节点主逻辑，并返回新的局部状态更新。"""
+        """执行检索节点，并在执行过程中直接同步中间结果。"""
 
-        # 中文注释：节点优先从 state 里读取覆盖依赖，若没有则回退到内部默认装配。
-        resolved_service = PaperSearchService()
-        resolved_llm = load_search_agent_llm()
+        resolved_service = cast(PaperSearchService, state.get("search_node_service") or PaperSearchService())
+        resolved_llm = cast(ProviderSnapshot | None | str, state.get("search_node_llm") or load_search_agent_llm())
         resolved_sink = _resolve_search_sink(state)
+        reporter = _resolve_reporter(state)
+
+        if reporter is not None:
+            reporter.started("正在生成检索条件", stage="plan_search")
+            reporter.reasoning_delta("正在根据主题生成检索关键词、来源范围和筛选条件。", stage="plan_search")
 
         agent = SearchAgent(AgentContext(llm=resolved_llm))
         agent_update = agent.run(state)
         intent = agent_update["search_intent"]
         search_halted = bool(agent_update.get("search_halted"))
         agent_diagnostics = dict(agent_update.get("diagnostics") or {})
-        # 开始检索相关论文
-        raw_papers = [] if search_halted else _execute_search_intent(resolved_service, intent)
-        # 中文注释：排序阶段只复用搜索阶段已经解析出的英文关键词，
-        # 明确避免把用户原始 topic 直接带入评分，防止中文主题匹配英文论文时整批归零。
+
+        if reporter is not None:
+            reporter.progress(
+                "检索条件已准备完成",
+                stage="intent_ready",
+                search_halted=search_halted,
+                keywords=list(intent.keywords),
+                sources=list(intent.sources),
+                max_results=intent.max_results,
+            )
+            if intent.keywords:
+                reporter.reasoning_delta(
+                    f"本次检索将重点使用这些关键词：{'、'.join(intent.keywords[:6])}",
+                    stage="intent_ready",
+                )
+
+        if search_halted:
+            raw_papers: list[PaperDocument] = []
+        else:
+            if reporter is not None:
+                reporter.progress("正在从论文数据源拉取候选结果", stage="fetch_results")
+            raw_papers = _execute_search_intent(resolved_service, intent)
+
+        if reporter is not None:
+            reporter.progress(
+                f"已拿到 {len(raw_papers)} 篇原始候选论文",
+                stage="raw_results_ready",
+                raw_paper_count=len(raw_papers),
+            )
+
         scored_papers = _score_papers(intent, raw_papers)
         max_results = max(1, intent.max_results)
         search_results = [item.paper for item in scored_papers[:max_results]]
@@ -96,6 +119,14 @@ def run_search_agent_node():
             "max_results": max_results,
             "sources": list(intent.sources),
         }
+
+        if reporter is not None:
+            reporter.progress(
+                f"排序和筛选已完成，保留 {len(search_results)} 篇论文",
+                stage="rank_completed",
+                selected_paper_count=len(search_results),
+            )
+
         search_artifact_refs: list[JsonObject] = []
         if resolved_sink is not None:
             persistence_result = resolved_sink.persist(
@@ -109,6 +140,24 @@ def run_search_agent_node():
             )
             search_artifact_refs = persistence_result.to_state_refs()
             search_summary["manifest"] = dict(persistence_result.manifest)
+            if reporter is not None:
+                for artifact in search_artifact_refs:
+                    reporter.artifact(artifact, stage="artifact_ready")
+
+        if reporter is not None:
+            reporter.reasoning_delta(
+                f"检索阶段已完成：原始候选 {len(raw_papers)} 篇，最终保留 {len(search_results)} 篇。",
+                stage="search_done",
+            )
+            reporter.reasoning_end(stage="search_done")
+            reporter.completed(
+                "论文检索节点已完成",
+                stage="search_done",
+                raw_paper_count=len(raw_papers),
+                selected_paper_count=len(search_results),
+                artifact_count=len(search_artifact_refs),
+            )
+
         return State(
             request=state["request"],
             search_results=search_results,
@@ -117,32 +166,49 @@ def run_search_agent_node():
             search_artifact_refs=search_artifact_refs,
             diagnostics={"agent": agent_diagnostics},
             current_step="search",
+            session_repo=state.get("session_repo"),
+            session_key=state.get("session_key"),
+            turn_id=state.get("turn_id"),
+            search_node_service=state.get("search_node_service"),
+            search_node_llm=state.get("search_node_llm"),
+            search_node_sink=state.get("search_node_sink"),
+            runtime_context=state.get("runtime_context"),
+            assistant_message=state.get("assistant_message", ""),
+            assistant_message_metadata=dict(state.get("assistant_message_metadata") or {}),
         )
 
     return _node
 
 
+def _resolve_reporter(state: State):
+    """从共享状态里取出检索节点专用的上报器。"""
+
+    runtime = cast(WorkflowRuntimeContext | None, state.get("runtime_context"))
+    if runtime is None or runtime.sync_port is None:
+        return None
+    return runtime.sync_port.for_node("search", "论文检索")
+
+
 def _resolve_search_sink(state: State) -> SearchNodeSink | None:
-    """解析检索节点的持久化 sink。"""
+    """根据会话上下文决定是否启用检索产物写盘。"""
 
     session_repo = cast(SessionRepository | None, state.get("session_repo"))
     session_key = _normalize_optional_str(state.get("session_key"))
     turn_id = _normalize_optional_str(state.get("turn_id"))
     if session_repo is None or session_key is None or turn_id is None:
         return None
-    # 中文注释：只有具备完整会话上下文时，才内部创建搜索结果持久化 sink。
     return SearchPersistenceSink(session_repo, session_key=session_key, turn_id=turn_id)
 
 
 def _normalize_optional_str(value: Any) -> str | None:
-    """把任意可选值规整为非空字符串。"""
+    """把任意可选值整理成非空字符串，没有值时返回 None。"""
 
     text = str(value).strip() if value is not None else ""
     return text or None
 
 
 def _execute_search_intent(service: PaperSearchService, intent: SearchIntent) -> list[PaperDocument]:
-    """按照检索意图调用检索服务，并汇总去重后的论文结果。"""
+    """按检索意图调用检索服务，并合并去重后的论文列表。"""
 
     collected: list[PaperDocument] = []
     seen: set[str] = set()
@@ -169,14 +235,7 @@ def _execute_search_intent(service: PaperSearchService, intent: SearchIntent) ->
 
 
 def _score_papers(intent: SearchIntent, papers: list[PaperDocument]) -> list[ScoredPaper]:
-    """
-    根据检索意图对候选论文打分并排序。
-
-    中文说明：
-    1. 评分阶段完全抛弃用户原始 topic，只使用 SearchAgent 生成的 keywords；
-    2. 这样可以保证“检索使用什么语义，排序就使用什么语义”，避免输入语言不一致带来的噪声；
-    3. 若后续需要排查排序问题，直接查看 keywords 与 matched_terms 即可，链路更单纯。
-    """
+    """根据检索意图对候选论文打分并排序。"""
 
     tokens = _build_scoring_tokens(intent.keywords)
     phrase_terms = _build_scoring_phrases(intent.keywords)
@@ -187,7 +246,6 @@ def _score_papers(intent: SearchIntent, papers: list[PaperDocument]) -> list[Sco
         abstract_text = _normalize_text(paper.abstract or "")
         title_hits = sum(1 for token in tokens if token in title_text)
         abstract_hits = sum(1 for token in tokens if token in abstract_text)
-        # 中文注释：这里直接使用新字段名，明确表达“关键词短语是否在标题、摘要中命中”。
         keyword_phrase_in_title = any(term in title_text for term in phrase_terms)
         keyword_phrase_in_abstract = any(term in abstract_text for term in phrase_terms)
         score = float(title_hits * 2.0 + abstract_hits * 1.0)
@@ -209,7 +267,7 @@ def _score_papers(intent: SearchIntent, papers: list[PaperDocument]) -> list[Sco
         )
     selected = [item for item in scored_items if item.score >= threshold]
     if not selected:
-        # 中文注释：当主题过短导致阈值筛选后为空时，回退到全部候选，避免“明明搜到了却全部被过滤”。
+        # 中文注释：当阈值过高导致全部被筛掉时，这里退回所有候选，避免“搜到了却一条都没有”。
         selected = list(scored_items)
     selected.sort(
         key=lambda item: (
@@ -223,7 +281,7 @@ def _score_papers(intent: SearchIntent, papers: list[PaperDocument]) -> list[Sco
 
 
 def _paper_dedupe_key(paper: PaperDocument) -> str:
-    """为论文生成稳定的去重键，优先使用 DOI，其次回退到标题。"""
+    """为论文生成稳定的去重键，优先使用 DOI。"""
 
     doi = (paper.doi or "").strip().lower()
     if doi:
@@ -232,7 +290,7 @@ def _paper_dedupe_key(paper: PaperDocument) -> str:
 
 
 def _extract_query_terms(text: str) -> list[str]:
-    """从主题文本中提取关键词，供评分阶段计算命中数。"""
+    """从文本里提取适合做打分的关键词。"""
 
     seen: set[str] = set()
     results: list[str] = []
@@ -246,13 +304,7 @@ def _extract_query_terms(text: str) -> list[str]:
 
 
 def _build_scoring_tokens(keywords: list[str]) -> list[str]:
-    """
-    构建用于 token 命中的评分词列表。
-
-    中文说明：
-    1. 每个 keyword 会继续拆成 token，便于统计 title_hits / abstract_hits；
-    2. 该函数返回去重后的稳定顺序列表，便于后续调试 matched_terms。
-    """
+    """把关键词拆成用于命中统计的 token 列表。"""
 
     seen: set[str] = set()
     scoring_tokens: list[str] = []
@@ -266,14 +318,7 @@ def _build_scoring_tokens(keywords: list[str]) -> list[str]:
 
 
 def _build_scoring_phrases(keywords: list[str]) -> list[str]:
-    """
-    构建用于短语级命中的评分短语列表。
-
-    中文说明：
-    1. 这里保留完整 keyword 短语，主要服务于 keyword_phrase_in_title / keyword_phrase_in_abstract 这两个字段；
-    2. 因为评分阶段已明确抛弃 topic，所以这里只看 keywords；
-    3. 只保留长度大于 1 的非空短语，避免噪声匹配。
-    """
+    """保留完整关键词短语，方便做短语级命中。"""
 
     seen: set[str] = set()
     phrase_terms: list[str] = []
@@ -292,14 +337,7 @@ def _collect_matched_terms(
     title_text: str,
     abstract_text: str,
 ) -> list[str]:
-    """
-    汇总当前论文命中的关键词与短语。
-
-    中文说明：
-    1. 优先返回完整短语，方便观察“autonomous driving”这类核心主题是否直接命中；
-    2. 再补充 token 级命中，便于解释 score 的来源；
-    3. 保持返回顺序稳定，便于前端和 artifact 做差异对比。
-    """
+    """汇总当前论文命中的关键词和短语。"""
 
     matched_terms: list[str] = []
     seen: set[str] = set()
@@ -313,19 +351,13 @@ def _collect_matched_terms(
 
 
 def _normalize_text(text: str) -> str:
-    """统一文本大小写和空白，减少匹配噪声。"""
+    """统一大小写和空白，减少命中判断时的噪声。"""
 
     return " ".join(text.lower().split())
 
 
 def _score_threshold(tokens: list[str]) -> float:
-    """
-    根据评分 token 数量给出一个温和的最低分阈值。
-
-    中文说明：
-    这里不再只看原始 topic 的长度，而是看最终真正参与评分的 token 数量，
-    这样阈值才能和新的“topic + keywords 联合打分”策略保持一致。
-    """
+    """根据关键词数量给出一个比较温和的最低分阈值。"""
 
     token_count = len(tokens)
     if token_count >= 6:
@@ -333,3 +365,4 @@ def _score_threshold(tokens: list[str]) -> float:
     if token_count >= 3:
         return 2.5
     return 1.5
+

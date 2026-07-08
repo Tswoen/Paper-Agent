@@ -83,7 +83,7 @@ class GraphTest(unittest.TestCase):
         self.assertGreaterEqual(len(stub.calls), 1)
         self.assertEqual(stub.calls[0]["limit"], 5)
         self.assertGreaterEqual(len(result.papers), 1)
-        self.assertEqual(result.state["current_step"], "search")
+        self.assertEqual(result.state["current_step"], "reply")
         self.assertIn("agent", result.diagnostics)
         self.assertIn("search_scores", result.state)
         self.assertGreaterEqual(len(result.state["search_scores"]), 1)
@@ -133,7 +133,7 @@ class GraphTest(unittest.TestCase):
             event_types = [event["event_type"] for event in thread["events"]]
 
             self.assertIn("search_manifest.json", artifact_names)
-            self.assertIn("paper_search_completed", event_types)
+            self.assertIn("node_completed", event_types)
             self.assertGreaterEqual(len(result.state["search_artifact_refs"]), 1)
 
 

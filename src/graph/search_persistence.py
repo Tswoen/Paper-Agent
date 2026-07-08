@@ -15,7 +15,7 @@ JsonObject = dict[str, Any]
 
 @dataclass(slots=True)
 class SearchArtifactRef:
-    """描述一次检索落盘后的单个产物引用。"""
+    """描述一次检索落盘后生成的单个产物引用。"""
 
     artifact_id: str
     artifact_type: str
@@ -26,7 +26,7 @@ class SearchArtifactRef:
     metadata: JsonObject = field(default_factory=dict)
 
     def to_dict(self) -> JsonObject:
-        """把产物引用转换为普通字典。"""
+        """把产物引用转成普通字典，方便写回图状态。"""
 
         return {
             "artifact_id": self.artifact_id,
@@ -41,22 +41,22 @@ class SearchArtifactRef:
 
 @dataclass(slots=True)
 class SearchPersistenceResult:
-    """承载一次检索持久化后的轻量引用信息。"""
+    """承载一次检索写盘后需要给上层继续使用的结果。"""
 
     artifacts: list[SearchArtifactRef] = field(default_factory=list)
     manifest: JsonObject = field(default_factory=dict)
 
     def to_state_refs(self) -> list[JsonObject]:
-        """将引用转换成适合写回图状态的轻量结构。"""
+        """把产物引用转换成适合放进状态里的轻量结构。"""
 
         return [artifact.to_dict() for artifact in self.artifacts]
 
 
 class SearchPersistenceSink:
-    """把论文检索阶段结果持久化到会话存储系统。"""
+    """负责把检索阶段产生的结构化数据写入会话产物目录。"""
 
     def __init__(self, repo: SessionRepository, session_key: str, turn_id: str):
-        """初始化检索持久化 sink。"""
+        """初始化检索写盘组件。"""
 
         self.repo = repo
         self.session_key = session_key
@@ -73,36 +73,9 @@ class SearchPersistenceSink:
         agent_diagnostics: JsonObject,
         search_halted: bool,
     ) -> SearchPersistenceResult:
-        """把一次检索的结构化结果写入 event 与 artifact。"""
+        """把一次检索产物写成多个 JSON 文件，并返回它们的引用。"""
 
         now = utc_now()
-        self.repo.append_event(
-            self.session_key,
-            "paper_search_started",
-            content=topic,
-            metadata={
-                "turn_id": self.turn_id,
-                "topic": topic,
-                "max_results": intent.max_results,
-                "sources": list(intent.sources),
-                "year_from": intent.year_from,
-                "year_to": intent.year_to,
-            },
-            created_at=now,
-        )
-        self.repo.append_event(
-            self.session_key,
-            "paper_search_intent_ready",
-            content=topic,
-            metadata={
-                "turn_id": self.turn_id,
-                "intent": _intent_to_dict(intent),
-                "agent_diagnostics": dict(agent_diagnostics),
-                "search_halted": search_halted,
-            },
-            created_at=now,
-        )
-
         base_dir = f"artifacts/search/{self.turn_id}"
         artifacts: list[SearchArtifactRef] = []
 
@@ -165,20 +138,7 @@ class SearchPersistenceSink:
             payload=manifest,
         )
         artifacts.append(manifest_artifact)
-
-        self.repo.append_event(
-            self.session_key,
-            "paper_search_completed",
-            content=topic,
-            metadata={
-                "turn_id": self.turn_id,
-                "search_halted": search_halted,
-                "raw_paper_count": len(raw_papers),
-                "selected_paper_count": len(selected_papers),
-                "artifact_count": len(artifacts),
-            },
-            created_at=now,
-        )
+        manifest["artifacts"] = [artifact.to_dict() for artifact in artifacts]
         return SearchPersistenceResult(artifacts=artifacts, manifest=manifest)
 
     def _write_json_artifact(
@@ -189,7 +149,7 @@ class SearchPersistenceSink:
         relative_path: str,
         payload: JsonObject,
     ) -> SearchArtifactRef:
-        """把 JSON 产物写入会话目录，并返回结构化引用。"""
+        """把一个 JSON 产物写盘，并返回统一的产物引用。"""
 
         record = self.repo.write_artifact(
             self.session_key,
@@ -211,12 +171,13 @@ class SearchPersistenceSink:
 
 
 def _intent_to_dict(intent: SearchIntent) -> JsonObject:
-    """把检索意图转换为普通字典。"""
+    """把检索意图转成普通字典，方便写到 JSON 产物里。"""
 
     return asdict(intent)
 
 
 def _paper_to_dict(paper: PaperDocument) -> JsonObject:
-    """把论文对象转换为普通字典。"""
+    """把论文对象转成普通字典，方便写盘和调试。"""
 
     return paper.to_dict()
+
