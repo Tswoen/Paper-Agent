@@ -4,7 +4,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
-from src.graph.read_models import PaperReadResult
+from src.models.read_models import PaperReadResult
 from src.models.sessions import utc_now
 from src.repositories.sessions.base import SessionRepository
 
@@ -59,6 +59,27 @@ class ReadPersistenceSink:
             content=json.dumps(payload, ensure_ascii=False, indent=2),
             relative_path=f"artifacts/read/{self._turn_id}/read_manifest.json",
             metadata={"turn_id": self._turn_id, "format": "json"},
+        )
+        return ReadPersistenceResult(artifacts=[_artifact_ref(record)])
+
+    def persist_checkpoint(self, checkpoint: JsonObject) -> ReadPersistenceResult:
+        """保存阅读节点的可恢复现场，供模型或 embedding 修好后继续执行。"""
+
+        payload = dict(checkpoint)
+        payload.setdefault("turn_id", self._turn_id)
+        payload.setdefault("created_at", utc_now())
+        record = self._repo.write_artifact(
+            self._session_key,
+            artifact_type="paper_read_checkpoint",
+            name="read_checkpoint.json",
+            content=json.dumps(payload, ensure_ascii=False, indent=2),
+            relative_path=f"artifacts/read/{self._turn_id}/read_checkpoint.json",
+            metadata={
+                "turn_id": self._turn_id,
+                "format": "json",
+                "recovery_status": str(payload.get("recovery_status") or "waiting_model"),
+                "next_position": payload.get("next_position", 0),
+            },
         )
         return ReadPersistenceResult(artifacts=[_artifact_ref(record)])
 

@@ -27,6 +27,12 @@ class GraphRunResult:
 GraphState = State
 
 
+def _entrypoint(state: State) -> str:
+    """根据是否带阅读恢复现场决定从检索还是阅读节点开始。"""
+
+    return "run_read" if isinstance(state.get("read_resume_checkpoint"), dict) else "run_search_agent"
+
+
 def build_graph():
     """构建当前论文工作流使用的执行图。"""
 
@@ -34,7 +40,7 @@ def build_graph():
     workflow.add_node("run_search_agent", run_search_agent_node())
     workflow.add_node("run_read", run_read_node())
     workflow.add_node("compose_reply", run_compose_reply_node())
-    workflow.add_edge(START, "run_search_agent")
+    workflow.add_conditional_edges(START, _entrypoint, {"run_search_agent": "run_search_agent", "run_read": "run_read"})
     workflow.add_edge("run_search_agent", "run_read")
     workflow.add_edge("run_read", "compose_reply")
     workflow.add_edge("compose_reply", END)
@@ -96,6 +102,7 @@ def run_graph(
     # 中文注释：这个覆盖入口继续保留，方便测试时注入桩服务，不影响正式运行接口。
     if state_overrides:
         initial_state.update(state_overrides)
+    initial_state = _merge_read_checkpoint(initial_state)
 
     final_state = graph.invoke(initial_state)
     papers = list(final_state.get("search_results") or [])
@@ -105,6 +112,74 @@ def run_graph(
         state=dict(final_state),
         diagnostics=diagnostics,
     )
+
+
+def _merge_read_checkpoint(state: State) -> State:
+    """把恢复现场中的请求、检索结果和已读结果合并回初始状态。"""
+
+    checkpoint = state.get("read_resume_checkpoint")
+    if not isinstance(checkpoint, dict):
+        return state
+    request_payload = checkpoint.get("request")
+    if isinstance(request_payload, dict) and str(request_payload.get("topic") or "").strip():
+        state["request"] = ReviewRequest(
+            topic=str(request_payload.get("topic") or ""),
+            constraints=dict(request_payload.get("constraints") or {}),
+            language=str(request_payload.get("language") or "zh"),
+        )
+    search_results = _papers_from_checkpoint(checkpoint.get("search_results"))
+    if search_results and not state.get("search_results"):
+        state["search_results"] = search_results
+    if checkpoint.get("read_results") and not state.get("read_results"):
+        state["read_results"] = list(checkpoint.get("read_results") or [])
+    if checkpoint.get("read_artifact_refs") and not state.get("read_artifact_refs"):
+        state["read_artifact_refs"] = list(checkpoint.get("read_artifact_refs") or [])
+    # 中文注释：旧 checkpoint 只有阅读模型恢复一种情况，所以这里以前固定写成
+    # read_waiting_model。现在 embedding 也可能等待恢复，优先使用 checkpoint 自带步骤。
+    state["current_step"] = str(checkpoint.get("current_step") or "read_waiting_model")
+    return state
+
+
+def _papers_from_checkpoint(value: Any) -> list[PaperDocument]:
+    """从阅读 checkpoint 恢复检索论文列表。"""
+
+    if not isinstance(value, list):
+        return []
+    papers: list[PaperDocument] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        paper_id = str(item.get("id") or "").strip()
+        title = str(item.get("title") or "").strip()
+        if not paper_id or not title:
+            continue
+        papers.append(
+            PaperDocument(
+                id=paper_id,
+                title=title,
+                authors=[str(author).strip() for author in item.get("authors") or [] if str(author).strip()],
+                abstract=str(item.get("abstract")) if item.get("abstract") is not None else None,
+                year=_optional_int(item.get("year")),
+                venue=str(item.get("venue")) if item.get("venue") is not None else None,
+                url=str(item.get("url")) if item.get("url") is not None else None,
+                pdf_url=str(item.get("pdf_url")) if item.get("pdf_url") is not None else None,
+                doi=str(item.get("doi")) if item.get("doi") is not None else None,
+                source=str(item.get("source")) if item.get("source") is not None else None,
+                metadata=dict(item.get("metadata") or {}) if isinstance(item.get("metadata"), dict) else {},
+            )
+        )
+    return papers
+
+
+def _optional_int(value: Any) -> int | None:
+    """把 checkpoint 里的可选数字恢复为整数。"""
+
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _build_repository_emitter(repo: SessionRepository, session_key: str):

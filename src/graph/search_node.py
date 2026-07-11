@@ -7,7 +7,7 @@ from typing import Any, Protocol, cast
 from src.agents.base import AgentContext
 from src.agents.searchAgent import SearchAgent, SearchIntent, load_search_agent_llm
 from src.graph.runtime import WorkflowRuntimeContext
-from src.graph.search_persistence import SearchPersistenceSink
+from src.repositories.node_persistence.search_persistence import SearchPersistenceSink
 from src.graph.state_models import JsonObject, State
 from src.llm import ProviderSnapshot
 from src.paper_retrieval import PaperSearchService
@@ -107,7 +107,10 @@ def run_search_agent_node():
                 raw_paper_count=len(raw_papers),
             )
 
-        scored_papers = _score_papers(intent, raw_papers)
+        # 中文注释：检索节点先做“粗筛”，没有摘要的论文直接排除。
+        # 这样阅读节点拿到的论文都带有摘要，只需要负责后面的精筛和阅读。
+        abstract_papers = _filter_papers_with_abstract(raw_papers)
+        scored_papers = _score_papers(intent, abstract_papers)
         max_results = max(1, intent.max_results)
         search_results = [item.paper for item in scored_papers[:max_results]]
         search_scores = [item.to_dict() for item in scored_papers]
@@ -115,6 +118,8 @@ def run_search_agent_node():
             "topic": state["request"].topic,
             "search_halted": search_halted,
             "raw_paper_count": len(raw_papers),
+            "abstract_paper_count": len(abstract_papers),
+            "dropped_no_abstract_count": len(raw_papers) - len(abstract_papers),
             "selected_paper_count": len(search_results),
             "max_results": max_results,
             "sources": list(intent.sources),
@@ -164,6 +169,7 @@ def run_search_agent_node():
             search_scores=search_scores,
             search_summary=search_summary,
             search_artifact_refs=search_artifact_refs,
+            read_resume_checkpoint=state.get("read_resume_checkpoint", {}),
             diagnostics={"agent": agent_diagnostics},
             current_step="search",
             session_repo=state.get("session_repo"),
@@ -235,11 +241,28 @@ def _execute_search_intent(service: PaperSearchService, intent: SearchIntent) ->
     return collected
 
 
+def _filter_papers_with_abstract(papers: list[PaperDocument]) -> list[PaperDocument]:
+    """只保留带摘要的论文，让后面的打分能同时看标题和摘要。"""
+
+    filtered: list[PaperDocument] = []
+    for paper in papers:
+        # 中文注释：粗筛阶段不再把“没有摘要但可能有全文链接”的论文交给阅读节点，
+        # 因为阅读节点的精筛依赖标题和摘要一起判断相关性。
+        if not (paper.abstract or "").strip():
+            continue
+        filtered.append(paper)
+    return filtered
+
+
+
 def _score_papers(intent: SearchIntent, papers: list[PaperDocument]) -> list[ScoredPaper]:
     """根据检索意图对候选论文打分并排序。"""
 
-    tokens = _build_scoring_tokens(intent.keywords)
-    phrase_terms = _build_scoring_phrases(intent.keywords)
+    # 中文注释：粗筛打分时同时参考用户原始主题和模型提取的关键词，
+    # 再拿它们去论文标题、摘要里找命中，避免只看关键词导致主题信息丢失。
+    scoring_sources = [intent.topic, *intent.keywords]
+    tokens = _build_scoring_tokens(scoring_sources)
+    phrase_terms = _build_scoring_phrases(scoring_sources)
     threshold = _score_threshold(tokens)
     scored_items: list[ScoredPaper] = []
     for paper in papers:

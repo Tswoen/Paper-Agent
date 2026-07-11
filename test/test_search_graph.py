@@ -4,6 +4,7 @@ import unittest
 from graph import build_graph, run_graph
 from src.agents import ReviewRequest
 from src.llm.base import LLMResponse
+from src.llm.factory import ProviderSnapshot
 from src.paper_retrieval.models import PaperDocument, SearchResponse
 from src.repositories.sessions.sqlite import SQLiteSessionRepository
 
@@ -11,19 +12,41 @@ from src.repositories.sessions.sqlite import SQLiteSessionRepository
 class _FakeProvider:
     """为图测试提供稳定关键词输出，避免依赖真实模型配置。"""
 
+    def __init__(self, response_text: str | None = None, response: LLMResponse | None = None):
+        """允许不同节点复用同一个可配置假模型。"""
+
+        self.response_text = response_text or '{"keywords":["paper search","literature review"]}'
+        self.response = response
+
     def chat_with_retry(self, messages, **kwargs):
         """返回固定 JSON，确保搜索节点不会因为缺少 LLM 而终止。"""
 
-        return LLMResponse(content='{"keywords":["paper search","literature review"]}', finish_reason="stop")
+        if self.response is not None:
+            return self.response
+        return LLMResponse(content=self.response_text, finish_reason="stop")
 
 
-class _FakeSnapshot:
-    """最小化 LLM 快照，仅暴露 SearchAgent 需要的 provider。"""
+def _fake_snapshot(response_text: str | None = None, response: LLMResponse | None = None) -> ProviderSnapshot:
+    """构造可通过运行时类型检查的假 LLM 快照。"""
 
-    def __init__(self):
-        """初始化测试用 provider。"""
+    return ProviderSnapshot(
+        provider=_FakeProvider(response_text=response_text, response=response),
+        model="fake-model",
+        context_window_tokens=4096,
+        signature="fake-signature",
+    )
 
-        self.provider = _FakeProvider()
+
+def _read_snapshot() -> ProviderSnapshot:
+    """返回阅读节点可解析的固定 JSON 响应。"""
+
+    return _fake_snapshot(
+        response_text=(
+            '{"main_question":"agent search","methods":[],"datasets":[],"contributions":[],"limitations":[],'
+            '"main_results":[],"short_summary":"agent search summary","missing_information":[],'
+            '"evidence_level":"abstract","score":80,"decision":"abstract_only","reason":"matches topic"}'
+        )
+    )
 
 
 class _StubService:
@@ -48,6 +71,7 @@ class _StubService:
                     id=f"graph-paper-{source}",
                     title=f"LangGraph Powered Paper Search {source}",
                     authors=["Graph Tester"],
+                    abstract="LangGraph powered paper search uses agents to review literature.",
                     year=2026,
                     source=source,
                 )
@@ -76,7 +100,8 @@ class GraphTest(unittest.TestCase):
             ),
             state_overrides={
                 "search_node_service": stub,
-                "search_node_llm": _FakeSnapshot(),
+                "search_node_llm": _fake_snapshot(),
+                "read_node_llm": _read_snapshot(),
             },
         )
 
@@ -99,7 +124,8 @@ class GraphTest(unittest.TestCase):
             ),
             state_overrides={
                 "search_node_service": stub,
-                "search_node_llm": _FakeSnapshot(),
+                "search_node_llm": _fake_snapshot(),
+                "read_node_llm": _read_snapshot(),
             },
         )
 
@@ -124,7 +150,8 @@ class GraphTest(unittest.TestCase):
                 turn_id="turn-search-1",
                 state_overrides={
                     "search_node_service": stub,
-                    "search_node_llm": _FakeSnapshot(),
+                    "search_node_llm": _fake_snapshot(),
+                "read_node_llm": _read_snapshot(),
                 },
             )
 
@@ -135,6 +162,88 @@ class GraphTest(unittest.TestCase):
             self.assertIn("search_manifest.json", artifact_names)
             self.assertIn("node_completed", event_types)
             self.assertGreaterEqual(len(result.state["search_artifact_refs"]), 1)
+
+    def test_read_node_saves_checkpoint_when_model_is_unavailable(self):
+        """验证阅读模型不可用时不会走保守摘要，而是保存现场并中断。"""
+
+        stub = _StubService()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = SQLiteSessionRepository(storage_root=temp_dir)
+            session = repo.create("Paper read checkpoint")
+
+            with self.assertRaises(RuntimeError):
+                run_graph(
+                    ReviewRequest(
+                        topic="multi-agent literature review",
+                        constraints={"sources": ["openalex"], "max_results": 3},
+                    ),
+                    session_repo=repo,
+                    session_key=session.key,
+                    turn_id="turn-read-checkpoint",
+                    state_overrides={
+                        "search_node_service": stub,
+                        "search_node_llm": _fake_snapshot(),
+                        "read_node_llm": _fake_snapshot(
+                            response=LLMResponse(
+                                content="model unavailable",
+                                finish_reason="error",
+                                error_kind="server_error",
+                                error_status_code=503,
+                            )
+                        ),
+                    },
+                )
+
+            thread = repo.get(session.key).thread()
+            checkpoint_artifacts = [
+                artifact for artifact in thread["artifacts"] if artifact["artifact_type"] == "paper_read_checkpoint"
+            ]
+            failed_events = [event for event in thread["events"] if event["event_type"] == "node_failed"]
+
+            self.assertEqual(len(checkpoint_artifacts), 1)
+            self.assertEqual(checkpoint_artifacts[0]["name"], "read_checkpoint.json")
+            self.assertTrue(failed_events)
+            self.assertEqual(failed_events[-1]["metadata"]["recovery_status"], "waiting_model")
+
+    def test_read_node_can_resume_from_checkpoint(self):
+        """验证模型恢复可用后可跳过检索并从 checkpoint 继续阅读。"""
+
+        checkpoint = {
+            "request": {
+                "topic": "multi-agent literature review",
+                "constraints": {"sources": ["openalex"], "max_results": 3},
+                "language": "zh",
+            },
+            "search_results": [
+                {
+                    "id": "resume-paper-1",
+                    "title": "Resume Paper One",
+                    "authors": ["Tester"],
+                    "abstract": "multi-agent literature review",
+                    "year": 2026,
+                    "source": "openalex",
+                    "metadata": {},
+                }
+            ],
+            "read_results": [],
+            "read_artifact_refs": [],
+            "next_position": 1,
+        }
+        stub = _StubService()
+
+        result = run_graph(
+            ReviewRequest(topic="placeholder"),
+            state_overrides={
+                "read_resume_checkpoint": checkpoint,
+                "search_node_service": stub,
+                "read_node_llm": _read_snapshot(),
+            },
+        )
+
+        self.assertEqual(stub.calls, [])
+        self.assertEqual(result.state["current_step"], "reply")
+        self.assertEqual(result.state["search_results"][0].id, "resume-paper-1")
+        self.assertEqual(result.state["read_results"][0]["note"]["short_summary"], "agent search summary")
 
 
 if __name__ == "__main__":

@@ -130,8 +130,12 @@ class SessionRunService:
 
         body = body or {}
         content = str(body.get("content") or "")
-        if not content.strip() and not body.get("media"):
+        checkpoint = body.get("read_resume_checkpoint")
+        has_resume_checkpoint = isinstance(checkpoint, dict)
+        if not content.strip() and not body.get("media") and not has_resume_checkpoint:
             raise ValueError("content is required")
+        if has_resume_checkpoint and not content.strip():
+            content = _content_from_checkpoint(checkpoint)
 
         record = self.repo.get(session_key)
         if record.run_started_at or record.status == "running":
@@ -426,6 +430,17 @@ class SessionRunService:
         normalized_event["turn_id"] = str(normalized_event.get("turn_id") or turn_id)
         normalized_event["timestamp"] = str(normalized_event.get("timestamp") or utc_now())
         return normalized_event
+
+
+def _content_from_checkpoint(checkpoint: JsonObject) -> str:
+    """恢复执行时没有新输入内容则沿用 checkpoint 里的原始主题。"""
+
+    request = checkpoint.get("request")
+    if isinstance(request, dict):
+        topic = str(request.get("topic") or "").strip()
+        if topic:
+            return topic
+    return "继续阅读恢复现场"
 
 
 def encode_sse(event: JsonObject) -> str:

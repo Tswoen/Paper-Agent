@@ -12,8 +12,8 @@ from src.services.sessions import RuntimeEventEmitter
 JsonObject = dict[str, Any]
 
 
-def build_search_message_handler(repo: SessionRepository):
-    """构建基于论文工作流的消息处理器。"""
+def build_paper_workflow_message_handler(repo: SessionRepository):
+    """构建把会话消息交给论文工作流执行的处理器。"""
 
     def _handler(chat_id: str, content: str, frame: JsonObject, emit: RuntimeEventEmitter) -> None:
         """把会话输入交给工作流执行，并把同步能力注入图状态。"""
@@ -37,12 +37,34 @@ def build_search_message_handler(repo: SessionRepository):
                 ),
             )
 
+        checkpoint = frame.get("read_resume_checkpoint")
+        request = _request_from_checkpoint(checkpoint) or ReviewRequest(topic=content)
+        state_overrides = {"read_resume_checkpoint": checkpoint} if isinstance(checkpoint, dict) else None
         run_graph(
-            ReviewRequest(topic=content),
+            request,
             runtime=runtime,
             session_repo=repo,
             session_key=chat_id,
             turn_id=turn_id,
+            state_overrides=state_overrides,
         )
 
     return _handler
+
+
+def _request_from_checkpoint(checkpoint: Any) -> ReviewRequest | None:
+    """恢复执行时优先沿用 checkpoint 里的原始请求。"""
+
+    if not isinstance(checkpoint, dict):
+        return None
+    payload = checkpoint.get("request")
+    if not isinstance(payload, dict):
+        return None
+    topic = str(payload.get("topic") or "").strip()
+    if not topic:
+        return None
+    return ReviewRequest(
+        topic=topic,
+        constraints=dict(payload.get("constraints") or {}),
+        language=str(payload.get("language") or "zh"),
+    )

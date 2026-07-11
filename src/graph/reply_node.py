@@ -75,6 +75,7 @@ def run_compose_reply_node():
             read_results=read_results,
             read_summary=read_summary,
             read_artifact_refs=read_artifact_refs,
+            read_resume_checkpoint=state.get("read_resume_checkpoint", {}),
             diagnostics=diagnostics,
             current_step="reply",
             session_repo=state.get("session_repo"),

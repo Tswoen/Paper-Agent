@@ -16,6 +16,10 @@ const STREAM_EVENTS = [
   "tool",
   "artifact",
   "status",
+  "node_started",
+  "node_progress",
+  "node_completed",
+  "node_failed",
   "error",
   "turn_end",
 ] as const;
