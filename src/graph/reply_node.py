@@ -15,8 +15,11 @@ def run_compose_reply_node():
         runtime = state.get("runtime_context")
         reporter = _resolve_reporter(runtime)
         papers = list(state.get("search_results") or [])
+        read_results = list(state.get("read_results") or [])
         summary = dict(state.get("search_summary") or {})
+        read_summary = dict(state.get("read_summary") or {})
         artifact_refs = list(state.get("search_artifact_refs") or [])
+        read_artifact_refs = list(state.get("read_artifact_refs") or [])
         diagnostics = dict(state.get("diagnostics") or {})
 
         if reporter is not None:
@@ -26,18 +29,28 @@ def run_compose_reply_node():
         if not papers:
             assistant_text = "未检索到符合条件的论文结果。"
         else:
-            lines = ["已完成论文检索，候选结果如下："]
+            lines = ["已完成论文检索与阅读，结果如下："]
+            results_by_paper_id = {str(item.get("paper", {}).get("id") or ""): item for item in read_results}
             for index, paper in enumerate(papers[:5], start=1):
-                author_text = "、".join(paper.authors[:3]) if paper.authors else "作者未知"
-                year_text = str(paper.year) if paper.year is not None else "年份未知"
-                source_text = paper.source or "unknown"
-                lines.append(f"{index}. {paper.title} | {author_text} | {year_text} | {source_text}")
+                result = results_by_paper_id.get(paper.id, {})
+                relevance = dict(result.get("relevance") or {})
+                note = dict(result.get("note") or {})
+                full_text = dict(result.get("full_text") or {})
+                decision = relevance.get("decision") or "insufficient"
+                score = relevance.get("score") if relevance.get("score") is not None else "-"
+                short_summary = str(note.get("short_summary") or "暂无可用摘要笔记")
+                lines.append(
+                    f"{index}. {paper.title} | 相关度 {score} | {decision} | 全文状态："
+                    f"{full_text.get('status') or 'not_requested'}\n   {short_summary}"
+                )
             assistant_text = "\n".join(lines)
 
         assistant_metadata: JsonObject = {
             "diagnostics": diagnostics,
             "search_summary": summary,
             "search_artifact_refs": artifact_refs,
+            "read_summary": read_summary,
+            "read_artifact_refs": read_artifact_refs,
         }
 
         if reporter is not None:
@@ -59,6 +72,9 @@ def run_compose_reply_node():
             search_scores=list(state.get("search_scores") or []),
             search_summary=summary,
             search_artifact_refs=artifact_refs,
+            read_results=read_results,
+            read_summary=read_summary,
+            read_artifact_refs=read_artifact_refs,
             diagnostics=diagnostics,
             current_step="reply",
             session_repo=state.get("session_repo"),
@@ -66,6 +82,7 @@ def run_compose_reply_node():
             turn_id=state.get("turn_id"),
             search_node_service=state.get("search_node_service"),
             search_node_llm=state.get("search_node_llm"),
+            read_node_llm=state.get("read_node_llm"),
             search_node_sink=state.get("search_node_sink"),
             runtime_context=runtime,
             assistant_message=assistant_text,

@@ -171,6 +171,7 @@ def run_search_agent_node():
             turn_id=state.get("turn_id"),
             search_node_service=state.get("search_node_service"),
             search_node_llm=state.get("search_node_llm"),
+            read_node_llm=state.get("read_node_llm"),
             search_node_sink=state.get("search_node_sink"),
             runtime_context=state.get("runtime_context"),
             assistant_message=state.get("assistant_message", ""),

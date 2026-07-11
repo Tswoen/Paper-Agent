@@ -7,7 +7,8 @@ from langgraph.graph import END, START, StateGraph
 
 from src.agents.contracts import ReviewRequest
 from src.graph.reply_node import run_compose_reply_node
-from src.graph.runtime import WorkflowRuntimeContext
+from src.graph.read_node import run_read_node
+from src.graph.runtime import InlineWorkflowSyncPort, WorkflowRuntimeContext
 from src.graph.search_node import run_search_agent_node
 from src.graph.state_models import State
 from src.paper_retrieval.models import PaperDocument
@@ -31,9 +32,11 @@ def build_graph():
 
     workflow = StateGraph(State)
     workflow.add_node("run_search_agent", run_search_agent_node())
+    workflow.add_node("run_read", run_read_node())
     workflow.add_node("compose_reply", run_compose_reply_node())
     workflow.add_edge(START, "run_search_agent")
-    workflow.add_edge("run_search_agent", "compose_reply")
+    workflow.add_edge("run_search_agent", "run_read")
+    workflow.add_edge("run_read", "compose_reply")
     workflow.add_edge("compose_reply", END)
     return workflow.compile(name="paper_graph")
 
@@ -57,11 +60,28 @@ def run_graph(
         search_scores=[],
         search_summary={},
         search_artifact_refs=[],
+        read_results=[],
+        read_summary={},
+        read_artifact_refs=[],
         diagnostics={},
         current_step="init",
         assistant_message="",
         assistant_message_metadata={},
     )
+
+    # 中文注释：直接从脚本调用且传入会话时，也建立最小进度上报能力，保证产物和进度记录不会分离。
+    if runtime is None and session_repo is not None and session_key and turn_id:
+        runtime = WorkflowRuntimeContext(
+            session_key=session_key,
+            turn_id=turn_id,
+            workflow_name="paper_graph",
+            sync_port=InlineWorkflowSyncPort(
+                _build_repository_emitter(session_repo, session_key),
+                session_key=session_key,
+                turn_id=turn_id,
+                workflow_name="paper_graph",
+            ),
+        )
 
     # 中文注释：会话信息、运行信息和节点依赖都放进共享状态，让节点自己决定何时同步中间结果。
     if session_repo is not None:
@@ -85,4 +105,21 @@ def run_graph(
         state=dict(final_state),
         diagnostics=diagnostics,
     )
+
+
+def _build_repository_emitter(repo: SessionRepository, session_key: str):
+    """构造直接写入会话仓储的进度发送函数，供没有 API 外层的调用场景使用。"""
+
+    def _emit(event: dict[str, Any]) -> dict[str, Any]:
+        """把工作流事件写入会话记录后原样返回，保持同步端口的调用约定。"""
+
+        repo.append_event(
+            session_key,
+            str(event.get("event") or "workflow_event"),
+            content=str(event.get("message") or event.get("content") or ""),
+            metadata=dict(event),
+        )
+        return event
+
+    return _emit
 

@@ -7,3 +7,15 @@ defaults:
   embedding:
     dimensions: null
     batch_size: 32
+
+read:
+  agent_name: default_agent
+  paper_cache_dir: data/paper_cache
+  deep_score_threshold: 75
+  connect_timeout_seconds: 10
+  download_timeout_seconds: 60
+  max_file_size_mb: 50
+  chunk_size: 1200
+  chunk_overlap: 150
+  vector_store_path: data/vector_store
+  vector_store_collection: papers

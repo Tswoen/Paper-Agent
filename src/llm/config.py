@@ -44,11 +44,28 @@ class EmbeddingDefaults:
 
 
 @dataclass(slots=True)
+class ReadDefaults:
+    """保存阅读节点需要的本地处理参数。"""
+
+    agent_name: str = "default_agent"
+    paper_cache_dir: str = "data/paper_cache"
+    deep_score_threshold: int = 75
+    connect_timeout_seconds: int = 10
+    download_timeout_seconds: int = 60
+    max_file_size_mb: int = 50
+    chunk_size: int = 1200
+    chunk_overlap: int = 150
+    vector_store_path: str = "data/vector_store"
+    vector_store_collection: str = "papers"
+
+
+@dataclass(slots=True)
 class SystemConfig:
     """从 config/system.yaml 读取的系统默认值。"""
 
     llm: LLMDefaults = field(default_factory=LLMDefaults)
     embedding: EmbeddingDefaults = field(default_factory=EmbeddingDefaults)
+    read: ReadDefaults = field(default_factory=ReadDefaults)
 
     @classmethod
     def load(cls, path: str | Path = "config/system.yaml") -> "SystemConfig":
@@ -62,6 +79,7 @@ class SystemConfig:
         defaults = dict((data or {}).get("defaults") or {})
         llm = dict(defaults.get("llm") or {})
         embedding = dict(defaults.get("embedding") or {})
+        read = dict((data or {}).get("read") or {})
         return cls(
             llm=LLMDefaults(
                 temperature=llm.get("temperature", 0.7),
@@ -72,6 +90,18 @@ class SystemConfig:
             embedding=EmbeddingDefaults(
                 dimensions=embedding.get("dimensions"),
                 batch_size=embedding.get("batch_size", 32),
+            ),
+            read=ReadDefaults(
+                agent_name=str(read.get("agent_name") or "default_agent"),
+                paper_cache_dir=str(read.get("paper_cache_dir") or "data/paper_cache"),
+                deep_score_threshold=_read_positive_int(read.get("deep_score_threshold"), 75, maximum=100),
+                connect_timeout_seconds=_read_positive_int(read.get("connect_timeout_seconds"), 10),
+                download_timeout_seconds=_read_positive_int(read.get("download_timeout_seconds"), 60),
+                max_file_size_mb=_read_positive_int(read.get("max_file_size_mb"), 50),
+                chunk_size=_read_positive_int(read.get("chunk_size"), 1200),
+                chunk_overlap=_read_non_negative_int(read.get("chunk_overlap"), 150),
+                vector_store_path=str(read.get("vector_store_path") or "data/vector_store"),
+                vector_store_collection=str(read.get("vector_store_collection") or "papers"),
             ),
         )
 
@@ -164,6 +194,29 @@ class ModelConfig:
         if self.default_embedding_profile in self.embedding_profiles:
             return self.embedding_profiles[self.default_embedding_profile]
         raise ValueError(f"unknown embedding profile: {profile_name}")
+
+    def resolve_embedding_provider_config(self, name: str | None = None) -> tuple[EmbeddingProfile, ProviderConfig]:
+        """解析 embedding 模型及其连接配置，并补齐环境变量中的密钥和默认地址。"""
+
+        profile = self.resolve_embedding_profile(name)
+        try:
+            provider_config = self.providers[profile.provider]
+        except KeyError as exc:
+            raise ValueError(f"unknown embedding provider: {profile.provider}") from exc
+        spec = match_provider_backend(provider_config.backend)
+        env_key = provider_config.api_key_env or spec.env_key
+        api_key = provider_config.api_key or os.getenv(env_key)
+        api_base = provider_config.api_base or spec.default_api_base
+        if not api_base:
+            raise ValueError(f"embedding provider {profile.provider} requires api_base")
+        return profile, ProviderConfig(
+            spec.name,
+            api_key,
+            env_key,
+            api_base,
+            provider_config.extra_headers,
+            provider_config.extra_body,
+        )
 
 
 def _normalize_model_data(data: Mapping[str, Any]) -> JsonObject:
@@ -270,3 +323,25 @@ def _parse_scalar(value: str) -> Any:
         return float(value)
     except ValueError:
         return value.strip('"').strip("'")
+
+
+def _read_positive_int(value: Any, default: int, *, maximum: int | None = None) -> int:
+    """把阅读配置中的正整数安全转换出来，异常值回退到默认值。"""
+
+    try:
+        resolved = int(value)
+    except (TypeError, ValueError):
+        return default
+    if resolved <= 0:
+        return default
+    return min(resolved, maximum) if maximum is not None else resolved
+
+
+def _read_non_negative_int(value: Any, default: int) -> int:
+    """把允许为零的阅读配置安全转换为整数，避免切片参数出现负数。"""
+
+    try:
+        resolved = int(value)
+    except (TypeError, ValueError):
+        return default
+    return resolved if resolved >= 0 else default
