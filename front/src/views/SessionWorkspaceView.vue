@@ -325,9 +325,9 @@ function emptyThreadFromSummary(summary: SessionSummary): SessionThread {
   };
 }
 
-/** 中文注释：只要时间线里已经有消息、节点或产物，就说明它不是空白会话，应该展示 Live Timeline。 */
+/** 中文注释：只要时间线里已经有消息、执行事件或产物，就说明它不是空白会话，应该展示执行过程。 */
 function hasTimelineContent(snapshot: SessionTimelineSnapshot | null) {
-  return Boolean(snapshot && (snapshot.messages.length || snapshot.nodeGroups.length || snapshot.artifacts.length));
+  return Boolean(snapshot && (snapshot.messages.length || snapshot.runtimeEvents.length || snapshot.artifacts.length));
 }
 
 function statusTone(status: string) {

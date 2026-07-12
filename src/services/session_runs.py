@@ -454,14 +454,23 @@ def _latest_read_resume_checkpoint(record: SessionRecord) -> JsonObject | None:
 
     # 中文注释：事件是按时间从早到晚保存的，所以倒着找，最先遇到的就是最近一次失败。
     for event in reversed(record.events):
-        if str(event.get("event_type") or "") != "node_failed":
-            continue
         metadata = event.get("metadata")
         if not isinstance(metadata, dict):
             continue
-        checkpoint = metadata.get("checkpoint")
-        if isinstance(checkpoint, dict):
-            return copy.deepcopy(checkpoint)
+
+        # 中文注释：新版执行过程统一用 runtime_event，checkpoint 会放在 runtime_event.metadata.checkpoint 里。
+        # 这里保留旧 node_failed 的读取方式，是为了用户从旧失败现场继续时也能找到恢复数据。
+        event_type = str(event.get("event_type") or "")
+        if event_type == "runtime_event":
+            runtime_metadata = metadata.get("metadata")
+            if isinstance(runtime_metadata, dict):
+                checkpoint = runtime_metadata.get("checkpoint")
+                if isinstance(checkpoint, dict):
+                    return copy.deepcopy(checkpoint)
+        if event_type == "node_failed":
+            checkpoint = metadata.get("checkpoint")
+            if isinstance(checkpoint, dict):
+                return copy.deepcopy(checkpoint)
     return None
 
 

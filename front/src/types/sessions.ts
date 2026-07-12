@@ -76,6 +76,8 @@ export interface SessionRunStartPayload {
   resume_from_last_checkpoint?: boolean;
 }
 
+export type RuntimeDetailContent = string | Record<string, unknown> | null;
+
 export interface SessionRuntimeEvent {
   event: string;
   session_key: string;
@@ -92,6 +94,15 @@ export interface SessionRuntimeEvent {
   status?: string;
   run_started_at?: string | null;
   step?: string;
+  id?: string;
+  parent_id?: string | null;
+  type?: string;
+  title?: string;
+  show_content?: string;
+  detail_content?: RuntimeDetailContent;
+  created_at?: string | null;
+  updated_at?: string | null;
+  completed_at?: string | null;
   node_key?: string;
   node_title?: string;
   stage?: string;
@@ -128,38 +139,31 @@ export interface UISessionMessage {
   createdAt: string | null;
 }
 
-export type UINodeTimelineStatus = "running" | "completed" | "failed";
-
-export interface UINodeTimelineEntry {
+export interface UIRuntimeTimelineEvent {
   id: string;
-  event: string;
-  label: string;
-  message: string;
-  stage: string | null;
-  timestamp: string | null;
-  raw: SessionRuntimeEvent;
-}
-
-export interface UINodeTimelineGroup {
-  id: string;
-  nodeKey: string;
-  nodeTitle: string;
-  status: UINodeTimelineStatus;
-  startedAt: string | null;
+  parentId: string | null;
+  type: string;
+  title: string;
+  status: string;
+  showContent: string;
+  detailContent: RuntimeDetailContent;
+  metadata: Record<string, unknown>;
+  createdAt: string | null;
+  updatedAt: string | null;
   completedAt: string | null;
-  latestMessage: string;
+  children: UIRuntimeTimelineEvent[];
   isCollapsed: boolean;
   resumeAvailable: boolean;
   recoveryStatus: string | null;
   nextPosition: number | null;
   completed: number | null;
   total: number | null;
-  entries: UINodeTimelineEntry[];
+  raw: SessionRuntimeEvent;
 }
 
 export interface SessionTimelineSnapshot {
   messages: UISessionMessage[];
-  nodeGroups: UINodeTimelineGroup[];
+  runtimeEvents: UIRuntimeTimelineEvent[];
   activeNodeKey: string | null;
   artifacts: SessionArtifact[];
   isStreaming: boolean;

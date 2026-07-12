@@ -1,8 +1,6 @@
 <script setup lang="ts">
 import {
   Bot,
-  CheckCircle2,
-  CircleDotDashed,
   FileStack,
   LoaderCircle,
   SearchCheck,
@@ -12,12 +10,11 @@ import {
 } from "lucide-vue-next";
 
 import StatusPill from "../StatusPill.vue";
+import RuntimeEventTree from "./RuntimeEventTree.vue";
 import { createRandomId } from "../../lib/random-id";
 import type {
   SessionArtifact,
   SessionTimelineSnapshot,
-  UINodeTimelineEntry,
-  UINodeTimelineGroup,
   UISessionMessage,
 } from "../../types/sessions";
 
@@ -45,47 +42,14 @@ function messageIcon(message: UISessionMessage) {
 }
 
 function statusTone(status: string) {
-  if (status === "completed") {
+  if (status === "completed" || status === "success") {
     return "success";
   }
-  if (status === "running") {
+  if (status === "running" || status === "pending") {
     return "warning";
   }
-  if (status === "failed") {
+  if (status === "failed" || status === "error") {
     return "danger";
-  }
-  return "neutral";
-}
-
-function nodeIcon(group: UINodeTimelineGroup) {
-  if (group.status === "completed") {
-    return CheckCircle2;
-  }
-  if (group.status === "failed") {
-    return TriangleAlert;
-  }
-  return CircleDotDashed;
-}
-
-function nodeStatusLabel(status: UINodeTimelineGroup["status"]) {
-  if (status === "completed") {
-    return "已完成";
-  }
-  if (status === "failed") {
-    return "执行失败";
-  }
-  return "执行中";
-}
-
-function nodeEventTone(entry: UINodeTimelineEntry) {
-  if (entry.event === "node_completed") {
-    return "success";
-  }
-  if (entry.event === "node_failed") {
-    return "danger";
-  }
-  if (entry.event === "node_started") {
-    return "warning";
   }
   return "neutral";
 }
@@ -131,18 +95,7 @@ function artifactTime(artifact: Record<string, unknown>) {
 }
 
 function hasTimelineContent(snapshot: SessionTimelineSnapshot | null) {
-  return Boolean(snapshot && (snapshot.messages.length || snapshot.nodeGroups.length || snapshot.artifacts.length));
-}
-
-/** 中文注释：把恢复进度整理成一句短提示，只告诉用户可以继续，不展示复杂的恢复数据。 */
-function resumeHint(group: UINodeTimelineGroup) {
-  if (group.completed !== null && group.total !== null) {
-    return `已完成 ${group.completed}/${group.total}，可从失败位置继续`;
-  }
-  if (group.nextPosition !== null) {
-    return `将从第 ${group.nextPosition + 1} 项附近继续`;
-  }
-  return "可从上次失败位置继续";
+  return Boolean(snapshot && (snapshot.messages.length || snapshot.runtimeEvents.length || snapshot.artifacts.length));
 }
 </script>
 
@@ -150,8 +103,8 @@ function resumeHint(group: UINodeTimelineGroup) {
   <section class="session-timeline-card">
     <div class="session-timeline-head">
       <div>
-        <span class="eyebrow">Live Timeline</span>
-        <h2>{{ title || "会话时间线" }}</h2>
+        <span class="eyebrow">Execution Flow</span>
+        <h2>{{ title || "执行过程" }}</h2>
       </div>
       <StatusPill
         :tone="statusTone(snapshot?.status ?? 'created')"
@@ -235,63 +188,12 @@ function resumeHint(group: UINodeTimelineGroup) {
         </article>
       </div>
 
-      <section v-if="snapshot?.nodeGroups.length" class="session-node-groups">
-        <div class="session-node-groups-head">
-          <span class="eyebrow">Node Timeline</span>
-          <p>每个节点的执行过程会放在一起，完成后自动收起，方便只关注正在运行的节点。</p>
+      <section v-if="snapshot?.runtimeEvents.length" class="runtime-event-section">
+        <div class="runtime-event-section-head">
+          <h3>执行过程</h3>
+          <p>同一个事件会在原位置更新，子事件按照后端传来的 parent_id 自动缩进展示。</p>
         </div>
-
-        <!-- 中文注释：这里用浏览器自带的 details 折叠能力，不额外保存展开状态，结构更简单。 -->
-        <details
-          v-for="group in snapshot.nodeGroups"
-          :key="group.id"
-          class="session-node-group"
-          :data-status="group.status"
-          :open="!group.isCollapsed"
-        >
-          <summary class="session-node-group-summary">
-            <span class="session-node-icon">
-              <component :is="nodeIcon(group)" :size="15" />
-            </span>
-            <span class="session-node-title-block">
-              <strong>{{ group.nodeTitle }}</strong>
-              <small>{{ group.latestMessage }}</small>
-            </span>
-            <span class="session-node-meta">
-              <StatusPill :tone="statusTone(group.status)" :label="nodeStatusLabel(group.status)" />
-              <span>{{ group.entries.length }} 步</span>
-              <span>{{ formatTime(group.completedAt ?? group.startedAt) }}</span>
-              <button
-                v-if="group.resumeAvailable"
-                class="button compact session-resume-button"
-                type="button"
-                @click.stop.prevent="emit('resume')"
-              >
-                继续执行
-              </button>
-            </span>
-          </summary>
-
-          <p v-if="group.resumeAvailable" class="session-resume-hint">{{ resumeHint(group) }}</p>
-
-          <ol class="session-node-event-list">
-            <li
-              v-for="entry in group.entries"
-              :key="entry.id"
-              class="session-node-event"
-              :data-tone="nodeEventTone(entry)"
-            >
-              <div class="session-node-event-mark">{{ entry.label }}</div>
-              <div class="session-node-event-body">
-                <div class="session-node-event-meta">
-                  <strong>{{ entry.stage || "节点更新" }}</strong>
-                  <span>{{ formatTime(entry.timestamp) }}</span>
-                </div>
-                <p>{{ entry.message }}</p>
-              </div>
-            </li>
-          </ol>
-        </details>
+        <RuntimeEventTree :events="snapshot.runtimeEvents" @resume="emit('resume')" />
       </section>
 
       <section v-if="snapshot?.artifacts.length" class="session-artifact-panel">

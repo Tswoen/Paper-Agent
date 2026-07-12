@@ -1,12 +1,11 @@
 import type {
+  RuntimeDetailContent,
   SessionArtifact,
   SessionRuntimeEvent,
   SessionThread,
   SessionTimelineSnapshot,
   StoredSessionEvent,
-  UINodeTimelineEntry,
-  UINodeTimelineGroup,
-  UINodeTimelineStatus,
+  UIRuntimeTimelineEvent,
   UISessionMessage,
 } from "../types/sessions";
 import { createRandomId } from "./random-id";
@@ -28,16 +27,36 @@ function createMessage(partial: Partial<UISessionMessage>): UISessionMessage {
   };
 }
 
-const NODE_EVENT_LABELS: Record<string, string> = {
-  node_started: "开始",
-  node_progress: "进行中",
-  node_completed: "完成",
-  node_failed: "失败",
-};
+function createRuntimeEvent(partial: Partial<UIRuntimeTimelineEvent> & { id: string }): UIRuntimeTimelineEvent {
+  return {
+    id: partial.id,
+    parentId: partial.parentId ?? null,
+    type: partial.type ?? "runtime_event",
+    title: partial.title ?? "执行事件",
+    status: partial.status ?? "running",
+    showContent: partial.showContent ?? "正在处理",
+    detailContent: partial.detailContent ?? null,
+    metadata: partial.metadata ?? {},
+    createdAt: partial.createdAt ?? null,
+    updatedAt: partial.updatedAt ?? null,
+    completedAt: partial.completedAt ?? null,
+    children: partial.children ?? [],
+    isCollapsed: partial.isCollapsed ?? false,
+    resumeAvailable: partial.resumeAvailable ?? false,
+    recoveryStatus: partial.recoveryStatus ?? null,
+    nextPosition: partial.nextPosition ?? null,
+    completed: partial.completed ?? null,
+    total: partial.total ?? null,
+    raw: partial.raw ?? ({ event: "runtime_event", session_key: "" } as SessionRuntimeEvent),
+  };
+}
+
+const FINISHED_STATUSES = new Set(["completed", "failed", "cancelled", "skipped"]);
 
 export class SessionStreamAggregator {
   private messages: UISessionMessage[] = [];
-  private nodeGroups: UINodeTimelineGroup[] = [];
+  private runtimeEvents: UIRuntimeTimelineEvent[] = [];
+  private runtimeEventMap = new Map<string, UIRuntimeTimelineEvent>();
   private artifacts: SessionArtifact[] = [];
   private isStreaming = false;
   private runStartedAt: string | null = null;
@@ -49,8 +68,9 @@ export class SessionStreamAggregator {
   /** 用线程快照重建时间线状态，保证历史回放和实时展示走同一条路。 */
   hydrate(thread: SessionThread) {
     this.messages = [];
-    // 中文注释：节点过程单独放在 nodeGroups 里，不再混进普通消息列表，避免时间线越跑越长。
-    this.nodeGroups = [];
+    // 中文注释：执行过程现在统一放在 runtimeEvents 里，前端只按 id 更新事件，不再追加旧 node 行。
+    this.runtimeEvents = [];
+    this.runtimeEventMap = new Map();
     this.artifacts = [...thread.artifacts];
     this.isStreaming = thread.status === "running" || thread.has_pending_tool_calls;
     this.runStartedAt = thread.run_started_at;
@@ -65,7 +85,7 @@ export class SessionStreamAggregator {
       }
     }
 
-    // 中文注释：兼容老数据，如果历史里还没有完整事件流，就退回消息表重建最基础的展示。
+    // 中文注释：兼容没有事件流的老数据，如果历史里没有消息事件，就从消息表重建基础聊天内容。
     if (this.messages.length === 0) {
       for (const message of thread.messages) {
         this.messages.push(
@@ -102,6 +122,9 @@ export class SessionStreamAggregator {
   /** 应用一条运行事件，并把它折叠成前端可直接渲染的快照。 */
   apply(event: SessionRuntimeEvent) {
     switch (event.event) {
+      case "runtime_event":
+        this.applyRuntimeEvent(event);
+        return;
       case "message":
         this.applyMessageEvent(event);
         return;
@@ -132,12 +155,6 @@ export class SessionStreamAggregator {
           this.stopActiveAssistantStreaming();
           this.activeNodeKey = null;
         }
-        return;
-      case "node_started":
-      case "node_progress":
-      case "node_completed":
-      case "node_failed":
-        this.applyNodeEvent(event);
         return;
       case "error":
         this.streamError = event;
@@ -170,10 +187,7 @@ export class SessionStreamAggregator {
   snapshot(): SessionTimelineSnapshot {
     return {
       messages: [...this.messages],
-      nodeGroups: this.nodeGroups.map((group) => ({
-        ...group,
-        entries: group.entries.map((entry) => ({ ...entry })),
-      })),
+      runtimeEvents: this.runtimeEvents.map((event) => this.cloneRuntimeEvent(event)),
       activeNodeKey: this.activeNodeKey,
       artifacts: [...this.artifacts],
       isStreaming: this.isStreaming,
@@ -260,22 +274,28 @@ export class SessionStreamAggregator {
     this.status = "running";
   }
 
-  /** 把节点级事件归到同一个节点组里，避免每一步都变成一张很大的消息卡片。 */
-  private applyNodeEvent(event: SessionRuntimeEvent) {
-    const group = this.ensureNodeGroup(event);
-    const entry = this.createNodeEntry(event);
-    group.entries.push(entry);
-    group.latestMessage = entry.message || entry.label;
-
-    if (event.event === "node_started" && !group.startedAt) {
-      group.startedAt = entry.timestamp;
+  /** 按 runtime_event.id 更新执行过程；同一个 id 永远只显示一个事件。 */
+  private applyRuntimeEvent(event: SessionRuntimeEvent) {
+    const eventId = String(event.id ?? "").trim();
+    if (!eventId) {
+      return;
     }
 
-    if (event.event === "node_failed") {
-      if (this.hasRecoveryCheckpoint(event)) {
-        this.markLatestResumeGroup(group, event);
-      }
-      this.updateNodeGroup(group, "failed", entry.timestamp, false);
+    const item = this.ensureRuntimeEvent(eventId);
+    this.updateRuntimeEvent(item, event);
+
+    if (item.parentId) {
+      const parent = this.ensureRuntimeEvent(item.parentId);
+      this.attachChild(parent, item);
+    } else {
+      this.attachRoot(item);
+    }
+
+    if (item.status === "failed" && this.hasRecoveryCheckpoint(item)) {
+      this.markLatestResumeEvent(item);
+    }
+
+    if (item.status === "failed") {
       this.status = "failed";
       this.isStreaming = false;
       this.activeNodeKey = null;
@@ -283,46 +303,89 @@ export class SessionStreamAggregator {
       return;
     }
 
-    if (event.event === "node_completed") {
-      this.updateNodeGroup(group, "completed", entry.timestamp, true);
-      if (this.activeNodeKey === group.nodeKey) {
-        this.activeNodeKey = null;
-      }
-      // 中文注释：节点完成不代表整个工作流结束，所以这里不关闭整体运行状态，等待 turn_end 来最终收尾。
+    if (item.status === "running") {
       this.status = "running";
       this.isStreaming = true;
+      this.activeNodeKey = this.nodeKeyFromRuntimeEvent(item);
       return;
     }
 
-    this.updateNodeGroup(group, "running", null, false);
-    this.status = "running";
-    this.isStreaming = true;
-    this.activeNodeKey = group.nodeKey;
+    if (item.status === "completed") {
+      // 中文注释：某个事件完成不代表整个工作流完成，所以这里只更新事件本身，最终状态仍等 turn_end。
+      this.status = this.status === "created" ? "running" : this.status;
+    }
+  }
+
+  /** 找到或创建一个执行事件，子事件先到时也能先占位。 */
+  private ensureRuntimeEvent(id: string): UIRuntimeTimelineEvent {
+    const existing = this.runtimeEventMap.get(id);
+    if (existing) {
+      return existing;
+    }
+    const item = createRuntimeEvent({
+      id,
+      title: "执行事件",
+      showContent: "等待事件详情",
+      raw: { event: "runtime_event", session_key: "" },
+    });
+    this.runtimeEventMap.set(id, item);
+    return item;
+  }
+
+  /** 用后端新事件覆盖旧显示内容，metadata 则保留旧字段并用新字段覆盖。 */
+  private updateRuntimeEvent(item: UIRuntimeTimelineEvent, event: SessionRuntimeEvent) {
+    const metadata = event.metadata ?? {};
+    item.parentId = typeof event.parent_id === "string" && event.parent_id ? event.parent_id : null;
+    item.type = event.type ?? item.type;
+    item.title = event.title ?? item.title;
+    item.status = event.status ?? item.status;
+    item.showContent = event.show_content ?? event.message ?? event.content ?? item.showContent;
+    item.detailContent = normalizeDetailContent(event.detail_content ?? item.detailContent);
+    item.metadata = { ...item.metadata, ...metadata };
+    item.createdAt = event.created_at ?? event.timestamp ?? item.createdAt;
+    item.updatedAt = event.updated_at ?? event.timestamp ?? item.updatedAt;
+    item.completedAt = event.completed_at ?? (FINISHED_STATUSES.has(item.status) ? item.updatedAt : item.completedAt);
+    item.isCollapsed = item.status === "completed";
+    item.recoveryStatus = typeof metadata.recovery_status === "string" ? metadata.recovery_status : item.recoveryStatus;
+    item.nextPosition = typeof metadata.next_position === "number" ? metadata.next_position : item.nextPosition;
+    item.completed = typeof metadata.completed === "number" ? metadata.completed : item.completed;
+    item.total = typeof metadata.total === "number" ? metadata.total : item.total;
+    item.raw = event;
+  }
+
+  /** 把子事件挂到父事件下面；如果已经挂过，就只保持原位置，不重复插入。 */
+  private attachChild(parent: UIRuntimeTimelineEvent, child: UIRuntimeTimelineEvent) {
+    this.runtimeEvents = this.runtimeEvents.filter((event) => event.id !== child.id);
+    if (!parent.children.some((event) => event.id === child.id)) {
+      parent.children.push(child);
+    }
+    this.attachRoot(parent);
+  }
+
+  /** 把没有父级的事件放到根列表。 */
+  private attachRoot(item: UIRuntimeTimelineEvent) {
+    if (!this.runtimeEvents.some((event) => event.id === item.id)) {
+      this.runtimeEvents.push(item);
+    }
   }
 
   /** 判断失败事件里是否带有后端保存的恢复位置。 */
-  private hasRecoveryCheckpoint(event: SessionRuntimeEvent) {
-    return Boolean(event.checkpoint && typeof event.checkpoint === "object");
+  private hasRecoveryCheckpoint(event: UIRuntimeTimelineEvent) {
+    const checkpoint = event.metadata.checkpoint;
+    return Boolean(checkpoint && typeof checkpoint === "object");
   }
 
   /** 把最近一次可恢复失败标出来，旧失败点先隐藏按钮，避免用户不知道该点哪一个。 */
-  private markLatestResumeGroup(group: UINodeTimelineGroup, event: SessionRuntimeEvent) {
+  private markLatestResumeEvent(event: UIRuntimeTimelineEvent) {
     this.clearResumeMarkers();
-    group.resumeAvailable = true;
-    group.recoveryStatus = event.recovery_status ?? null;
-    group.nextPosition = typeof event.next_position === "number" ? event.next_position : null;
-    group.completed = typeof event.completed === "number" ? event.completed : null;
-    group.total = typeof event.total === "number" ? event.total : null;
+    event.resumeAvailable = true;
   }
 
   /** 清掉旧的继续按钮，避免恢复已经开始后还显示旧失败入口。 */
   private clearResumeMarkers() {
-    for (const item of this.nodeGroups) {
+    for (const item of this.runtimeEventMap.values()) {
+      // 中文注释：这里只隐藏按钮，不清掉 completed/total 等进度数字；这些数字也是事件自己的元数据。
       item.resumeAvailable = false;
-      item.recoveryStatus = null;
-      item.nextPosition = null;
-      item.completed = null;
-      item.total = null;
     }
   }
 
@@ -345,62 +408,6 @@ export class SessionStreamAggregator {
       });
     }
     this.ensureActiveAssistant(event).artifactRefs.push(artifact);
-  }
-
-  /** 找到或创建当前节点对应的展示分组。 */
-  private ensureNodeGroup(event: SessionRuntimeEvent): UINodeTimelineGroup {
-    const nodeKey = event.node_key ?? event.node_title ?? "workflow_node";
-    const turnKey = event.turn_id ?? event.run_id ?? "session";
-    const groupId = `${turnKey}:${nodeKey}`;
-    const existing = this.nodeGroups.find((group) => group.id === groupId);
-    if (existing) {
-      return existing;
-    }
-
-    const group: UINodeTimelineGroup = {
-      id: groupId,
-      nodeKey,
-      nodeTitle: event.node_title ?? event.node_key ?? "工作流节点",
-      status: "running",
-      startedAt: event.timestamp ?? null,
-      completedAt: null,
-      latestMessage: event.message ?? event.content ?? "节点开始执行",
-      isCollapsed: false,
-      resumeAvailable: false,
-      recoveryStatus: null,
-      nextPosition: null,
-      completed: null,
-      total: null,
-      entries: [],
-    };
-    this.nodeGroups.push(group);
-    return group;
-  }
-
-  /** 把后端的一条节点事件整理成列表里的单行记录。 */
-  private createNodeEntry(event: SessionRuntimeEvent): UINodeTimelineEntry {
-    const label = NODE_EVENT_LABELS[event.event] ?? "更新";
-    return {
-      id: event.event_id ?? `${event.turn_id ?? event.run_id ?? "event"}:${event.node_key ?? event.node_title ?? "node"}:${event.event}:${event.stream_seq ?? createRandomId("node-event")}`,
-      event: event.event,
-      label,
-      message: event.message ?? event.content ?? label,
-      stage: event.stage ?? null,
-      timestamp: event.timestamp ?? null,
-      raw: event,
-    };
-  }
-
-  /** 更新节点组的状态；完成的节点默认折叠，失败和运行中的节点默认展开。 */
-  private updateNodeGroup(
-    group: UINodeTimelineGroup,
-    status: UINodeTimelineStatus,
-    completedAt: string | null,
-    isCollapsed: boolean,
-  ) {
-    group.status = status;
-    group.completedAt = completedAt ?? group.completedAt;
-    group.isCollapsed = isCollapsed;
   }
 
   /** 确保当前存在一张可以承接流式输出的 assistant 卡片。 */
@@ -445,4 +452,29 @@ export class SessionStreamAggregator {
     }
     return this.messages.find((message) => message.id === this.activeAssistantId);
   }
+
+  /** 从 runtime_event 的 metadata 里取节点 key，供顶部运行状态做轻量提示。 */
+  private nodeKeyFromRuntimeEvent(item: UIRuntimeTimelineEvent) {
+    const nodeKey = item.metadata.node_key;
+    return typeof nodeKey === "string" ? nodeKey : null;
+  }
+
+  /** 复制执行事件树，避免 Vue 组件意外修改聚合器内部状态。 */
+  private cloneRuntimeEvent(event: UIRuntimeTimelineEvent): UIRuntimeTimelineEvent {
+    return {
+      ...event,
+      metadata: { ...event.metadata },
+      children: event.children.map((child) => this.cloneRuntimeEvent(child)),
+    };
+  }
+}
+
+function normalizeDetailContent(value: RuntimeDetailContent | undefined): RuntimeDetailContent {
+  if (value === undefined) {
+    return null;
+  }
+  if (value === null || typeof value === "string") {
+    return value;
+  }
+  return { ...value };
 }

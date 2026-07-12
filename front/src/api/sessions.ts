@@ -21,6 +21,7 @@ export class ApiRequestError extends Error {
 }
 
 const STREAM_EVENTS = [
+  "runtime_event",
   "message",
   "reasoning_delta",
   "reasoning_end",
@@ -28,10 +29,6 @@ const STREAM_EVENTS = [
   "tool",
   "artifact",
   "status",
-  "node_started",
-  "node_progress",
-  "node_completed",
-  "node_failed",
   "error",
   "turn_end",
 ] as const;
@@ -109,7 +106,11 @@ export function subscribeSessionRun(
   for (const eventName of STREAM_EVENTS) {
     source.addEventListener(eventName, (event) => {
       const messageEvent = event as MessageEvent<string>;
-      handlers.onEvent(JSON.parse(messageEvent.data) as SessionRuntimeEvent);
+      try {
+        handlers.onEvent(JSON.parse(messageEvent.data) as SessionRuntimeEvent);
+      } catch {
+        // 中文注释：如果某一条 SSE 数据意外不是合法 JSON，只忽略这一条，避免整个实时连接被前端代码打断。
+      }
     });
   }
 

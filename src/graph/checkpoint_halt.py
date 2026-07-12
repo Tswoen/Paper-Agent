@@ -52,8 +52,8 @@ def halt_with_checkpoint(
             checkpoint["checkpoint_persistence_error"] = str(exc)
 
     if reporter is not None:
-        # 中文注释：node_failed 是前端实时感知“需要用户处理后继续”的主要信号。
-        # checkpoint 直接放进事件里，前端以后做“继续执行”按钮时不用额外读文件。
+        # 中文注释：failed 状态的 runtime_event 是前端实时感知“需要用户处理后继续”的主要信号。
+        # checkpoint 会放进事件详情里，前端以后做“继续执行”按钮时不用额外读文件。
         reporter.failed(
             str(error),
             stage=failure_stage,
