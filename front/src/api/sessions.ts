@@ -2,11 +2,23 @@ import type {
   SessionCreatePayload,
   SessionListPayload,
   SessionRunAccepted,
+  SessionRunStartPayload,
   SessionRuntimeEvent,
   SessionThreadPayload,
 } from "../types/sessions";
 
 type JsonObject = Record<string, unknown>;
+
+export class ApiRequestError extends Error {
+  status: number;
+
+  /** 中文注释：把后端状态码一起保存下来，页面就能判断是 404、409 还是普通网络错误。 */
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ApiRequestError";
+    this.status = status;
+  }
+}
 
 const STREAM_EVENTS = [
   "message",
@@ -35,10 +47,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
   const data = (await response.json().catch(() => ({}))) as {
     error?: { message?: string };
+    detail?: string | { message?: string };
   } & T;
 
   if (!response.ok) {
-    throw new Error(data.error?.message || "请求失败");
+    const detailMessage = typeof data.detail === "string" ? data.detail : data.detail?.message;
+    // 中文注释：这里保留 HTTP 状态码，调用方遇到“会话不存在”时可以主动把界面切回空白页。
+    throw new ApiRequestError(data.error?.message || detailMessage || "请求失败", response.status);
   }
 
   return data as T;
@@ -67,7 +82,7 @@ export function deleteSession(sessionKey: string): Promise<{ deleted: boolean; k
 
 export function startSessionRun(
   sessionKey: string,
-  payload: { content: string; turn_id?: string },
+  payload: SessionRunStartPayload,
 ): Promise<SessionRunAccepted> {
   return request<SessionRunAccepted>(`/api/sessions/${encodeURIComponent(sessionKey)}/runs`, {
     method: "POST",

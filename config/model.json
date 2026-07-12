@@ -23,8 +23,8 @@
     "default_embedding": {
       "label": "Default Embedding",
       "provider": "openrouter_main",
-      "model_name": "text-embedding-3-small",
-      "dimensions": null,
+      "model_name": "gemini-embedding-2",
+      "dimensions": 1024,
       "batch_size": 32
     }
   }

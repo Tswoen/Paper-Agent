@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from src.graph.runtime import InlineWorkflowSyncPort, WorkflowRuntimeContext
-from src.models.sessions import utc_now
+from src.models.sessions import SessionRecord, utc_now
 from src.repositories.sessions.base import SessionRepository
 from src.services.sessions import AssistantMessageBuffer, MessageHandler, SessionError, invoke_message_handler
 from src.utils import get_logger, logging_context
@@ -129,15 +129,24 @@ class SessionRunService:
         """创建一次新的后台运行，并立即返回 SSE 地址。"""
 
         body = body or {}
-        content = str(body.get("content") or "")
+        record = self.repo.get(session_key)
         checkpoint = body.get("read_resume_checkpoint")
+        if _should_resume_from_last_checkpoint(body):
+            # 中文注释：前端只需要告诉后端“继续当前会话”，不用把很大的恢复现场再传回来。
+            # 后端会从当前会话的历史失败记录里找到最近一次可恢复的位置，再交给原来的恢复流程。
+            checkpoint = _latest_read_resume_checkpoint(record)
+            if checkpoint is None:
+                raise ValueError("没有找到可继续执行的恢复现场")
+            body = copy.deepcopy(body)
+            body["read_resume_checkpoint"] = checkpoint
+
+        content = str(body.get("content") or "")
         has_resume_checkpoint = isinstance(checkpoint, dict)
         if not content.strip() and not body.get("media") and not has_resume_checkpoint:
             raise ValueError("content is required")
         if has_resume_checkpoint and not content.strip():
             content = _content_from_checkpoint(checkpoint)
 
-        record = self.repo.get(session_key)
         if record.run_started_at or record.status == "running":
             raise SessionError("session is already running", 409)
 
@@ -430,6 +439,30 @@ class SessionRunService:
         normalized_event["turn_id"] = str(normalized_event.get("turn_id") or turn_id)
         normalized_event["timestamp"] = str(normalized_event.get("timestamp") or utc_now())
         return normalized_event
+
+
+def _should_resume_from_last_checkpoint(body: JsonObject) -> bool:
+    """判断本次请求是否要从当前会话最近的失败位置继续。"""
+
+    # 中文注释：正常 JSON 请求会传布尔值 true；这里额外兼容字符串，方便以后调试接口时手写请求。
+    flag = body.get("resume_from_last_checkpoint")
+    return flag is True or str(flag).lower() in {"1", "true", "yes"}
+
+
+def _latest_read_resume_checkpoint(record: SessionRecord) -> JsonObject | None:
+    """从会话历史里找到最近一次阅读节点保存的恢复现场。"""
+
+    # 中文注释：事件是按时间从早到晚保存的，所以倒着找，最先遇到的就是最近一次失败。
+    for event in reversed(record.events):
+        if str(event.get("event_type") or "") != "node_failed":
+            continue
+        metadata = event.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        checkpoint = metadata.get("checkpoint")
+        if isinstance(checkpoint, dict):
+            return copy.deepcopy(checkpoint)
+    return None
 
 
 def _content_from_checkpoint(checkpoint: JsonObject) -> str:

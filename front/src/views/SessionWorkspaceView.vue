@@ -1,17 +1,12 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { Clock3, LoaderCircle } from "lucide-vue-next";
 
-import {
-  createSession,
-  deleteSession,
-  fetchSessionThread,
-  listSessions,
-  startSessionRun,
-  subscribeSessionRun,
-} from "../api/sessions";
+import { ApiRequestError, createSession, fetchSessionThread, startSessionRun, subscribeSessionRun } from "../api/sessions";
 import SessionComposer from "../components/session/SessionComposer.vue";
-import SessionSidebar from "../components/session/SessionSidebar.vue";
 import SessionTimeline from "../components/session/SessionTimeline.vue";
+import StatusPill from "../components/StatusPill.vue";
+import { createRandomId } from "../lib/random-id";
 import { SessionStreamAggregator } from "../lib/session-stream-aggregator";
 import { pushToast } from "../stores/notifications";
 import type {
@@ -21,13 +16,22 @@ import type {
   SessionTimelineSnapshot,
 } from "../types/sessions";
 
-const sessions = ref<SessionSummary[]>([]);
+const props = defineProps<{
+  sessions: SessionSummary[];
+  selectedKey: string;
+  creatingSession: boolean;
+}>();
+
+const emit = defineEmits<{
+  "update:selectedKey": [sessionKey: string];
+  refreshSessions: [];
+}>();
+
 const selectedSessionKey = ref("");
-const selectedTitle = ref("会话时间线");
+const selectedTitle = ref("新的研究主题");
+const selectedRunStartedAt = ref<string | null>(null);
 const draft = ref("");
-const listLoading = ref(true);
 const threadLoading = ref(false);
-const creating = ref(false);
 const sending = ref(false);
 const streamSource = ref<EventSource | null>(null);
 const manualClose = ref(false);
@@ -35,110 +39,116 @@ const timelineSnapshot = ref<SessionTimelineSnapshot | null>(null);
 
 const aggregator = new SessionStreamAggregator();
 
+const selectedSummary = computed(() => props.sessions.find((session) => session.key === selectedSessionKey.value));
+const currentStatus = computed(() => timelineSnapshot.value?.status ?? selectedSummary.value?.status ?? "created");
 const isRunning = computed(() => timelineSnapshot.value?.isStreaming ?? false);
-const statusText = computed(() => {
-  if (sending.value) {
-    return "正在创建运行并建立流式连接";
-  }
-  if (isRunning.value) {
-    return "工作流正在执行中，当前会话不可重复提交";
-  }
-  return "输入主题后即可启动一次新的论文工作流";
+const isBlankWorkspace = computed(() => !selectedSessionKey.value && !timelineSnapshot.value);
+
+const shouldShowTimeline = computed(() => {
+  return Boolean(
+    sending.value ||
+      isRunning.value ||
+      selectedRunStartedAt.value ||
+      selectedSummary.value?.run_started_at ||
+      hasTimelineContent(timelineSnapshot.value),
+  );
 });
 
-onMounted(async () => {
-  await initializeWorkspace();
+/**
+ * 中文注释：欢迎页只在“还没有开始执行”的时候展示。
+ * 这里不能只看有没有 selectedSessionKey，因为点击左侧新建会话后，后端已经有了会话编号，
+ * 但用户还没有输入研究主题，所以页面仍然应该显示中间的大输入框。
+ */
+const shouldShowWelcomeComposer = computed(() => !threadLoading.value && !shouldShowTimeline.value);
+
+const statusText = computed(() => {
+  if (sending.value) {
+    return "正在连接";
+  }
+  if (isRunning.value) {
+    return "运行中";
+  }
+  if (isBlankWorkspace.value) {
+    return "准备输入";
+  }
+  return "准备就绪";
 });
+
+const compactUpdatedAt = computed(() => {
+  const value = selectedSummary.value?.updated_at;
+  if (!value) {
+    return "等待开始";
+  }
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(value));
+});
+
+watch(
+  () => props.selectedKey,
+  async (sessionKey) => {
+    if (!sessionKey) {
+      resetToBlankWorkspace();
+      return;
+    }
+    await selectSession(sessionKey);
+  },
+  { immediate: true },
+);
 
 onBeforeUnmount(() => {
   closeStream(true);
 });
 
-/** 页面首次进入时加载会话列表，并尽量打开最近一条会话。 */
-async function initializeWorkspace() {
-  listLoading.value = true;
-  try {
-    const payload = await listSessions();
-    sessions.value = payload.sessions;
-    if (payload.sessions.length > 0) {
-      await selectSession(payload.sessions[0].key);
-    } else {
-      timelineSnapshot.value = null;
-      selectedTitle.value = "会话时间线";
-    }
-  } catch (error) {
-    handleError(error, "加载会话列表失败");
-  } finally {
-    listLoading.value = false;
-  }
-}
-
-/** 从后端刷新会话列表，并尽量保持当前选中的会话不变。 */
-async function refreshSessions() {
-  const payload = await listSessions();
-  sessions.value = payload.sessions;
-  if (!selectedSessionKey.value && payload.sessions.length > 0) {
-    selectedSessionKey.value = payload.sessions[0].key;
-  }
-}
-
 /** 加载指定会话的线程快照并重建前端时间线。 */
 async function selectSession(sessionKey: string) {
-  if (!sessionKey) {
+  if (!sessionKey || sessionKey === selectedSessionKey.value) {
     return;
   }
+
   closeStream(true);
   selectedSessionKey.value = sessionKey;
   threadLoading.value = true;
   try {
     const thread = await fetchSessionThread(sessionKey);
+    // 中文注释：用户连续点击多个历史会话时，旧请求可能比新请求更晚返回；这时直接丢掉旧结果，避免页面跳回上一条。
+    if (selectedSessionKey.value !== sessionKey) {
+      return;
+    }
     hydrateThread(thread);
   } catch (error) {
+    // 中文注释：404 通常表示左侧历史里这条会话已经被后端删掉或清理了，继续停在这里只会反复报错。
+    if (error instanceof ApiRequestError && error.status === 404 && selectedSessionKey.value === sessionKey) {
+      resetToBlankWorkspace();
+      emit("update:selectedKey", "");
+      emit("refreshSessions");
+      handleError(error, "会话不存在，已回到空白工作台");
+      return;
+    }
     handleError(error, "加载会话线程失败");
   } finally {
-    threadLoading.value = false;
-  }
-}
-
-/** 新建空会话，并立即切换到该会话工作台。 */
-async function createNewSession() {
-  creating.value = true;
-  try {
-    const payload = await createSession();
-    sessions.value = [payload.session, ...sessions.value];
-    hydrateThread(emptyThreadFromSummary(payload.session));
-    selectedSessionKey.value = payload.session.key;
-  } catch (error) {
-    handleError(error, "创建会话失败");
-  } finally {
-    creating.value = false;
-  }
-}
-
-/** 删除指定会话，并在必要时把焦点切换到下一条可用会话。 */
-async function removeSession(sessionKey: string) {
-  try {
-    await deleteSession(sessionKey);
-    const wasSelected = selectedSessionKey.value === sessionKey;
-    sessions.value = sessions.value.filter((item) => item.key !== sessionKey);
-    if (wasSelected) {
-      closeStream(true);
-      if (sessions.value.length > 0) {
-        await selectSession(sessions.value[0].key);
-      } else {
-        selectedSessionKey.value = "";
-        selectedTitle.value = "会话时间线";
-        timelineSnapshot.value = null;
-      }
+    // 中文注释：只关闭当前这次选择对应的加载状态，避免旧请求影响用户后来点开的新会话。
+    if (selectedSessionKey.value === sessionKey) {
+      threadLoading.value = false;
     }
-    pushToast({
-      tone: "success",
-      title: "会话已删除",
-      description: "该工作台和对应历史记录已从列表中移除。",
-    });
-  } catch (error) {
-    handleError(error, "删除会话失败");
   }
+}
+
+/**
+ * 中文注释：新窗口或新会话还没有真正执行时，中间只保留输入区。
+ * 这样用户第一眼看到的是“要研究什么”，不会被空时间线卡片打断思路。
+ */
+function resetToBlankWorkspace() {
+  closeStream(true);
+  selectedSessionKey.value = "";
+  selectedTitle.value = "新的研究主题";
+  selectedRunStartedAt.value = null;
+  timelineSnapshot.value = null;
+  sending.value = false;
+  threadLoading.value = false;
 }
 
 /** 提交当前主题，必要时自动创建会话，并接入对应的 SSE 流。 */
@@ -154,14 +164,14 @@ async function submitTopic() {
 
   try {
     const sessionKey = await ensureActiveSession();
-    const turnId = crypto.randomUUID();
+    const turnId = createRandomId("turn");
     aggregator.addOptimisticUserMessage(submittedContent, turnId);
     syncSnapshot();
     const accepted = await startSessionRun(sessionKey, {
       content: submittedContent,
       turn_id: turnId,
     });
-    await refreshSessions();
+    emit("refreshSessions");
     openStream(sessionKey, accepted.stream_url);
   } catch (error) {
     draft.value = submittedContent;
@@ -171,7 +181,33 @@ async function submitTopic() {
   }
 }
 
-/** 为实时流建立 EventSource 订阅，并把事件持续喂给前端聚合器。 */
+/** 中文注释：继续执行时，前端只告诉后端“恢复当前会话”，具体恢复位置由后端从历史里查。 */
+async function resumeLatestCheckpoint() {
+  if (!selectedSessionKey.value || sending.value || isRunning.value) {
+    return;
+  }
+
+  sending.value = true;
+  const content = "继续上次失败的位置";
+  try {
+    const turnId = createRandomId("turn");
+    aggregator.addOptimisticUserMessage(content, turnId);
+    syncSnapshot();
+    const accepted = await startSessionRun(selectedSessionKey.value, {
+      content,
+      turn_id: turnId,
+      resume_from_last_checkpoint: true,
+    });
+    emit("refreshSessions");
+    openStream(selectedSessionKey.value, accepted.stream_url);
+  } catch (error) {
+    await reloadCurrentThread();
+    handleError(error, "继续执行失败");
+    sending.value = false;
+  }
+}
+
+/** 为实时流建立 EventSource 订阅，并把后端发来的每条消息交给前端聚合器整理。 */
 function openStream(sessionKey: string, streamUrl: string) {
   closeStream(true);
   manualClose.value = false;
@@ -182,6 +218,9 @@ function openStream(sessionKey: string, streamUrl: string) {
     onEvent: async (event) => {
       aggregator.apply(event);
       syncSnapshot();
+      if (event.run_started_at) {
+        selectedRunStartedAt.value = event.run_started_at;
+      }
       if (event.event === "turn_end") {
         await handleRunFinished(sessionKey, event);
       }
@@ -198,17 +237,17 @@ function openStream(sessionKey: string, streamUrl: string) {
         description: "正在尝试使用最新线程快照恢复页面状态。",
       });
       await reloadCurrentThread();
-      await refreshSessions();
+      emit("refreshSessions");
     },
   });
 }
 
-/** 当 run 结束时刷新线程和列表，确保历史快照与落库结果完全对齐。 */
+/** 当 run 结束时刷新线程和列表，确保左侧历史与中间时间线都展示落库后的结果。 */
 async function handleRunFinished(sessionKey: string, event: SessionRuntimeEvent) {
   closeStream(true);
   sending.value = false;
   await reloadCurrentThread();
-  await refreshSessions();
+  emit("refreshSessions");
   if (event.status === "failed") {
     pushToast({
       tone: "error",
@@ -223,7 +262,7 @@ async function handleRunFinished(sessionKey: string, event: SessionRuntimeEvent)
     description: "最新检索结果和产物清单已同步到当前会话。",
   });
   if (selectedSessionKey.value !== sessionKey) {
-    await selectSession(sessionKey);
+    emit("update:selectedKey", sessionKey);
   }
 }
 
@@ -233,9 +272,10 @@ async function ensureActiveSession() {
     return selectedSessionKey.value;
   }
   const payload = await createSession();
-  sessions.value = [payload.session, ...sessions.value];
   hydrateThread(emptyThreadFromSummary(payload.session));
   selectedSessionKey.value = payload.session.key;
+  emit("update:selectedKey", payload.session.key);
+  emit("refreshSessions");
   return payload.session.key;
 }
 
@@ -251,6 +291,7 @@ function closeStream(markAsManual: boolean) {
 /** 使用线程快照重建视图状态，并同步标题和时间线。 */
 function hydrateThread(thread: SessionThread) {
   selectedTitle.value = thread.title || "会话时间线";
+  selectedRunStartedAt.value = thread.run_started_at;
   aggregator.hydrate(thread);
   syncSnapshot();
 }
@@ -258,6 +299,7 @@ function hydrateThread(thread: SessionThread) {
 /** 把聚合器当前快照写回响应式状态，驱动页面刷新。 */
 function syncSnapshot() {
   timelineSnapshot.value = aggregator.snapshot();
+  selectedRunStartedAt.value = timelineSnapshot.value.runStartedAt;
 }
 
 /** 重新拉取当前会话线程，用于 run 完成或断流后的状态修复。 */
@@ -283,6 +325,37 @@ function emptyThreadFromSummary(summary: SessionSummary): SessionThread {
   };
 }
 
+/** 中文注释：只要时间线里已经有消息、节点或产物，就说明它不是空白会话，应该展示 Live Timeline。 */
+function hasTimelineContent(snapshot: SessionTimelineSnapshot | null) {
+  return Boolean(snapshot && (snapshot.messages.length || snapshot.nodeGroups.length || snapshot.artifacts.length));
+}
+
+function statusTone(status: string) {
+  if (status === "completed") {
+    return "success";
+  }
+  if (status === "running") {
+    return "warning";
+  }
+  if (status === "failed") {
+    return "danger";
+  }
+  return "neutral";
+}
+
+function statusLabel(status: string) {
+  if (status === "running") {
+    return "运行中";
+  }
+  if (status === "completed") {
+    return "已完成";
+  }
+  if (status === "failed") {
+    return "失败";
+  }
+  return "准备中";
+}
+
 /** 统一把异常转换为 toast，减少页面分散的错误处理分支。 */
 function handleError(error: unknown, title: string) {
   const description = error instanceof Error ? error.message : "未知错误";
@@ -295,40 +368,65 @@ function handleError(error: unknown, title: string) {
 </script>
 
 <template>
-  <section class="page-shell session-workspace-shell">
-    <header class="hero-card session-hero-card">
-      <div class="hero-copy">
+  <section
+    class="page-shell session-workspace-shell"
+    :data-timeline-visible="shouldShowTimeline"
+    :data-welcome-visible="shouldShowWelcomeComposer"
+  >
+    <header v-if="!shouldShowWelcomeComposer" class="hero-card session-hero-card session-compact-header">
+      <div class="hero-copy session-compact-copy">
         <span class="eyebrow">Workflow Session</span>
-        <h1>主题驱动的论文工作流会话台</h1>
+        <h1>{{ selectedTitle }}</h1>
         <p>
-          左侧管理历史会话，中间按时间线回放实时输出，底部输入论文主题后即可
-          触发检索流程并持续看到 reasoning、进度和产物信息。
+          {{ isBlankWorkspace ? "从一个研究主题开始，系统会在执行后自动展开 Live Timeline。" : "历史在左侧管理，这里专注展示当前主题的输入和执行过程。" }}
         </p>
+      </div>
+
+      <div class="session-compact-meta">
+        <StatusPill :tone="statusTone(currentStatus)" :label="statusLabel(currentStatus)" />
+        <span class="session-compact-time">
+          <Clock3 :size="14" />
+          {{ compactUpdatedAt }}
+        </span>
       </div>
     </header>
 
-    <section class="session-workspace-grid">
-      <SessionSidebar
-        :sessions="sessions"
-        :selected-key="selectedSessionKey"
-        :loading="listLoading"
-        :creating="creating"
-        @create="createNewSession"
-        @select="selectSession"
-        @remove="removeSession"
-      />
-
+    <section class="session-workbench">
       <div class="session-main-column">
-        <SessionTimeline
-          :title="selectedTitle"
-          :snapshot="timelineSnapshot"
-          :loading="threadLoading"
-        />
+        <div class="session-content-area">
+          <SessionComposer
+            v-if="shouldShowWelcomeComposer"
+            v-model="draft"
+            variant="welcome"
+            heading="今天想探索什么研究方向？"
+            helper-text="输入论文主题、研究问题或调研任务，系统会自动创建会话并展开执行时间线。"
+            placeholder="例如：多智能体论文写作系统的研究现状与关键挑战"
+            :rows="3"
+            :running="isRunning"
+            :sending="sending || props.creatingSession"
+            :status-text="statusText"
+            @submit="submitTopic"
+          />
+
+          <SessionTimeline
+            v-else-if="shouldShowTimeline"
+            :title="selectedTitle"
+            :snapshot="timelineSnapshot"
+            :loading="threadLoading"
+            @resume="resumeLatestCheckpoint"
+          />
+
+          <div v-else-if="threadLoading" class="session-empty session-workbench-loading">
+            <LoaderCircle class="spinning" :size="18" />
+            <span>正在准备会话工作台…</span>
+          </div>
+        </div>
 
         <SessionComposer
+          v-if="!shouldShowWelcomeComposer"
           v-model="draft"
           :running="isRunning"
-          :sending="sending"
+          :sending="sending || props.creatingSession"
           :status-text="statusText"
           @submit="submitTopic"
         />

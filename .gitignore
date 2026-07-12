@@ -85,3 +85,5 @@ temp/
 doc/*
 paper-search-mcp/
 data/*
+.claude/*
+.impeccable/*

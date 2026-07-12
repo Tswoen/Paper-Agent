@@ -70,6 +70,12 @@ export interface SessionRunAccepted {
   stream_url: string;
 }
 
+export interface SessionRunStartPayload {
+  content?: string;
+  turn_id?: string;
+  resume_from_last_checkpoint?: boolean;
+}
+
 export interface SessionRuntimeEvent {
   event: string;
   session_key: string;
@@ -100,6 +106,11 @@ export interface SessionRuntimeEvent {
   selected_paper_count?: number;
   artifact_count?: number;
   search_halted?: boolean;
+  checkpoint?: Record<string, unknown>;
+  recovery_status?: string;
+  next_position?: number;
+  completed?: number;
+  total?: number;
 }
 
 export interface UISessionMessage {
@@ -117,8 +128,39 @@ export interface UISessionMessage {
   createdAt: string | null;
 }
 
+export type UINodeTimelineStatus = "running" | "completed" | "failed";
+
+export interface UINodeTimelineEntry {
+  id: string;
+  event: string;
+  label: string;
+  message: string;
+  stage: string | null;
+  timestamp: string | null;
+  raw: SessionRuntimeEvent;
+}
+
+export interface UINodeTimelineGroup {
+  id: string;
+  nodeKey: string;
+  nodeTitle: string;
+  status: UINodeTimelineStatus;
+  startedAt: string | null;
+  completedAt: string | null;
+  latestMessage: string;
+  isCollapsed: boolean;
+  resumeAvailable: boolean;
+  recoveryStatus: string | null;
+  nextPosition: number | null;
+  completed: number | null;
+  total: number | null;
+  entries: UINodeTimelineEntry[];
+}
+
 export interface SessionTimelineSnapshot {
   messages: UISessionMessage[];
+  nodeGroups: UINodeTimelineGroup[];
+  activeNodeKey: string | null;
   artifacts: SessionArtifact[];
   isStreaming: boolean;
   runStartedAt: string | null;
