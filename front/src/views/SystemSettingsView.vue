@@ -19,12 +19,14 @@ import {
   saveAgent,
   saveEmbeddingProfile,
   saveProvider,
+  testModelConnectivity,
 } from "../api/settings";
 import StatusPill from "../components/StatusPill.vue";
 import { pushToast } from "../stores/notifications";
 import type {
   AgentItem,
   EmbeddingProfileItem,
+  ModelConnectivityPayload,
   ProviderItem,
   ProviderModelsPayload,
   SettingsPayload,
@@ -103,6 +105,8 @@ const embeddingDraft = reactive<EmbeddingDraft>({
 
 const providerModelsMap = reactive<Record<string, ProviderModelsPayload>>({});
 const testingState = reactive<Record<string, boolean>>({});
+const connectivityMap = reactive<Record<string, ModelConnectivityPayload>>({});
+const connectivityTestingState = reactive<Record<string, boolean>>({});
 
 const providers = computed(() => settings.value?.providers ?? []);
 const agents = computed(() => settings.value?.agents ?? []);
@@ -214,6 +218,7 @@ async function loadSettings() {
   loading.value = true;
   try {
     settings.value = await getSettings();
+    resetTransientState();
     primeEditors();
   } catch (error) {
     handleError(error, "加载系统配置失败");
@@ -226,6 +231,7 @@ async function refreshSettings() {
   refreshing.value = true;
   try {
     settings.value = await getSettings();
+    resetTransientState();
     primeEditors();
     pushToast({
       tone: "success",
@@ -297,6 +303,7 @@ async function submitProvider() {
       extra_body: parseJsonRecord(providerDraft.extra_body, "额外请求体"),
     };
     settings.value = await saveProvider(selectedProviderName.value, payload);
+    invalidateProviderDerivedState(selectedProviderName.value);
     primeEditors();
     pushToast({
       tone: "success",
@@ -331,6 +338,7 @@ async function createProvider() {
     });
     selectedProviderName.value = name;
     creatingProvider.name = "";
+    invalidateProviderDerivedState(name);
     primeEditors();
     pushToast({
       tone: "success",
@@ -357,6 +365,7 @@ async function submitAgent() {
       context_window_tokens: parseOptionalInteger(agentDraft.context_window_tokens),
       reasoning_effort: emptyToUndefined(agentDraft.reasoning_effort),
     });
+    invalidateConnectivity("agent", agentDraft.name);
     primeEditors();
     pushToast({
       tone: "success",
@@ -383,6 +392,7 @@ async function submitEmbedding() {
       dimensions: parseOptionalInteger(embeddingDraft.dimensions),
       batch_size: parseOptionalInteger(embeddingDraft.batch_size),
     });
+    invalidateConnectivity("embedding_profile", embeddingDraft.name);
     primeEditors();
     pushToast({
       tone: "success",
@@ -402,7 +412,7 @@ async function fetchModels(providerName: string, toneTitle = "模型目录已同
   }
   testingState[providerName] = true;
   try {
-    // 中文注释：这里把“模型目录拉取”和“连通性测试”合并为一个动作，减少后端额外接口。
+    // 中文注释：这里只同步模型目录，方便用户挑选模型名，不再把它当成真实连通性测试。
     const payload = await getProviderModels(providerName);
     providerModelsMap[providerName] = payload;
     if (payload.status === "available") {
@@ -414,7 +424,7 @@ async function fetchModels(providerName: string, toneTitle = "模型目录已同
     } else {
       pushToast({
         tone: "info",
-        title: "连通性结果已返回",
+        title: "模型目录结果已返回",
         description: payload.message || `${providerName} 当前没有可用模型目录。`,
       });
     }
@@ -425,8 +435,49 @@ async function fetchModels(providerName: string, toneTitle = "模型目录已同
   }
 }
 
-async function testProviderConnection(providerName: string) {
-  await fetchModels(providerName, "连通性测试通过");
+async function runConnectivityTest(targetType: "agent" | "embedding_profile", name: string) {
+  if (!name) {
+    return;
+  }
+  const key = connectivityKey(targetType, name);
+  connectivityTestingState[key] = true;
+  try {
+    const payload = await testModelConnectivity(targetType, name);
+    connectivityMap[key] = payload;
+    if (payload.status === "passed") {
+      pushToast({
+        tone: "success",
+        title: "连通性测试通过",
+        description: `${payload.name} · ${payload.model} · ${payload.message} · ${payload.latency_ms}ms`,
+      });
+      return;
+    }
+    if (payload.status === "not_configured") {
+      pushToast({
+        tone: "info",
+        title: "模型配置尚未就绪",
+        description: payload.message,
+      });
+      return;
+    }
+    pushToast({
+      tone: "error",
+      title: "连通性测试失败",
+      description: payload.message,
+    });
+  } catch (error) {
+    handleError(error, "执行模型连通性测试失败");
+  } finally {
+    connectivityTestingState[key] = false;
+  }
+}
+
+async function testAgentConnection(name: string) {
+  await runConnectivityTest("agent", name);
+}
+
+async function testEmbeddingConnection(name: string) {
+  await runConnectivityTest("embedding_profile", name);
 }
 
 function providerStatusTone(provider: ProviderItem) {
@@ -456,12 +507,60 @@ function embeddingSummary(item: EmbeddingProfileItem) {
   return `维度 ${item.dimensions ?? "默认"} · 批量 ${item.batch_size ?? "默认"} · Provider ${item.provider}`;
 }
 
-function agentConnectivityLabel(providerName: string) {
-  const payload = providerModelsMap[providerName];
+function connectivityLabel(targetType: "agent" | "embedding_profile", name: string) {
+  const key = connectivityKey(targetType, name);
+  if (connectivityTestingState[key]) {
+    return "测试中...";
+  }
+  const payload = connectivityMap[key];
   if (!payload) {
     return "未测试";
   }
-  return payload.status === "available" ? "已通过" : payload.status;
+  if (payload.status === "passed") {
+    return "已通过";
+  }
+  if (payload.status === "not_configured") {
+    return "未配置";
+  }
+  return "未通过";
+}
+
+function connectivityKey(targetType: "agent" | "embedding_profile", name: string) {
+  return `${targetType}:${name}`;
+}
+
+function invalidateConnectivity(targetType: "agent" | "embedding_profile", name: string) {
+  const key = connectivityKey(targetType, name);
+  delete connectivityMap[key];
+  delete connectivityTestingState[key];
+}
+
+function invalidateProviderDerivedState(providerName: string) {
+  delete providerModelsMap[providerName];
+  delete testingState[providerName];
+  for (const item of agents.value) {
+    if (item.provider === providerName) {
+      invalidateConnectivity("agent", item.name);
+    }
+  }
+  for (const item of embeddings.value) {
+    if (item.provider === providerName) {
+      invalidateConnectivity("embedding_profile", item.name);
+    }
+  }
+}
+
+function resetTransientState() {
+  clearRecord(providerModelsMap);
+  clearRecord(testingState);
+  clearRecord(connectivityMap);
+  clearRecord(connectivityTestingState);
+}
+
+function clearRecord(record: Record<string, unknown>) {
+  for (const key of Object.keys(record)) {
+    delete record[key];
+  }
 }
 
 function currentYear() {
@@ -735,7 +834,7 @@ function handleError(error: unknown, title: string) {
               <div class="mini-note">
                 <span class="eyebrow">Model Catalog</span>
                 <p>
-                  目录抓取用于辅助选择模型，也可作为基础连通性测试。
+                  目录抓取只用于辅助选择模型名，不能代表当前智能体或嵌入配置已经真实可调用。
                 </p>
               </div>
               <StatusPill
@@ -801,10 +900,10 @@ function handleError(error: unknown, title: string) {
                   <button
                     class="button tertiary compact"
                     type="button"
-                    :disabled="testingState[agent.provider]"
-                    @click="testProviderConnection(agent.provider)"
+                    :disabled="connectivityTestingState[connectivityKey('agent', agent.name)]"
+                    @click="testAgentConnection(agent.name)"
                   >
-                    {{ agentConnectivityLabel(agent.provider) }}
+                    {{ connectivityLabel('agent', agent.name) }}
                   </button>
                 </td>
                 <td class="align-right">
@@ -938,10 +1037,10 @@ function handleError(error: unknown, title: string) {
                   <button
                     class="button tertiary compact"
                     type="button"
-                    :disabled="testingState[item.provider]"
-                    @click="testProviderConnection(item.provider)"
+                    :disabled="connectivityTestingState[connectivityKey('embedding_profile', item.name)]"
+                    @click="testEmbeddingConnection(item.name)"
                   >
-                    {{ agentConnectivityLabel(item.provider) }}
+                    {{ connectivityLabel('embedding_profile', item.name) }}
                   </button>
                 </td>
                 <td class="align-right">

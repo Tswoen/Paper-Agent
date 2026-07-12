@@ -4,6 +4,7 @@
   "scripts": {
     "front:install": "npm --prefix front install",
     "front:dev": "npm --prefix front run dev",
+    "front:dev:network": "npm --prefix front run dev:network",
     "front:build": "npm --prefix front run build",
     "front:preview": "npm --prefix front run preview"
   }

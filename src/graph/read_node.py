@@ -699,6 +699,7 @@ def _read_one_paper(
         max_file_size_mb=config.max_file_size_mb,
     )
     full_text = FullTextStatus(status=downloaded.status, reason=downloaded.reason, source_url=downloaded.source_url)
+    # 只有下载成功的file_path才不为None,且file_path=data/cache/{sha256编码}/{source.pdf/source.html}
     if downloaded.file_path is None:
         result.full_text = full_text
         return result, True

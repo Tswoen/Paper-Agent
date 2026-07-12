@@ -13,3 +13,9 @@ uv run python main.py
 前端启动(在项目根目录执行即可，不需要进入front目录)
 npm run front:install
 npm run front:dev
+
+如果你只是在当前电脑上打开前端，默认使用 `npm run front:dev` 即可，
+打开地址请优先使用 `http://127.0.0.1:5173/`。
+
+如果你需要让同一局域网里的其它设备访问前端，再使用：
+npm run front:dev:network

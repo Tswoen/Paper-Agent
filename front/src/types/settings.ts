@@ -102,3 +102,18 @@ export interface ProviderModelsPayload {
   message: string;
   fetched_at: string;
 }
+
+export interface ModelConnectivityPayload {
+  target_type: "agent" | "embedding_profile";
+  name: string;
+  provider: string;
+  model: string;
+  status: "passed" | "failed" | "not_configured";
+  message: string;
+  latency_ms: number;
+  error_kind: string | null;
+  error_status_code: number | null;
+  finish_reason: string | null;
+  vector_dimensions: number | null;
+  tested_at: string;
+}

@@ -9,6 +9,7 @@ from src.repositories.settings.json import SettingsRepository
 from src.services.settings import (
     SettingsError,
     create_or_update_agent,
+    model_connectivity_payload,
     provider_models_payload,
     settings_payload,
     update_agent_settings,
@@ -42,6 +43,20 @@ def create_settings_router(repo: SettingsRepository) -> APIRouter:
 
         try:
             return provider_models_payload(repo, provider)
+        except SettingsError as exc:
+            return _settings_error_response(exc)
+
+    @router.post("/model-connectivity")
+    async def post_model_connectivity(request: Request):
+        """按当前保存的模型配置做一次真实连通性测试。"""
+
+        try:
+            body = await _json_body(request)
+            return model_connectivity_payload(
+                repo,
+                str(body.get("target_type") or body.get("targetType") or ""),
+                str(body.get("name") or ""),
+            )
         except SettingsError as exc:
             return _settings_error_response(exc)
 

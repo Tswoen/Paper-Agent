@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import copy
 from datetime import datetime, timezone
+from time import perf_counter
 from typing import Any
 
+import httpx
+
+from src.llm import make_provider
 from src.llm.config import AgentConfig, EmbeddingProfile, ModelConfig, ProviderConfig
 from src.llm.registry import PROVIDERS, ProviderSpec, match_provider_backend
 from src.repositories.settings.json import SettingsRepository
@@ -50,6 +54,7 @@ def settings_payload(repo: SettingsRepository, agent_name: str | None = None) ->
             "agent_model_settings": True,
             "embedding_profiles": True,
             "provider_model_catalog": True,
+            "configured_model_connectivity_test": True,
         },
         "surface": "model_settings",
     }
@@ -165,6 +170,44 @@ def provider_models_payload(repo: SettingsRepository, provider: str, client: Any
     }
 
 
+def model_connectivity_payload(
+    repo: SettingsRepository,
+    target_type: str,
+    name: str,
+    *,
+    client: Any | None = None,
+    embedding_client: Any | None = None,
+) -> JsonObject:
+    """按当前保存的模型配置做一次最小真实调用，用来判断这条配置能不能用。
+
+    中文说明：
+    1. 这里测试的是“这一行配置里的 provider + model_name 是否可调用”，不是 provider 是否能列出模型目录；
+    2. agent 会发起一条最小对话请求；
+    3. embedding_profile 会发起一次最小向量化请求；
+    4. 返回值统一成前端容易展示的结构，按钮就可以直接显示“已通过 / 未通过 / 未配置”。
+    """
+
+    normalized_target = str(target_type or "").strip()
+    target_name = str(name or "").strip()
+    if not normalized_target:
+        raise SettingsError("target_type is required")
+    if not target_name:
+        raise SettingsError("name is required")
+
+    data = _normalized_config(repo.load())
+    config = ModelConfig.from_dict(data, repo.system())
+
+    if normalized_target == "agent":
+        if target_name not in config.agents:
+            raise SettingsError(f"unknown agent: {target_name}", 404)
+        return _test_agent_connectivity(config, target_name, client=client)
+    if normalized_target == "embedding_profile":
+        if target_name not in config.embedding_profiles:
+            raise SettingsError(f"unknown embedding profile: {target_name}", 404)
+        return _test_embedding_connectivity(config, target_name, client=embedding_client)
+    raise SettingsError(f"unsupported target_type: {normalized_target}")
+
+
 def _normalized_config(data: JsonObject) -> JsonObject:
     """把原始配置标准化成统一内部结构。"""
 
@@ -173,6 +216,168 @@ def _normalized_config(data: JsonObject) -> JsonObject:
     data.setdefault("agents", {})
     data.setdefault("embedding_profiles", data.pop("embeddingProfiles", {}))
     return data
+
+
+def _test_agent_connectivity(config: ModelConfig, name: str, *, client: Any | None = None) -> JsonObject:
+    """对指定智能体配置发起一次最小对话请求。
+
+    中文说明：
+    1. 这里只问一句“请只回复 OK”，尽量减少 token 消耗；
+    2. 只要模型能正常返回任意非空文本，就说明这条配置是可用的；
+    3. 如果连 provider 都组装不起来，说明是配置问题，状态会标成 not_configured。
+    """
+
+    agent = config.resolve_agent(name)
+    started_at = perf_counter()
+    try:
+        snapshot = make_provider(config, name, client=client)
+    except Exception as exc:
+        return _connectivity_payload(
+            target_type="agent",
+            name=name,
+            provider=agent.provider,
+            model=agent.model_name,
+            status="not_configured",
+            message=f"当前智能体配置还不能发起调用：{exc}",
+            latency_ms=_elapsed_ms(started_at),
+        )
+
+    response = snapshot.provider.chat_with_retry(
+        [{"role": "user", "content": "请只回复 OK"}],
+        temperature=0,
+        max_tokens=16,
+    )
+    if not response.ok:
+        detail = response.content.strip() or "模型没有返回成功结果"
+        return _connectivity_payload(
+            target_type="agent",
+            name=name,
+            provider=agent.provider,
+            model=agent.model_name,
+            status="failed",
+            message=detail,
+            latency_ms=_elapsed_ms(started_at),
+            error_kind=response.error_kind,
+            error_status_code=response.error_status_code,
+            finish_reason=response.finish_reason,
+        )
+
+    content = response.content.strip()
+    if not content:
+        return _connectivity_payload(
+            target_type="agent",
+            name=name,
+            provider=agent.provider,
+            model=agent.model_name,
+            status="failed",
+            message="模型接口已返回成功状态，但返回内容为空",
+            latency_ms=_elapsed_ms(started_at),
+            finish_reason=response.finish_reason,
+        )
+
+    return _connectivity_payload(
+        target_type="agent",
+        name=name,
+        provider=agent.provider,
+        model=agent.model_name,
+        status="passed",
+        message="模型已成功返回内容",
+        latency_ms=_elapsed_ms(started_at),
+        finish_reason=response.finish_reason,
+    )
+
+
+def _test_embedding_connectivity(config: ModelConfig, name: str, *, client: Any | None = None) -> JsonObject:
+    """对指定嵌入模型配置发起一次最小 embedding 请求。
+
+    中文说明：
+    1. 这里不会去拉 provider 的模型目录；
+    2. 而是直接调用当前 profile 绑定的 model_name；
+    3. 只要返回了一条非空向量，就说明这条嵌入配置能真正参与索引和检索。
+    """
+
+    profile = config.resolve_embedding_profile(name)
+    started_at = perf_counter()
+    try:
+        resolved_profile, provider = config.resolve_embedding_provider_config(name)
+    except Exception as exc:
+        return _connectivity_payload(
+            target_type="embedding_profile",
+            name=name,
+            provider=profile.provider,
+            model=profile.model_name,
+            status="not_configured",
+            message=f"当前嵌入配置还不能发起调用：{exc}",
+            latency_ms=_elapsed_ms(started_at),
+        )
+
+    headers = {"Content-Type": "application/json", **dict(provider.extra_headers or {})}
+    if provider.api_key:
+        headers.setdefault("Authorization", f"Bearer {provider.api_key}")
+
+    payload: JsonObject = {
+        "model": resolved_profile.model_name,
+        "input": ["连通性测试"],
+    }
+    if resolved_profile.dimensions is not None:
+        payload["dimensions"] = resolved_profile.dimensions
+
+    endpoint = str(provider.api_base).rstrip("/") + "/embeddings"
+    timeout_seconds = float(max(1, config.system.read.download_timeout_seconds))
+    try:
+        if client is None:
+            with httpx.Client(timeout=timeout_seconds) as http_client:
+                response = http_client.post(endpoint, headers=headers, json=payload)
+        else:
+            response = client.post(endpoint, headers=headers, json=payload)
+        response.raise_for_status()
+        body = response.json()
+    except Exception as exc:
+        return _connectivity_payload(
+            target_type="embedding_profile",
+            name=name,
+            provider=resolved_profile.provider,
+            model=resolved_profile.model_name,
+            status="failed",
+            message=f"嵌入模型调用失败：{exc}",
+            latency_ms=_elapsed_ms(started_at),
+        )
+
+    raw_items = body.get("data") if isinstance(body, dict) else None
+    if not isinstance(raw_items, list) or not raw_items:
+        return _connectivity_payload(
+            target_type="embedding_profile",
+            name=name,
+            provider=resolved_profile.provider,
+            model=resolved_profile.model_name,
+            status="failed",
+            message="嵌入模型没有返回 data 列表",
+            latency_ms=_elapsed_ms(started_at),
+        )
+
+    first_item = raw_items[0] if isinstance(raw_items[0], dict) else None
+    vector = first_item.get("embedding") if first_item else None
+    if not isinstance(vector, list) or not vector:
+        return _connectivity_payload(
+            target_type="embedding_profile",
+            name=name,
+            provider=resolved_profile.provider,
+            model=resolved_profile.model_name,
+            status="failed",
+            message="嵌入模型返回的向量为空或格式不正确",
+            latency_ms=_elapsed_ms(started_at),
+        )
+
+    return _connectivity_payload(
+        target_type="embedding_profile",
+        name=name,
+        provider=resolved_profile.provider,
+        model=resolved_profile.model_name,
+        status="passed",
+        message=f"嵌入模型已成功返回 {len(vector)} 维向量",
+        latency_ms=_elapsed_ms(started_at),
+        vector_dimensions=len(vector),
+    )
 
 
 def _providers(data: JsonObject) -> JsonObject:
@@ -416,6 +621,44 @@ def _provider_type_items() -> list[JsonObject]:
             }
         )
     return items
+
+
+def _connectivity_payload(
+    *,
+    target_type: str,
+    name: str,
+    provider: str,
+    model: str,
+    status: str,
+    message: str,
+    latency_ms: int,
+    error_kind: str | None = None,
+    error_status_code: int | None = None,
+    finish_reason: str | None = None,
+    vector_dimensions: int | None = None,
+) -> JsonObject:
+    """把连通性测试结果整理成统一结构，方便前端直接展示。"""
+
+    return {
+        "target_type": target_type,
+        "name": name,
+        "provider": provider,
+        "model": model,
+        "status": status,
+        "message": message,
+        "latency_ms": latency_ms,
+        "error_kind": error_kind,
+        "error_status_code": error_status_code,
+        "finish_reason": finish_reason,
+        "vector_dimensions": vector_dimensions,
+        "tested_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _elapsed_ms(started_at: float) -> int:
+    """把一次测试的耗时转换成毫秒，前端展示更直观。"""
+
+    return max(0, int((perf_counter() - started_at) * 1000))
 
 
 def _models_status(provider: str, status: str, message: str) -> JsonObject:

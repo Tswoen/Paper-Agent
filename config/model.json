@@ -6,6 +6,13 @@
       "api_base": "https://cli.999554.xyz/v1",
       "extra_headers": {},
       "extra_body": {}
+    },
+    "emb_openai": {
+      "backend": "openai_compat",
+      "api_key": "sk-8CZRYjDJpr4zIdp89Po0kB0yR4Ro4MUb8RDWBHtZxIqboAuS",
+      "extra_headers": {},
+      "extra_body": {},
+      "api_base": "https://cli.999554.xyz/v1"
     }
   },
   "agents": {
@@ -22,7 +29,7 @@
   "embedding_profiles": {
     "default_embedding": {
       "label": "Default Embedding",
-      "provider": "openrouter_main",
+      "provider": "emb_openai",
       "model_name": "gemini-embedding-2",
       "dimensions": 1024,
       "batch_size": 32

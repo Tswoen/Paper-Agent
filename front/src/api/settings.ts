@@ -1,4 +1,5 @@
 import type {
+  ModelConnectivityPayload,
   ProviderModelsPayload,
   SettingsPayload,
 } from "../types/settings";
@@ -68,4 +69,17 @@ export function getProviderModels(
   return request<ProviderModelsPayload>(
     `/api/settings/provider-models?provider=${encodeURIComponent(provider)}`,
   );
+}
+
+export function testModelConnectivity(
+  targetType: "agent" | "embedding_profile",
+  name: string,
+): Promise<ModelConnectivityPayload> {
+  return request<ModelConnectivityPayload>("/api/settings/model-connectivity", {
+    method: "POST",
+    body: JSON.stringify({
+      target_type: targetType,
+      name,
+    }),
+  });
 }
