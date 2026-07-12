@@ -5,8 +5,6 @@ from datetime import datetime, timezone
 from time import perf_counter
 from typing import Any
 
-import httpx
-
 from src.llm import make_provider
 from src.llm.config import AgentConfig, EmbeddingProfile, ModelConfig, ProviderConfig
 from src.llm.registry import PROVIDERS, ProviderSpec, match_provider_backend
@@ -299,7 +297,13 @@ def _test_embedding_connectivity(config: ModelConfig, name: str, *, client: Any 
     profile = config.resolve_embedding_profile(name)
     started_at = perf_counter()
     try:
-        resolved_profile, provider = config.resolve_embedding_provider_config(name)
+        # 这里和阅读节点使用同一套 provider 装配方式，避免设置页通过、真实索引却失败。
+        snapshot = make_provider(
+            config,
+            embedding_profile_name=name,
+            client=client,
+            timeout_s=float(max(1, config.system.read.download_timeout_seconds)),
+        )
     except Exception as exc:
         return _connectivity_payload(
             target_type="embedding_profile",
@@ -311,68 +315,62 @@ def _test_embedding_connectivity(config: ModelConfig, name: str, *, client: Any 
             latency_ms=_elapsed_ms(started_at),
         )
 
-    headers = {"Content-Type": "application/json", **dict(provider.extra_headers or {})}
-    if provider.api_key:
-        headers.setdefault("Authorization", f"Bearer {provider.api_key}")
-
-    payload: JsonObject = {
-        "model": resolved_profile.model_name,
-        "input": ["连通性测试"],
-    }
-    if resolved_profile.dimensions is not None:
-        payload["dimensions"] = resolved_profile.dimensions
-
-    endpoint = str(provider.api_base).rstrip("/") + "/embeddings"
-    timeout_seconds = float(max(1, config.system.read.download_timeout_seconds))
     try:
-        if client is None:
-            with httpx.Client(timeout=timeout_seconds) as http_client:
-                response = http_client.post(endpoint, headers=headers, json=payload)
-        else:
-            response = client.post(endpoint, headers=headers, json=payload)
-        response.raise_for_status()
-        body = response.json()
+        response = snapshot.provider.embed_with_retry(["连通性测试"], dimensions=profile.dimensions)
+    except NotImplementedError as exc:
+        return _connectivity_payload(
+            target_type="embedding_profile",
+            name=name,
+            provider=profile.provider,
+            model=profile.model_name,
+            status="failed",
+            message=f"当前 provider 不支持 embedding：{exc}",
+            latency_ms=_elapsed_ms(started_at),
+        )
     except Exception as exc:
         return _connectivity_payload(
             target_type="embedding_profile",
             name=name,
-            provider=resolved_profile.provider,
-            model=resolved_profile.model_name,
+            provider=profile.provider,
+            model=profile.model_name,
             status="failed",
             message=f"嵌入模型调用失败：{exc}",
             latency_ms=_elapsed_ms(started_at),
         )
 
-    raw_items = body.get("data") if isinstance(body, dict) else None
-    if not isinstance(raw_items, list) or not raw_items:
+    if not response.ok:
+        detail = response.content.strip() or response.error_code or response.error_type or response.error_kind or "模型没有返回成功结果"
         return _connectivity_payload(
             target_type="embedding_profile",
             name=name,
-            provider=resolved_profile.provider,
-            model=resolved_profile.model_name,
+            provider=profile.provider,
+            model=profile.model_name,
             status="failed",
-            message="嵌入模型没有返回 data 列表",
+            message=f"嵌入模型调用失败：{detail}",
             latency_ms=_elapsed_ms(started_at),
+            error_kind=response.error_kind,
+            error_status_code=response.error_status_code,
+            finish_reason=response.finish_reason,
         )
 
-    first_item = raw_items[0] if isinstance(raw_items[0], dict) else None
-    vector = first_item.get("embedding") if first_item else None
+    vector = response.embeddings[0] if response.embeddings else None
     if not isinstance(vector, list) or not vector:
         return _connectivity_payload(
             target_type="embedding_profile",
             name=name,
-            provider=resolved_profile.provider,
-            model=resolved_profile.model_name,
+            provider=profile.provider,
+            model=profile.model_name,
             status="failed",
             message="嵌入模型返回的向量为空或格式不正确",
             latency_ms=_elapsed_ms(started_at),
+            finish_reason=response.finish_reason,
         )
 
     return _connectivity_payload(
         target_type="embedding_profile",
         name=name,
-        provider=resolved_profile.provider,
-        model=resolved_profile.model_name,
+        provider=profile.provider,
+        model=profile.model_name,
         status="passed",
         message=f"嵌入模型已成功返回 {len(vector)} 维向量",
         latency_ms=_elapsed_ms(started_at),

@@ -1,36 +1,33 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import httpx
-
+from src.llm import LLMProvider
 from src.paper_retrieval.models import PaperDocument
+from src.repositories.chroma.vector_store import VectorUpsertItem, make_chroma_store, normalize_chroma_metadata
 
 
 @dataclass(slots=True)
 class ChunkIndexResult:
-    """保存全文切片写入索引后的数量和索引文件位置。"""
+    """保存全文切片写入 Chroma 后的数量和向量库位置。"""
 
     chunk_count: int
-    index_path: Path
+    persist_path: Path
+    collection_name: str
 
 
 @dataclass(slots=True)
 class EmbeddingConnection:
-    """保存调用 embedding 服务所需的最少连接信息。"""
+    """保存生成向量所需的 provider 和调用参数。"""
 
-    api_base: str
-    api_key: str | None
+    provider: LLMProvider
     model_name: str
-    extra_headers: dict[str, str]
     dimensions: int | None = None
     batch_size: int = 32
-    timeout_seconds: int = 60
 
 
 def index_markdown_chunks(
@@ -38,12 +35,13 @@ def index_markdown_chunks(
     *,
     markdown_path: Path,
     source_url: str | None,
-    collection_path: str | Path,
+    vector_store_path: str | Path,
+    collection_name: str,
     chunk_size: int,
     chunk_overlap: int,
     embedding_connection: EmbeddingConnection,
 ) -> ChunkIndexResult:
-    """按标题和段落切分 Markdown，生成向量并保存包含溯源信息的本地索引记录。"""
+    """按标题和段落切分 Markdown，生成向量并保存到 Chroma 向量数据库。"""
 
     markdown = markdown_path.read_text(encoding="utf-8")
     content_hash = hashlib.sha256(markdown.encode("utf-8")).hexdigest()
@@ -51,47 +49,55 @@ def index_markdown_chunks(
     embeddings = _create_embeddings([str(chunk["content"]) for chunk in chunks], embedding_connection)
     if len(embeddings) != len(chunks):
         raise RuntimeError("embedding 服务返回的向量数量与正文片段数量不一致")
-    base_dir = Path(collection_path)
-    base_dir.mkdir(parents=True, exist_ok=True)
-    index_path = base_dir / "paper_chunks.jsonl"
+
+    # 中文注释：这里仍然沿用原来的切片和 embedding 生成方式，只把最后的保存方式
+    # 从 jsonl 文件换成 Chroma。这样阅读节点和断点恢复逻辑不用重新设计。
     records = [
         _build_chunk_record(paper, chunk, embedding, index, markdown_path, source_url, content_hash)
         for index, (chunk, embedding) in enumerate(zip(chunks, embeddings, strict=True))
     ]
-    _replace_paper_records(index_path, paper.id, records)
-    return ChunkIndexResult(chunk_count=len(records), index_path=index_path)
+    items = [_record_to_upsert_item(record) for record in records]
+    store = None
+    try:
+        store = make_chroma_store(vector_store_path, collection_name)
+        # 中文注释：同一篇论文重新索引时，先删旧切片再写新切片。
+        # 如果这次切出来的片段更少，旧的多余片段也会被清掉，不会混在查询结果里。
+        store.delete_by_paper_id(paper.id)
+        store.upsert(items)
+    except Exception as exc:
+        raise ValueError(f"Chroma 向量库写入失败：{exc}") from exc
+    finally:
+        # 中文注释：阅读节点每次索引完一篇论文后就可以关闭客户端。
+        # 下次索引或查询时会重新连接，这样能减少本地数据库文件被长期占用的情况。
+        if store is not None:
+            store.close()
+    return ChunkIndexResult(chunk_count=len(records), persist_path=Path(vector_store_path), collection_name=collection_name)
 
 
 def _create_embeddings(contents: list[str], connection: EmbeddingConnection) -> list[list[float]]:
-    """分批调用 OpenAI 兼容的 embedding 接口，返回与正文片段一一对应的向量。"""
+    """分批调用 provider 的 embedding 方法，返回与正文片段一一对应的向量。"""
 
     if not contents:
         return []
-    headers = {"Content-Type": "application/json", **connection.extra_headers}
-    if connection.api_key:
-        headers.setdefault("Authorization", f"Bearer {connection.api_key}")
     results: list[list[float]] = []
-    endpoint = connection.api_base.rstrip("/") + "/embeddings"
-    with httpx.Client(timeout=float(max(1, connection.timeout_seconds))) as client:
-        for start in range(0, len(contents), max(1, connection.batch_size)):
-            batch = contents[start : start + max(1, connection.batch_size)]
-            payload: dict[str, Any] = {"model": connection.model_name, "input": batch}
-            if connection.dimensions is not None:
-                payload["dimensions"] = connection.dimensions
-            try:
-                response = client.post(endpoint, headers=headers, json=payload)
-                response.raise_for_status()
-                raw_items = response.json().get("data")
-            except (httpx.HTTPError, ValueError) as exc:
-                raise RuntimeError(f"embedding 服务调用失败：{exc}") from exc
-            if not isinstance(raw_items, list):
-                raise RuntimeError("embedding 服务没有返回 data 列表")
-            ordered = sorted(raw_items, key=lambda item: int(item.get("index", 0)) if isinstance(item, dict) else 0)
-            for item in ordered:
-                vector = item.get("embedding") if isinstance(item, dict) else None
-                if not isinstance(vector, list) or not all(isinstance(value, int | float) for value in vector):
-                    raise RuntimeError("embedding 服务返回了无效向量")
-                results.append([float(value) for value in vector])
+    for start in range(0, len(contents), max(1, connection.batch_size)):
+        batch = contents[start : start + max(1, connection.batch_size)]
+        try:
+            # 具体怎么请求模型服务，交给 src.llm 里的 provider 处理；这里仍只关心拿到向量。
+            response = connection.provider.embed_with_retry(batch, dimensions=connection.dimensions)
+        except NotImplementedError as exc:
+            raise RuntimeError(f"embedding provider 不支持当前模型向量化：{exc}") from exc
+        except Exception as exc:
+            raise RuntimeError(f"embedding 服务调用失败：{exc}") from exc
+        if not response.ok:
+            detail = response.content.strip() or response.error_code or response.error_type or response.error_kind or "未知错误"
+            raise RuntimeError(f"embedding 服务调用失败：{detail}")
+        if len(response.embeddings) != len(batch):
+            raise RuntimeError("embedding 服务返回的向量数量与请求文本数量不一致")
+        for vector in response.embeddings:
+            if not isinstance(vector, list) or not all(isinstance(value, int | float) for value in vector):
+                raise RuntimeError("embedding 服务返回了无效向量")
+            results.append([float(value) for value in vector])
     return results
 
 
@@ -179,21 +185,24 @@ def _build_chunk_record(
         "chunk_index": index,
         "content_hash": hashlib.sha256(content.encode("utf-8")).hexdigest(),
         "paper_content_hash": paper_content_hash,
+        "schema_version": 1,
+        "content": content,
         "embedding": embedding,
     }
 
 
-def _replace_paper_records(index_path: Path, paper_id: str, records: list[dict[str, Any]]) -> None:
-    """替换同一篇论文的旧索引记录，使重复运行不会产生重复片段。"""
+def _record_to_upsert_item(record: dict[str, Any]) -> VectorUpsertItem:
+    """把内部切片记录转换成 Chroma upsert 需要的数据结构。"""
 
-    old_records: list[str] = []
-    if index_path.exists():
-        for line in index_path.read_text(encoding="utf-8").splitlines():
-            try:
-                payload = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if str(payload.get("paper_id") or "") != paper_id:
-                old_records.append(json.dumps(payload, ensure_ascii=False))
-    new_records = [json.dumps(record, ensure_ascii=False) for record in records]
-    index_path.write_text("\n".join([*old_records, *new_records]) + ("\n" if old_records or new_records else ""), encoding="utf-8")
+    # 中文注释：Chroma 会单独保存正文 document 和向量 embedding。
+    # 因此 metadata 里不要再放正文和向量，避免数据重复，也避免 metadata 类型过于复杂。
+    metadata = {key: value for key, value in record.items() if key not in {"chunk_id", "content", "embedding"}}
+    embedding = record.get("embedding")
+    if not isinstance(embedding, list) or not all(isinstance(value, int | float) for value in embedding):
+        raise ValueError("切片记录缺少有效的 embedding 向量")
+    return VectorUpsertItem(
+        id=str(record["chunk_id"]),
+        embedding=[float(value) for value in embedding],
+        metadata=normalize_chroma_metadata(metadata),
+        document=str(record.get("content") or ""),
+    )

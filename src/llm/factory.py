@@ -36,30 +36,54 @@ def make_provider(
     config: ModelConfig,
     agent_name: str | None = None,
     *,
+    embedding_profile_name: str | None = None,
     client: Any | None = None,
+    timeout_s: float = 60,
 ) -> ProviderSnapshot:
-    """根据 Agent 模型配置装配并返回一个 provider 快照。
+    """根据模型配置装配并返回一个 provider 快照。
 
     Args:
-        config: 全局模型配置对象，包含 provider 配置和模型 preset。
+        config: 全局模型配置对象，包含 provider、agent 和 embedding profile 配置。
         agent_name: 需要解析的 Agent 名称；为空时使用 default_agent。
+        embedding_profile_name: 需要解析的 embedding profile 名称；为空时不走 embedding 装配。
         client: 可选外部注入 client，通常用于测试、mock 或复用自定义 SDK 实例。
+        timeout_s: provider 请求超时时间，单位秒；embedding 和 chat 装配都会透传。
 
     Returns:
         `ProviderSnapshot`，其中包含实例化后的 provider 和配置签名。
 
-    工厂函数只负责“装配”而不负责请求执行。它会依次完成：
-    1. 解析 Agent 配置。
-    2. 解析最终 provider 实例配置。
-    3. 根据该配置声明的 backend 选择协议规格。
-    4. 选择具体适配器类并实例化。
-    5. 生成稳定签名，供后续热刷新判断。
+    工厂函数只负责“装配成一个可用 provider 实例”，不关心后续调用 chat 还是
+    embedding。默认仍按 agent 装配；当传入 embedding_profile_name 时，则按
+    embedding profile 装配同样的 provider 实例，但不新增单独的 make_embedding_provider。
     """
-    # 工厂只做装配：解析 Agent、加载 provider 实例配置、选择协议适配器。
+    if agent_name is not None and embedding_profile_name is not None:
+        raise ValueError("agent_name 和 embedding_profile_name 不能同时指定，请只选择一种模型配置")
+
+    if embedding_profile_name is not None:
+        # embedding profile 只决定“用哪个 provider 和哪个向量模型”，具体请求仍由 provider.embed 负责。
+        profile_name = embedding_profile_name or config.default_embedding_profile
+        profile, provider_config = config.resolve_embedding_provider_config(profile_name)
+        provider_name = profile.provider
+        spec = match_provider_backend(provider_config.backend)
+        kwargs: dict[str, Any] = {
+            "model": profile.model_name,
+            "api_key": provider_config.api_key,
+            "api_base": provider_config.api_base,
+            "generation": None,
+            "extra_headers": provider_config.extra_headers,
+            "extra_body": provider_config.extra_body,
+            "client": client,
+            "timeout_s": timeout_s,
+        }
+        provider = _instantiate_provider(spec, kwargs)
+        signature_payload = {"target_type": "embedding_profile", "target_name": profile_name, "profile": asdict(profile)}
+        return ProviderSnapshot(provider, profile.model_name, None, _signature(provider_name, signature_payload, asdict(provider_config)))
+
+    # 默认路径保持原来的 Agent 装配方式，避免影响搜索节点、阅读摘要和设置页模型连通性测试。
     agent = config.resolve_agent(agent_name)
     provider_name, provider_config = config.resolve_provider_config(agent)
     spec = match_provider_backend(provider_config.backend)
-    kwargs: dict[str, Any] = {
+    kwargs = {
         "model": agent.model_name,
         "api_key": provider_config.api_key,
         "api_base": provider_config.api_base,
@@ -67,16 +91,22 @@ def make_provider(
         "extra_headers": provider_config.extra_headers,
         "extra_body": provider_config.extra_body,
         "client": client,
+        "timeout_s": timeout_s,
     }
+    provider = _instantiate_provider(spec, kwargs)
+    return ProviderSnapshot(provider, agent.model_name, agent.context_window_tokens, _signature(provider_name, _agent_signature(agent), asdict(provider_config)))
+
+
+def _instantiate_provider(spec: Any, kwargs: dict[str, Any]) -> LLMProvider:
+    """按 provider 后端类型创建具体适配器实例。"""
+
     if spec.backend == "openai_compat":
         # OpenAI 及大多数 OpenAI-compatible 网关都走统一适配器。
-        provider = OpenAICompatProvider(spec=spec, **kwargs)
-    elif spec.backend == "anthropic":
+        return OpenAICompatProvider(spec=spec, **kwargs)
+    if spec.backend == "anthropic":
         # Anthropic 原生协议与 Anthropic-compatible 网关共用同一适配器。
-        provider = AnthropicProvider(spec=spec, **kwargs)
-    else:
-        raise ValueError(f"unsupported provider backend: {spec.backend}")
-    return ProviderSnapshot(provider, agent.model_name, agent.context_window_tokens, _signature(provider_name, _agent_signature(agent), asdict(provider_config)))
+        return AnthropicProvider(spec=spec, **kwargs)
+    raise ValueError(f"unsupported provider backend: {spec.backend}")
 
 
 def _agent_signature(agent: AgentConfig) -> dict[str, Any]:

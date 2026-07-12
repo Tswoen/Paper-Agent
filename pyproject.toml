@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "anthropic>=0.111.0",
+    "chromadb>=1.5.9",
     "fastapi>=0.116.0",
     "httpx>=0.28.0",
     "langgraph>=1.2.6",

@@ -134,6 +134,7 @@ def run_read_node():
         for position, paper in enumerate(papers[start_position - 1 :], start=start_position):
             _report_progress(reporter, paper, "reading_abstract", position - 1, len(papers))
             try:
+                # 阅读每一篇论文，返回论文阅读的结果，以及是否采用了全文精读
                 result, used_deep_read = _read_one_paper(
                     paper,
                     topic=request.topic,
@@ -417,7 +418,8 @@ def _resume_pending_index(
             pending_result.paper,
             markdown_path=Path(pending_result.full_text.markdown_path),
             source_url=pending_result.full_text.source_url,
-            collection_path=Path(config.vector_store_path) / config.vector_store_collection,
+            vector_store_path=config.vector_store_path,
+            collection_name=config.vector_store_collection,
             chunk_size=config.chunk_size,
             chunk_overlap=config.chunk_overlap,
             embedding_connection=embedding_connection,
@@ -741,7 +743,8 @@ def _read_one_paper(
             paper,
             markdown_path=converted.markdown_path,
             source_url=downloaded.source_url,
-            collection_path=Path(config.vector_store_path) / config.vector_store_collection,
+            vector_store_path=config.vector_store_path,
+            collection_name=config.vector_store_collection,
             chunk_size=config.chunk_size,
             chunk_overlap=config.chunk_overlap,
             embedding_connection=embedding_connection,
@@ -943,16 +946,14 @@ def _resolve_embedding_connection(system_config: SystemConfig, timeout_seconds: 
         return None, "未找到模型配置，全文尚未写入向量库"
     try:
         model_config = ModelConfig.from_dict(json.loads(model_path.read_text(encoding="utf-8")), system_config)
-        profile, provider = model_config.resolve_embedding_provider_config()
+        profile = model_config.resolve_embedding_profile()
+        snapshot = make_provider(model_config, embedding_profile_name=model_config.default_embedding_profile, timeout_s=float(max(1, timeout_seconds)))
         return (
             EmbeddingConnection(
-                api_base=str(provider.api_base),
-                api_key=provider.api_key,
+                provider=snapshot.provider,
                 model_name=profile.model_name,
-                extra_headers=dict(provider.extra_headers),
                 dimensions=profile.dimensions,
                 batch_size=int(profile.batch_size or 32),
-                timeout_seconds=timeout_seconds,
             ),
             None,
         )

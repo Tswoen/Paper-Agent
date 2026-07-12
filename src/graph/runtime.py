@@ -109,6 +109,7 @@ class WorkflowNodeReporter:
         return self.sync_port.emit(
             {
                 "event": "node_completed",
+                 
                 "node_key": self.node_key,
                 "node_title": self.node_title,
                 "message": message or f"{self.node_title}已完成",

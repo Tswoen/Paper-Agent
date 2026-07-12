@@ -98,6 +98,47 @@ class LLMResponse:
 
 
 @dataclass(slots=True)
+class EmbeddingResponse:
+    # embedding 的主结果是向量列表，所以单独定义响应对象，不和文本回复混在一起。
+    """统一封装一次 embedding 调用结果。
+
+    Attributes:
+        embeddings: 与输入文本一一对应的向量列表。
+        model: 实际完成向量化的模型名，便于前端和日志展示。
+        usage: 供应商返回的 token 用量等统计信息。
+        finish_reason: 结束原因；失败时统一为 `"error"`。
+        error_status_code: HTTP 状态码；仅失败时可能存在。
+        error_kind: 归一化后的错误类别，例如 rate_limit、auth、server_error。
+        error_type: 供应商错误体中的更细粒度错误类型。
+        error_code: 供应商错误体中的业务错误码。
+        error_retry_after_s: 建议等待多久再重试，单位秒。
+        error_should_retry: 是否建议重试；若为空则由通用策略继续判断。
+        content: 错误说明或供应商原始错误文本。
+
+    chat 返回的是自然语言文本，embedding 返回的是数字向量。这里单独建一个
+    响应对象，让调用方不用在文本字段里猜测向量数据放在哪里；但错误字段保持和
+    LLMResponse 一致，方便上层用同一套展示和重试逻辑。
+    """
+    embeddings: list[list[float]] = field(default_factory=list)
+    model: str | None = None
+    usage: JsonObject | None = None
+    finish_reason: str | None = None
+    error_status_code: int | None = None
+    error_kind: str | None = None
+    error_type: str | None = None
+    error_code: str | None = None
+    error_retry_after_s: float | None = None
+    error_should_retry: bool | None = None
+    content: str = ""
+
+    @property
+    def ok(self) -> bool:
+        """判断 embedding 请求是否成功。"""
+
+        return self.finish_reason != "error"
+
+
+@dataclass(slots=True)
 class StreamCallbacks:
     # 流式输出拆成文本、思考、工具调用三类增量，方便 runner 按需消费。
     """定义流式输出时可选的三类回调。
@@ -210,6 +251,26 @@ class LLMProvider(ABC):
         """
         raise NotImplementedError
 
+    @abstractmethod
+    def embed(
+        self,
+        inputs: Sequence[str],
+        *,
+        dimensions: int | None = None,
+    ) -> EmbeddingResponse:
+        """执行一次文本向量化请求。
+
+        Args:
+            inputs: 需要转成向量的文本列表，返回结果需要与它一一对应。
+            dimensions: 可选的目标向量维度，只传给支持该参数的 embedding 服务。
+
+        Returns:
+            统一的 EmbeddingResponse。支持 embedding 的 provider 需要返回向量；
+            不支持 embedding 的 provider 应在自己的实现里抛出清楚错误，告诉用户
+            为什么不能用它生成向量。
+        """
+        raise NotImplementedError
+
     def chat_with_retry(self, messages: Sequence[Message], **kwargs: Any) -> LLMResponse:
         """执行带重试的非流式对话请求。
 
@@ -260,6 +321,28 @@ class LLMProvider(ABC):
             time.sleep(last.error_retry_after_s or 2**attempt)
         return last
 
+    def embed_with_retry(self, inputs: Sequence[str], **kwargs: Any) -> EmbeddingResponse:
+        """执行带重试的 embedding 请求。
+
+        Args:
+            inputs: 需要转成向量的文本列表。
+            **kwargs: 透传给 `embed` 的其余参数，例如 dimensions。
+
+        Returns:
+            成功响应，或重试耗尽后的最后一次错误响应。
+
+        embedding 和 chat 一样会遇到限流、服务端临时错误、网络抖动等问题。这里把
+        重试逻辑放在基类，具体 provider 只需要专心完成“一次请求”。如果 provider
+        本身不支持 embedding，它会直接抛出清楚错误，不会走无意义重试。
+        """
+        last = EmbeddingResponse(finish_reason="error", error_kind="unknown", error_should_retry=True)
+        for attempt in range(3):
+            last = self.embed(inputs, **kwargs)
+            if last.ok or not self._should_retry(last) or attempt == 2:
+                return last
+            time.sleep(last.error_retry_after_s or 2**attempt)
+        return last
+
     def _settings(
         self,
         temperature: float | None,
@@ -300,20 +383,58 @@ class LLMProvider(ABC):
         这个函数的目标是把“异常控制流”改写成“数据返回值”，让上层调度器只面对
         一种返回形态，不需要针对不同 SDK 的异常类写大量分支。
         """
-        # 官方 SDK 通常暴露 status_code/headers，这里统一沉淀为 LLMResponse。
+        error = self._error_fields(exc)
+        return LLMResponse(
+            finish_reason="error",
+            error_status_code=error["error_status_code"],
+            error_kind=error["error_kind"],
+            error_retry_after_s=error["error_retry_after_s"],
+            error_should_retry=error["error_should_retry"],
+            error_type=error["error_type"],
+            error_code=error["error_code"],
+            content=error["content"],
+        )
+
+    def _embedding_error_response(self, exc: Exception) -> EmbeddingResponse:
+        """把 embedding 调用异常统一折叠为 `EmbeddingResponse` 错误对象。
+
+        Args:
+            exc: embedding 调用过程中抛出的异常，可能是 HTTP 错误、SDK 错误或连接错误。
+
+        Returns:
+            `finish_reason="error"` 的统一 embedding 响应，方便上层按同一套字段展示。
+
+        这个函数和 `_error_response` 的思路相同，只是返回对象不同。这样调用方可以
+        清楚地区分“文本生成失败”和“向量生成失败”，不会把两类结果混在一起。
+        """
+        error = self._error_fields(exc)
+        return EmbeddingResponse(
+            finish_reason="error",
+            error_status_code=error["error_status_code"],
+            error_kind=error["error_kind"],
+            error_retry_after_s=error["error_retry_after_s"],
+            error_should_retry=error["error_should_retry"],
+            error_type=error["error_type"],
+            error_code=error["error_code"],
+            content=error["content"],
+        )
+
+    def _error_fields(self, exc: Exception) -> JsonObject:
+        """把各种异常提取成通用错误字段。"""
+
+        # 官方 SDK 通常暴露 status_code/headers；自定义 HTTP 错误也按同一套字段处理。
         if isinstance(exc, ProviderHttpError):
             retry_after = _parse_retry_after(exc.headers.get("retry-after"))
             kind = _http_error_kind(exc.status_code)
-            return LLMResponse(
-                finish_reason="error",
-                error_status_code=exc.status_code,
-                error_kind=kind,
-                error_retry_after_s=retry_after,
-                error_should_retry=kind in {"rate_limit", "server_error"},
-                error_type=_json_error_field(exc.body, "type"),
-                error_code=_json_error_field(exc.body, "code"),
-                content=exc.body,
-            )
+            return {
+                "error_status_code": exc.status_code,
+                "error_kind": kind,
+                "error_retry_after_s": retry_after,
+                "error_should_retry": kind in {"rate_limit", "server_error"},
+                "error_type": _json_error_field(exc.body, "type"),
+                "error_code": _json_error_field(exc.body, "code"),
+                "content": exc.body,
+            }
         status_code = getattr(exc, "status_code", None)
         if status_code is not None:
             # 兼容官方 SDK 自带异常类型：它们往往直接暴露 status_code 和 headers。
@@ -321,25 +442,27 @@ class LLMProvider(ABC):
             retry_after = _parse_retry_after(headers.get("retry-after"))
             kind = _http_error_kind(status_code)
             body = str(exc)
-            return LLMResponse(
-                finish_reason="error",
-                error_status_code=status_code,
-                error_kind=kind,
-                error_retry_after_s=retry_after,
-                error_should_retry=kind in {"rate_limit", "server_error"},
-                error_type=_json_error_field(body, "type"),
-                error_code=_json_error_field(body, "code"),
-                content=body,
-            )
+            return {
+                "error_status_code": status_code,
+                "error_kind": kind,
+                "error_retry_after_s": retry_after,
+                "error_should_retry": kind in {"rate_limit", "server_error"},
+                "error_type": _json_error_field(body, "type"),
+                "error_code": _json_error_field(body, "code"),
+                "content": body,
+            }
         # 走到这里通常说明没有明确 HTTP 状态码，把它归类为连接层或未知异常。
-        return LLMResponse(
-            finish_reason="error",
-            error_kind="connection",
-            error_should_retry=True,
-            content=str(exc),
-        )
+        return {
+            "error_status_code": None,
+            "error_kind": "connection",
+            "error_retry_after_s": None,
+            "error_should_retry": True,
+            "error_type": None,
+            "error_code": None,
+            "content": str(exc),
+        }
 
-    def _should_retry(self, response: LLMResponse) -> bool:
+    def _should_retry(self, response: LLMResponse | EmbeddingResponse) -> bool:
         """判断某个错误响应是否值得重试。
 
         Args:

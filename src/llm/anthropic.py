@@ -4,7 +4,7 @@ import json
 from collections.abc import Sequence
 from typing import Any
 
-from .base import JsonObject, LLMProvider, LLMResponse, Message, StreamCallbacks, ToolCallRequest
+from .base import EmbeddingResponse, JsonObject, LLMProvider, LLMResponse, Message, StreamCallbacks, ToolCallRequest
 from .registry import ProviderSpec
 
 
@@ -112,6 +112,29 @@ class AnthropicProvider(LLMProvider):
             return LLMResponse(content="".join(content), finish_reason="stop")
         except Exception as exc:
             return self._error_response(exc)
+
+    def embed(
+        self,
+        inputs: Sequence[str],
+        *,
+        dimensions: int | None = None,
+    ) -> EmbeddingResponse:
+        """明确说明 Anthropic Messages provider 不支持 embedding。
+
+        Args:
+            inputs: 调用方希望生成向量的文本列表。
+            dimensions: 调用方希望指定的向量维度。
+
+        Raises:
+            NotImplementedError: 当前 Anthropic Messages 接口不能生成文本向量。
+
+        AnthropicProvider 主要负责对话生成。它没有 `/embeddings` 这类向量接口，
+        所以这里直接抛出清楚错误，让设置页和阅读节点都能告诉用户该换 embedding provider。
+        """
+        raise NotImplementedError(
+            "AnthropicProvider 不支持 embedding：Anthropic Messages 接口只用于对话生成，不能生成文本向量。"
+            "请在 embedding profile 中选择 OpenAI 兼容 provider。"
+        )
 
     def _build_kwargs(
         self,
