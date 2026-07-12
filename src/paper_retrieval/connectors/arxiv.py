@@ -46,7 +46,36 @@ class ArxivPaperConnector(PaperSearchConnector):
             },
         )
         response.raise_for_status()
-        root = ET.fromstring(response.text)
+        return self._parse_response_text(response.text, request)
+
+    async def async_search(self, request: SearchRequest) -> list[PaperDocument]:
+        """异步执行 arXiv 检索，避免在异步编排里阻塞事件循环。"""
+
+        query = self._build_query(request)
+        async with httpx.AsyncClient(
+            timeout=20.0,
+            headers={
+                "User-Agent": "papers-agents/0.1 paper-retrieval",
+                "Accept": "application/atom+xml, application/xml;q=0.9, */*;q=0.8",
+            },
+        ) as client:
+            response = await client.get(
+                self._endpoint,
+                params={
+                    "search_query": query,
+                    "start": 0,
+                    "max_results": max(1, request.limit),
+                    "sortBy": "relevance",
+                    "sortOrder": "descending",
+                },
+            )
+        response.raise_for_status()
+        return self._parse_response_text(response.text, request)
+
+    def _parse_response_text(self, text: str, request: SearchRequest) -> list[PaperDocument]:
+        """把 arXiv XML 响应解析成论文列表，同步和异步入口共用。"""
+
+        root = ET.fromstring(text)
         papers: list[PaperDocument] = []
         for entry in root.findall("atom:entry", self._atom_ns):
             paper = self._parse_entry(entry)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from fastapi import APIRouter, Query, Request
@@ -42,7 +43,8 @@ def create_settings_router(repo: SettingsRepository) -> APIRouter:
         """读取某个 provider 的模型目录。"""
 
         try:
-            return provider_models_payload(repo, provider)
+            # 拉取模型目录需要访问远端服务，放到线程里执行，避免卡住 FastAPI 主循环。
+            return await asyncio.to_thread(provider_models_payload, repo, provider)
         except SettingsError as exc:
             return _settings_error_response(exc)
 
@@ -52,7 +54,9 @@ def create_settings_router(repo: SettingsRepository) -> APIRouter:
 
         try:
             body = await _json_body(request)
-            return model_connectivity_payload(
+            # 连通性测试会真实调用模型，放到线程里执行，避免阻塞其他接口。
+            return await asyncio.to_thread(
+                model_connectivity_payload,
                 repo,
                 str(body.get("target_type") or body.get("targetType") or ""),
                 str(body.get("name") or ""),

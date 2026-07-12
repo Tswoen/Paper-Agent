@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping as MappingABC
@@ -8,9 +10,13 @@ from dataclasses import dataclass, field
 from email.utils import parsedate_to_datetime
 from typing import Any, Callable, Mapping, Sequence
 
+from src.utils import get_logger
+
 
 Message = Mapping[str, Any]
 JsonObject = dict[str, Any]
+
+logger = get_logger(__name__)
 
 
 @dataclass(slots=True)
@@ -191,6 +197,11 @@ class LLMProvider(ABC):
         extra_body: Mapping[str, Any] | None = None,
         client: Any | None = None,
         timeout_s: float = 60,
+        max_retries: int | None = None,
+        retry_initial_delay_s: float | None = None,
+        retry_max_delay_s: float | None = None,
+        max_concurrency: int | None = None,
+        include_stream_usage: bool | None = None,
     ):
         """初始化 LLM provider 的通用配置。
 
@@ -203,6 +214,11 @@ class LLMProvider(ABC):
             extra_body: 额外请求体字段，用于透传厂商私有参数。
             client: 可选外部注入 SDK client，常用于测试或自定义 transport。
             timeout_s: 请求超时时间，单位秒。
+            max_retries: 最大重试次数；None 时使用默认 3 次。
+            retry_initial_delay_s: 第一次重试前等待多久；None 时使用 1 秒。
+            retry_max_delay_s: 重试等待的最大秒数，避免一直睡太久。
+            max_concurrency: 当前 provider 实例允许同时进行多少个真实请求。
+            include_stream_usage: 流式请求是否尝试要求供应商返回 token 用量。
 
         这个基类只保存通用配置，不直接绑定任何具体协议；具体请求构造与响应解析
         由各个子类 provider 实现。
@@ -214,7 +230,14 @@ class LLMProvider(ABC):
         self.extra_headers = dict(extra_headers or {})
         self.extra_body = dict(extra_body or {})
         self.client = client
-        self.timeout_s = timeout_s
+        self.timeout_s = float(max(1, timeout_s))
+        # 运行控制统一放在基类，业务节点只负责调用 provider，不需要自己写重试和限流。
+        self.max_retries = max(1, int(max_retries or 3))
+        self.retry_initial_delay_s = max(0.0, float(retry_initial_delay_s if retry_initial_delay_s is not None else 1.0))
+        self.retry_max_delay_s = max(self.retry_initial_delay_s, float(retry_max_delay_s if retry_max_delay_s is not None else 10.0))
+        self.max_concurrency = max(1, int(max_concurrency or 2))
+        self.include_stream_usage = True if include_stream_usage is None else bool(include_stream_usage)
+        self._semaphore = threading.BoundedSemaphore(self.max_concurrency)
 
     @abstractmethod
     def chat(
@@ -272,27 +295,11 @@ class LLMProvider(ABC):
         raise NotImplementedError
 
     def chat_with_retry(self, messages: Sequence[Message], **kwargs: Any) -> LLMResponse:
-        """执行带重试的非流式对话请求。
+        """兼容旧调用名，实际控制逻辑已经收敛到 `chat` 内部。"""
 
-        Args:
-            messages: 输入消息列表。
-            **kwargs: 透传给 `chat` 的其余调用参数。
-
-        Returns:
-            成功响应，或重试耗尽后的最后一次错误响应。
-
-        当前策略最多尝试 3 次。是否重试由 `_should_retry` 决定；等待时间优先使用
-        服务端返回的 `retry-after`，否则使用指数退避 `1s/2s/4s` 风格的回退值。
-        """
-        # 重试逻辑放在基类，具体 provider 只负责一次请求和错误标准化。
-        last = LLMResponse(finish_reason="error", error_kind="unknown", error_should_retry=True)
-        for attempt in range(3):
-            last = self.chat(messages, **kwargs)
-            if last.ok or not self._should_retry(last) or attempt == 2:
-                return last
-            # 若服务端未给出明确等待时间，则使用简单指数退避降低连续打爆上游的风险。
-            time.sleep(last.error_retry_after_s or 2**attempt)
-        return last
+        # 旧业务代码仍然调用 chat_with_retry。这里不要再循环重试，避免和 provider
+        # 公共入口里的重试叠加成 3 x 3 次请求。
+        return self.chat(messages, **kwargs)
 
     def chat_stream_with_retry(
         self,
@@ -300,48 +307,104 @@ class LLMProvider(ABC):
         callbacks: StreamCallbacks,
         **kwargs: Any,
     ) -> LLMResponse:
-        """执行带重试的流式对话请求。
+        """兼容旧流式调用名，实际控制逻辑已经收敛到 `chat_stream` 内部。"""
 
-        Args:
-            messages: 输入消息列表。
-            callbacks: 流式输出回调集合。
-            **kwargs: 透传给 `chat_stream` 的其余参数。
-
-        Returns:
-            成功响应，或重试耗尽后的最后一次错误响应。
-
-        逻辑与 `chat_with_retry` 类似，只是底层调用改成流式接口。注意如果前几次
-        流式请求已经向回调发出过部分增量，上层需要自行决定如何处理这些半成品输出。
-        """
-        last = LLMResponse(finish_reason="error", error_kind="unknown", error_should_retry=True)
-        for attempt in range(3):
-            last = self.chat_stream(messages, callbacks, **kwargs)
-            if last.ok or not self._should_retry(last) or attempt == 2:
-                return last
-            time.sleep(last.error_retry_after_s or 2**attempt)
-        return last
+        return self.chat_stream(messages, callbacks, **kwargs)
 
     def embed_with_retry(self, inputs: Sequence[str], **kwargs: Any) -> EmbeddingResponse:
-        """执行带重试的 embedding 请求。
+        """兼容旧 embedding 调用名，实际控制逻辑已经收敛到 `embed` 内部。"""
 
-        Args:
-            inputs: 需要转成向量的文本列表。
-            **kwargs: 透传给 `embed` 的其余参数，例如 dimensions。
+        return self.embed(inputs, **kwargs)
 
-        Returns:
-            成功响应，或重试耗尽后的最后一次错误响应。
+    async def async_chat(self, messages: Sequence[Message], **kwargs: Any) -> LLMResponse:
+        """在异步路由里调用同步 chat，避免直接卡住 FastAPI 事件循环。"""
 
-        embedding 和 chat 一样会遇到限流、服务端临时错误、网络抖动等问题。这里把
-        重试逻辑放在基类，具体 provider 只需要专心完成“一次请求”。如果 provider
-        本身不支持 embedding，它会直接抛出清楚错误，不会走无意义重试。
-        """
-        last = EmbeddingResponse(finish_reason="error", error_kind="unknown", error_should_retry=True)
-        for attempt in range(3):
-            last = self.embed(inputs, **kwargs)
-            if last.ok or not self._should_retry(last) or attempt == 2:
-                return last
-            time.sleep(last.error_retry_after_s or 2**attempt)
+        return await asyncio.to_thread(self.chat, messages, **kwargs)
+
+    async def async_chat_stream(self, messages: Sequence[Message], callbacks: StreamCallbacks, **kwargs: Any) -> LLMResponse:
+        """在异步路由里调用同步流式 chat，避免直接卡住 FastAPI 事件循环。"""
+
+        return await asyncio.to_thread(self.chat_stream, messages, callbacks, **kwargs)
+
+    async def async_embed(self, inputs: Sequence[str], **kwargs: Any) -> EmbeddingResponse:
+        """在异步路由里调用同步 embedding，避免直接卡住 FastAPI 事件循环。"""
+
+        return await asyncio.to_thread(self.embed, inputs, **kwargs)
+
+    def list_models(self) -> list[JsonObject]:
+        """列出 provider 可用模型；不支持的 provider 直接给出清楚提示。"""
+
+        raise NotImplementedError("当前 provider 不支持读取模型目录")
+
+    def _run_llm_call(self, operation: str, call_once: Callable[[], LLMResponse]) -> LLMResponse:
+        """按统一规则执行一次文本模型调用，包含限流、重试和耗时日志。"""
+
+        last = LLMResponse(finish_reason="error", error_kind="unknown", error_should_retry=True)
+        started_at = time.perf_counter()
+        attempts = 0
+        with self._semaphore:
+            for attempt in range(self.max_retries):
+                attempts = attempt + 1
+                try:
+                    last = call_once()
+                except Exception as exc:
+                    # 少数 provider 的底层方法可能直接抛异常，这里统一转成响应对象。
+                    last = self._error_response(exc)
+                if last.ok or not self._should_retry(last) or attempt == self.max_retries - 1:
+                    self._log_call_result(operation, last, attempts, started_at)
+                    return last
+                time.sleep(self._retry_delay(last, attempt))
+        self._log_call_result(operation, last, attempts, started_at)
         return last
+
+    def _run_embedding_call(self, operation: str, call_once: Callable[[], EmbeddingResponse]) -> EmbeddingResponse:
+        """按统一规则执行一次 embedding 调用，包含限流、重试和耗时日志。"""
+
+        last = EmbeddingResponse(finish_reason="error", error_kind="unknown", error_should_retry=True)
+        started_at = time.perf_counter()
+        attempts = 0
+        with self._semaphore:
+            for attempt in range(self.max_retries):
+                attempts = attempt + 1
+                try:
+                    last = call_once()
+                except NotImplementedError:
+                    # 不支持 embedding 是明确能力问题，不应吞掉或重试。
+                    raise
+                except Exception as exc:
+                    last = self._embedding_error_response(exc)
+                if last.ok or not self._should_retry(last) or attempt == self.max_retries - 1:
+                    self._log_call_result(operation, last, attempts, started_at)
+                    return last
+                time.sleep(self._retry_delay(last, attempt))
+        self._log_call_result(operation, last, attempts, started_at)
+        return last
+
+    def _retry_delay(self, response: LLMResponse | EmbeddingResponse, attempt: int) -> float:
+        """计算下一次重试前等待多久，优先尊重服务端 Retry-After。"""
+
+        if response.error_retry_after_s is not None:
+            return min(max(0.0, response.error_retry_after_s), self.retry_max_delay_s)
+        delay = self.retry_initial_delay_s * (2 ** attempt)
+        return min(delay, self.retry_max_delay_s)
+
+    def _log_call_result(self, operation: str, response: LLMResponse | EmbeddingResponse, attempts: int, started_at: float) -> None:
+        """记录一次 provider 调用摘要，避免把完整模型内容写进日志。"""
+
+        duration_ms = int((time.perf_counter() - started_at) * 1000)
+        logger.info(
+            "模型调用完成",
+            extra={
+                "provider_model": self.model,
+                "operation": operation,
+                "duration_ms": duration_ms,
+                "attempts": attempts,
+                "finish_reason": response.finish_reason,
+                "usage": response.usage,
+                "error_kind": response.error_kind,
+                "error_status_code": response.error_status_code,
+            },
+        )
 
     def _settings(
         self,

@@ -15,7 +15,7 @@ JsonObject = dict[str, Any]
 
 @dataclass(slots=True)
 class ProviderConfig:
-    """描述某个 provider 的连接与鉴权配置。"""
+    """描述某个 provider 的连接、鉴权和调用控制配置。"""
 
     backend: str = "openai_compat"
     api_key: str | None = None
@@ -23,6 +23,14 @@ class ProviderConfig:
     api_base: str | None = None
     extra_headers: dict[str, str] = field(default_factory=dict)
     extra_body: dict[str, Any] = field(default_factory=dict)
+    # 下面这些字段只控制“怎么调用模型”，不改变业务输入输出。
+    # 统一放在 provider 配置里，业务节点就不用到处写超时、重试和并发限制。
+    timeout_s: float | None = None
+    max_retries: int | None = None
+    retry_initial_delay_s: float | None = None
+    retry_max_delay_s: float | None = None
+    max_concurrency: int | None = None
+    include_stream_usage: bool | None = None
 
 
 @dataclass(slots=True)
@@ -185,7 +193,20 @@ class ModelConfig:
         if not api_base:
             raise ValueError(f"provider {agent.provider} requires api_base")
         # 返回补齐环境变量和默认 base_url 后的副本，避免把运行时值写回原始配置。
-        return agent.provider, ProviderConfig(spec.name, api_key, env_key, api_base, provider_config.extra_headers, provider_config.extra_body)
+        return agent.provider, ProviderConfig(
+            backend=spec.name,
+            api_key=api_key,
+            api_key_env=env_key,
+            api_base=api_base,
+            extra_headers=provider_config.extra_headers,
+            extra_body=provider_config.extra_body,
+            timeout_s=provider_config.timeout_s,
+            max_retries=provider_config.max_retries,
+            retry_initial_delay_s=provider_config.retry_initial_delay_s,
+            retry_max_delay_s=provider_config.retry_max_delay_s,
+            max_concurrency=provider_config.max_concurrency,
+            include_stream_usage=provider_config.include_stream_usage,
+        )
 
     def resolve_embedding_profile(self, name: str | None = None) -> EmbeddingProfile:
         profile_name = name or self.default_embedding_profile
@@ -210,12 +231,18 @@ class ModelConfig:
         if not api_base:
             raise ValueError(f"embedding provider {profile.provider} requires api_base")
         return profile, ProviderConfig(
-            spec.name,
-            api_key,
-            env_key,
-            api_base,
-            provider_config.extra_headers,
-            provider_config.extra_body,
+            backend=spec.name,
+            api_key=api_key,
+            api_key_env=env_key,
+            api_base=api_base,
+            extra_headers=provider_config.extra_headers,
+            extra_body=provider_config.extra_body,
+            timeout_s=provider_config.timeout_s,
+            max_retries=provider_config.max_retries,
+            retry_initial_delay_s=provider_config.retry_initial_delay_s,
+            retry_max_delay_s=provider_config.retry_max_delay_s,
+            max_concurrency=provider_config.max_concurrency,
+            include_stream_usage=provider_config.include_stream_usage,
         )
 
 
@@ -235,6 +262,13 @@ def _provider_from_dict(name: str, value: Mapping[str, Any]) -> ProviderConfig:
         api_base=value.get("api_base") or value.get("apiBase"),
         extra_headers=dict(value.get("extra_headers") or value.get("extraHeaders") or {}),
         extra_body=dict(value.get("extra_body") or value.get("extraBody") or {}),
+        # 兼容前端常用的 camelCase，也兼容配置文件里的 snake_case。
+        timeout_s=_optional_float(value.get("timeout_s", value.get("timeoutS"))),
+        max_retries=_optional_int(value.get("max_retries", value.get("maxRetries"))),
+        retry_initial_delay_s=_optional_float(value.get("retry_initial_delay_s", value.get("retryInitialDelayS"))),
+        retry_max_delay_s=_optional_float(value.get("retry_max_delay_s", value.get("retryMaxDelayS"))),
+        max_concurrency=_optional_int(value.get("max_concurrency", value.get("maxConcurrency"))),
+        include_stream_usage=_optional_bool(value.get("include_stream_usage", value.get("includeStreamUsage"))),
     )
 
 
@@ -323,6 +357,44 @@ def _parse_scalar(value: str) -> Any:
         return float(value)
     except ValueError:
         return value.strip('"').strip("'")
+
+
+def _optional_int(value: Any) -> int | None:
+    """把可选整数配置安全读出来，读不到就保持 None。"""
+
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_float(value: Any) -> float | None:
+    """把可选小数配置安全读出来，读不到就保持 None。"""
+
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_bool(value: Any) -> bool | None:
+    """把可选布尔配置安全读出来，未配置时保持 None。"""
+
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "1", "yes", "on"}:
+            return True
+        if lowered in {"false", "0", "no", "off"}:
+            return False
+    return None
 
 
 def _read_positive_int(value: Any, default: int, *, maximum: int | None = None) -> int:

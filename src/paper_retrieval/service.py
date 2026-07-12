@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from src.utils import get_logger, logging_context
@@ -113,6 +114,55 @@ class PaperSearchService:
             )
             return response
 
+    async def async_search(
+        self,
+        query: str = "",
+        source: str | None = None,
+        limit: int = 10,
+        year_from: int | None = None,
+        year_to: int | None = None,
+        excluded_terms: list[str] | None = None,
+        topic: str = "",
+        keywords: list[str] | None = None,
+        truncate: bool = True,
+    ) -> SearchResponse:
+        """异步执行统一检索入口，并限制多来源并发数量。"""
+
+        request = SearchRequest(
+            query=query,
+            topic=topic,
+            keywords=list(keywords or []),
+            source=source,
+            limit=max(1, limit),
+            year_from=year_from,
+            year_to=year_to,
+            excluded_terms=list(excluded_terms or []),
+        )
+        selected = self._select_connectors(request.source)
+        response = SearchResponse(query=self._request_summary(request))
+        if not selected:
+            response.errors["sources"] = "No valid paper retrieval source selected."
+            return response
+        if len(selected) == 1:
+            source_name, connector = next(iter(selected.items()))
+            papers = await connector.async_search(request)
+            response.sources_used = [source_name]
+            response.source_results[source_name] = len(papers)
+            response.papers = self._deduplicate_papers(papers, request.limit if truncate else None)
+            return response
+        gathered = await self._async_search_many(selected, request)
+        response.sources_used = list(selected.keys())
+        merged: list[PaperDocument] = []
+        for source_name, outcome in gathered.items():
+            if isinstance(outcome, Exception):
+                response.errors[source_name] = str(outcome)
+                response.source_results[source_name] = 0
+                continue
+            response.source_results[source_name] = len(outcome)
+            merged.extend(outcome)
+        response.papers = self._deduplicate_papers(merged, request.limit if truncate else None)
+        return response
+
     def available_sources(self) -> list[str]:
         """返回当前可用来源名称。"""
 
@@ -187,6 +237,38 @@ class PaperSearchService:
                     results[source_name] = exc
                     logger.exception("单个来源检索失败", extra={"source": source_name})
         return results
+
+    async def _async_search_many(
+        self,
+        connectors: dict[str, PaperSearchConnector],
+        request: SearchRequest,
+    ) -> dict[str, list[PaperDocument] | Exception]:
+        """异步并发执行多源检索，并用信号量限制同时访问的来源数量。"""
+
+        semaphore = asyncio.Semaphore(min(len(connectors), 4))
+
+        async def _run_one(source_name: str, connector: PaperSearchConnector) -> tuple[str, list[PaperDocument] | Exception]:
+            async with semaphore:
+                try:
+                    papers = await connector.async_search(
+                        SearchRequest(
+                            query=request.query,
+                            topic=request.topic,
+                            keywords=list(request.keywords),
+                            source=source_name,
+                            limit=request.limit,
+                            year_from=request.year_from,
+                            year_to=request.year_to,
+                            excluded_terms=list(request.excluded_terms),
+                        )
+                    )
+                    return source_name, papers
+                except Exception as exc:
+                    logger.exception("异步单个来源检索失败", extra={"source": source_name})
+                    return source_name, exc
+
+        pairs = await asyncio.gather(*[_run_one(source_name, connector) for source_name, connector in connectors.items()])
+        return dict(pairs)
 
     def _deduplicate_papers(self, papers: list[PaperDocument], limit: int | None) -> list[PaperDocument]:
         """按 DOI 和标题做轻量去重。

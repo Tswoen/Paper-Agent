@@ -106,6 +106,14 @@ def update_provider_settings(repo: SettingsRepository, name: str, patch: JsonObj
         provider["extra_headers"] = dict(patch.get("extra_headers") or patch.get("extraHeaders") or {})
     if "extra_body" in patch or "extraBody" in patch:
         provider["extra_body"] = dict(patch.get("extra_body") or patch.get("extraBody") or {})
+    # 这些字段只影响模型调用方式，不改变 provider 的基础鉴权信息。
+    # 支持两种命名，是为了让配置文件和前端表单都能自然传值。
+    _apply_optional_provider_field(provider, patch, "timeout_s", "timeoutS")
+    _apply_optional_provider_field(provider, patch, "max_retries", "maxRetries")
+    _apply_optional_provider_field(provider, patch, "retry_initial_delay_s", "retryInitialDelayS")
+    _apply_optional_provider_field(provider, patch, "retry_max_delay_s", "retryMaxDelayS")
+    _apply_optional_provider_field(provider, patch, "max_concurrency", "maxConcurrency")
+    _apply_optional_provider_field(provider, patch, "include_stream_usage", "includeStreamUsage")
     repo.save(data)
     return settings_payload(repo)
 
@@ -149,8 +157,16 @@ def provider_models_payload(repo: SettingsRepository, provider: str, client: Any
         return _models_status(provider, "not_configured", "provider api_key is not configured")
 
     try:
-        model_client = client or _make_model_list_client(spec, provider_config, api_base)
-        models = _parse_model_list(model_client.models.list())
+        if client is not None:
+            # 测试或特殊调用方可以继续传假 client；正式路径统一走 provider.list_models。
+            models = _parse_model_list(client.models.list())
+        else:
+            config.agents.setdefault(
+                "__model_catalog__",
+                AgentConfig(provider=provider, model_name="__model_catalog__"),
+            )
+            snapshot = make_provider(config, "__model_catalog__")
+            models = snapshot.provider.list_models()
     except NotImplementedError:
         return _models_status(provider, "unsupported", "provider model catalog is not supported")
     except Exception as exc:
@@ -378,6 +394,15 @@ def _test_embedding_connectivity(config: ModelConfig, name: str, *, client: Any 
     )
 
 
+def _apply_optional_provider_field(provider: JsonObject, patch: JsonObject, snake_name: str, camel_name: str) -> None:
+    """把 provider 的可选运行控制字段写回配置。"""
+
+    if snake_name in patch:
+        provider[snake_name] = patch[snake_name]
+    elif camel_name in patch:
+        provider[snake_name] = patch[camel_name]
+
+
 def _providers(data: JsonObject) -> JsonObject:
     """返回 provider 配置字典，并在缺失时补空对象。"""
 
@@ -494,6 +519,12 @@ def _provider_items(config: ModelConfig) -> list[JsonObject]:
             "api_base": provider_config.api_base,
             "extra_headers": provider_config.extra_headers,
             "extra_body": provider_config.extra_body,
+            "timeout_s": provider_config.timeout_s,
+            "max_retries": provider_config.max_retries,
+            "retry_initial_delay_s": provider_config.retry_initial_delay_s,
+            "retry_max_delay_s": provider_config.retry_max_delay_s,
+            "max_concurrency": provider_config.max_concurrency,
+            "include_stream_usage": provider_config.include_stream_usage,
         }
         items.append(
             {
@@ -672,16 +703,6 @@ def _models_status(provider: str, status: str, message: str) -> JsonObject:
         "message": message,
         "fetched_at": datetime.now(timezone.utc).isoformat(),
     }
-
-
-def _make_model_list_client(spec: ProviderSpec, config: ProviderConfig, api_base: str) -> Any:
-    """按 provider backend 创建模型目录客户端。"""
-
-    if spec.backend == "openai_compat":
-        from openai import OpenAI
-
-        return OpenAI(api_key=config.api_key, base_url=api_base, default_headers=config.extra_headers or None)
-    raise NotImplementedError
 
 
 def _parse_model_list(response: Any) -> list[JsonObject]:

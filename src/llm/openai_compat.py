@@ -48,25 +48,28 @@ class OpenAICompatProvider(LLMProvider):
         max_tokens: int | None = None,
         reasoning_effort: str | None = None,
     ) -> LLMResponse:
-        """发起一次非流式 Chat Completions 请求。
+        """发起一次非流式 Chat Completions 请求，并统一处理重试、限流和耗时日志。"""
 
-        Args:
-            messages: 已按内部 Message 结构组织好的对话消息。
-            tools: 可选工具定义，直接透传给兼容 OpenAI 协议的上游模型。
-            temperature: 可选采样温度；推理模型通常不支持该参数，后续会过滤。
-            max_tokens: 可选生成长度上限，会按供应商能力映射到正确字段名。
-            reasoning_effort: 可选推理强度，用于支持 reasoning_effort 的模型。
+        return self._run_llm_call(
+            "chat",
+            lambda: self._chat_once(messages, tools=tools, temperature=temperature, max_tokens=max_tokens, reasoning_effort=reasoning_effort),
+        )
 
-        Returns:
-            统一的 LLMResponse，屏蔽不同 SDK 响应对象的细节；发生异常时返回
-            基类封装的错误响应，避免异常直接冒泡到业务层。
-        """
+    def _chat_once(
+        self,
+        messages: Sequence[Message],
+        *,
+        tools: Sequence[JsonObject] | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
+    ) -> LLMResponse:
+        """只执行一次真实请求；是否重试由基类统一决定。"""
+
         try:
-            # _build_kwargs 负责处理模型名、消息字段、token 参数等兼容差异。
             response = self.client.chat.completions.create(
                 **self._build_kwargs(messages, tools, False, temperature, max_tokens, reasoning_effort)
             )
-            logger.info(f"OpenAICompatProvider.chat: response={response}")
             return self._parse_response(response)
         except Exception as exc:
             return self._error_response(exc)
@@ -81,29 +84,41 @@ class OpenAICompatProvider(LLMProvider):
         max_tokens: int | None = None,
         reasoning_effort: str | None = None,
     ) -> LLMResponse:
-        """发起一次流式 Chat Completions 请求，并通过回调推送增量事件。
+        """发起一次流式 Chat Completions 请求，并统一处理重试、限流和耗时日志。"""
 
-        Args:
-            messages: 对话消息序列。
-            callbacks: 流式输出回调集合，可能包含文本、思考过程和工具调用增量回调。
-            tools: 可选工具定义。
-            temperature: 可选采样温度；推理模型会在构造参数时自动忽略。
-            max_tokens: 可选生成长度上限。
-            reasoning_effort: 可选推理强度。
+        return self._run_llm_call(
+            "chat_stream",
+            lambda: self._chat_stream_once(messages, callbacks, tools=tools, temperature=temperature, max_tokens=max_tokens, reasoning_effort=reasoning_effort),
+        )
 
-        Returns:
-            最终聚合后的 LLMResponse。当前实现主要聚合文本内容，工具调用与
-            reasoning 增量通过 callbacks 实时交给上层处理。
-        """
+    def _chat_stream_once(
+        self,
+        messages: Sequence[Message],
+        callbacks: StreamCallbacks,
+        *,
+        tools: Sequence[JsonObject] | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
+    ) -> LLMResponse:
+        """只执行一次真实流式请求；流结束前不会释放基类里的并发名额。"""
+
         content: list[str] = []
+        usage: JsonObject | None = None
+        finish_reason: str | None = None
         try:
             stream = self.client.chat.completions.create(
                 **self._build_kwargs(messages, tools, True, temperature, max_tokens, reasoning_effort)
             )
             for event in stream:
                 # OpenAI 兼容流式事件通常把增量内容放在 choices[0].delta 中。
+                event_dict = _to_dict(event)
+                if isinstance(event_dict.get("usage"), dict):
+                    usage = event_dict["usage"]
                 choice = event.choices[0] if getattr(event, "choices", None) else None
-                delta = getattr(choice, "delta", None)
+                if choice is not None and getattr(choice, "finish_reason", None):
+                    finish_reason = getattr(choice, "finish_reason", None)
+                delta = getattr(choice, "delta", None) if choice is not None else None
                 text = getattr(delta, "content", None) or ""
                 if text:
                     content.append(text)
@@ -111,13 +126,11 @@ class OpenAICompatProvider(LLMProvider):
                         callbacks.on_content_delta(text)  # 如果上层注册了文本回调，立刻把增量推送出去（前端实时打字效果靠这个）。
                 reasoning = getattr(delta, "reasoning_content", None) or ""
                 if reasoning and callbacks.on_thinking_delta:
-                    # 部分推理模型会单独返回 reasoning_content，用于展示“思考中”的增量。
                     callbacks.on_thinking_delta(reasoning)
                 for item in getattr(delta, "tool_calls", None) or []:
                     if callbacks.on_tool_call_delta:
-                        # SDK 返回的工具调用片段可能是 Pydantic 对象，先转成普通 dict。
                         callbacks.on_tool_call_delta(_to_dict(item))
-            return LLMResponse(content="".join(content), finish_reason="stop")
+            return LLMResponse(content="".join(content), finish_reason=finish_reason or "stop", usage=usage)
         except Exception as exc:
             return self._error_response(exc)
 
@@ -127,19 +140,18 @@ class OpenAICompatProvider(LLMProvider):
         *,
         dimensions: int | None = None,
     ) -> EmbeddingResponse:
-        """发起一次 OpenAI 兼容 embedding 请求。
+        """发起一次 OpenAI 兼容 embedding 请求，并统一处理重试、限流和耗时日志。"""
 
-        Args:
-            inputs: 需要生成向量的文本列表。
-            dimensions: 可选目标维度，只有支持该参数的 embedding 模型才会使用。
+        return self._run_embedding_call("embed", lambda: self._embed_once(inputs, dimensions=dimensions))
 
-        Returns:
-            统一的 EmbeddingResponse。成功时包含与 inputs 一一对应的向量；失败时
-            返回错误响应，方便上层触发重试或展示原因。
+    def _embed_once(
+        self,
+        inputs: Sequence[str],
+        *,
+        dimensions: int | None = None,
+    ) -> EmbeddingResponse:
+        """只执行一次真实 embedding 请求；是否重试由基类统一决定。"""
 
-        这里故意把 `/embeddings` 请求放在 LLM provider 内部，而不是放在 Chroma
-        仓储层。这样仓储层只管保存向量，不需要知道模型服务的 URL、鉴权头和响应格式。
-        """
         texts = list(inputs)
         if not texts:
             return EmbeddingResponse(embeddings=[], model=self._request_model_name(), finish_reason="stop")
@@ -158,6 +170,26 @@ class OpenAICompatProvider(LLMProvider):
             return self._parse_embedding_response(body, len(texts))
         except Exception as exc:
             return self._embedding_error_response(exc)
+
+    def list_models(self) -> list[JsonObject]:
+        """读取 OpenAI 兼容 provider 的模型目录，并转换成前端统一结构。"""
+
+        response = self.client.models.list()
+        raw = _to_dict(response) if hasattr(response, "model_dump") or isinstance(response, dict) else response
+        data = raw.get("data", raw) if isinstance(raw, dict) else raw
+        models: list[JsonObject] = []
+        for item in data or []:
+            model = _to_dict(item) if hasattr(item, "model_dump") or isinstance(item, dict) else item
+            model_id = model.get("id") if isinstance(model, dict) else str(model)
+            models.append(
+                {
+                    "id": model_id,
+                    "label": model_id,
+                    "owned_by": model.get("owned_by") if isinstance(model, dict) else None,
+                    "context_window": model.get("context_window") if isinstance(model, dict) else None,
+                }
+            )
+        return models
 
     def _build_kwargs(
         self,
@@ -203,6 +235,9 @@ class OpenAICompatProvider(LLMProvider):
             kwargs[token_key] = settings.max_tokens
         if settings.reasoning_effort:
             kwargs["reasoning_effort"] = settings.reasoning_effort
+        if stream and self.include_stream_usage:
+            # 部分 OpenAI 兼容服务支持在最后一个流式片段返回 usage；不支持时由上游报错并走统一错误处理。
+            kwargs["stream_options"] = {"include_usage": True}
         if self.extra_body:
             # 厂商兼容扩展交给 SDK 的 extra_body 注入，避免自己拼 HTTP 请求。
             kwargs["extra_body"] = self.extra_body

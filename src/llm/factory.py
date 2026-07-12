@@ -73,7 +73,13 @@ def make_provider(
             "extra_headers": provider_config.extra_headers,
             "extra_body": provider_config.extra_body,
             "client": client,
-            "timeout_s": timeout_s,
+            # provider 配置里显式写了超时时间时优先生效；调用方传入的 timeout_s 作为兜底。
+            "timeout_s": provider_config.timeout_s or timeout_s,
+            "max_retries": provider_config.max_retries,
+            "retry_initial_delay_s": provider_config.retry_initial_delay_s,
+            "retry_max_delay_s": provider_config.retry_max_delay_s,
+            "max_concurrency": provider_config.max_concurrency,
+            "include_stream_usage": provider_config.include_stream_usage,
         }
         provider = _instantiate_provider(spec, kwargs)
         signature_payload = {"target_type": "embedding_profile", "target_name": profile_name, "profile": asdict(profile)}
@@ -91,7 +97,13 @@ def make_provider(
         "extra_headers": provider_config.extra_headers,
         "extra_body": provider_config.extra_body,
         "client": client,
-        "timeout_s": timeout_s,
+        # provider 配置里显式写了超时时间时优先生效；调用方传入的 timeout_s 作为兜底。
+        "timeout_s": provider_config.timeout_s or timeout_s,
+        "max_retries": provider_config.max_retries,
+        "retry_initial_delay_s": provider_config.retry_initial_delay_s,
+        "retry_max_delay_s": provider_config.retry_max_delay_s,
+        "max_concurrency": provider_config.max_concurrency,
+        "include_stream_usage": provider_config.include_stream_usage,
     }
     provider = _instantiate_provider(spec, kwargs)
     return ProviderSnapshot(provider, agent.model_name, agent.context_window_tokens, _signature(provider_name, _agent_signature(agent), asdict(provider_config)))

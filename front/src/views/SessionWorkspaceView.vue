@@ -325,9 +325,12 @@ function emptyThreadFromSummary(summary: SessionSummary): SessionThread {
   };
 }
 
-/** 中文注释：只要时间线里已经有消息、执行事件或产物，就说明它不是空白会话，应该展示执行过程。 */
+/**
+ * 中文注释：中间时间线现在只展示“执行过程”。
+ * 消息内容和产物文件虽然还会保存在会话里，但页面不再展示它们，所以这里只看真正会显示出来的执行事件。
+ */
 function hasTimelineContent(snapshot: SessionTimelineSnapshot | null) {
-  return Boolean(snapshot && (snapshot.messages.length || snapshot.runtimeEvents.length || snapshot.artifacts.length));
+  return Boolean(snapshot?.runtimeEvents.length);
 }
 
 function statusTone(status: string) {

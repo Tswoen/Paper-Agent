@@ -40,21 +40,36 @@ class SemanticScholarPaperConnector(PaperSearchConnector):
         resolved_key = (api_key or os.getenv("SEMANTIC_SCHOLAR_API_KEY") or os.getenv("PAPER_SEARCH_MCP_SEMANTIC_SCHOLAR_API_KEY") or "").strip()
         if resolved_key:
             headers["x-api-key"] = resolved_key
+        self.headers = headers
         self.client = client or httpx.Client(timeout=20.0, headers=headers)
 
     def search(self, request: SearchRequest) -> list[PaperDocument]:
         """执行 Semantic Scholar 检索，并在 connector 内完成查询拼装。"""
 
-        response = self.client.get(
-            self._endpoint,
-            params={
-                "query": self._build_query(request),
-                "limit": max(1, request.limit),
-                "fields": self._fields,
-            },
-        )
+        response = self.client.get(self._endpoint, params=self._params(request))
         response.raise_for_status()
-        payload = response.json()
+        return self._parse_payload(response.json(), request)
+
+    async def async_search(self, request: SearchRequest) -> list[PaperDocument]:
+        """异步执行 Semantic Scholar 检索，避免在异步编排里阻塞事件循环。"""
+
+        async with httpx.AsyncClient(timeout=20.0, headers=self.headers) as client:
+            response = await client.get(self._endpoint, params=self._params(request))
+        response.raise_for_status()
+        return self._parse_payload(response.json(), request)
+
+    def _params(self, request: SearchRequest) -> dict[str, str | int]:
+        """构造 Semantic Scholar 请求参数，同步和异步入口共用。"""
+
+        return {
+            "query": self._build_query(request),
+            "limit": max(1, request.limit),
+            "fields": self._fields,
+        }
+
+    def _parse_payload(self, payload: dict[str, object], request: SearchRequest) -> list[PaperDocument]:
+        """把 Semantic Scholar JSON 响应解析成论文列表，同步和异步入口共用。"""
+
         papers: list[PaperDocument] = []
         for item in payload.get("data", []) or []:
             paper = self._parse_item(item)

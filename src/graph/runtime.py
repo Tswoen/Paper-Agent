@@ -165,11 +165,10 @@ _STAGE_DISPLAY: dict[tuple[str, str], RuntimeStageDisplay] = {
     ("compose_reply", "compose_start"): RuntimeStageDisplay("compose_reply", "回复整理", updates_parent=True),
     ("compose_reply", "compose_reply"): RuntimeStageDisplay("compose_reply_step", "生成最终回复"),
     ("compose_reply", "compose_done"): RuntimeStageDisplay(
-        "compose_reply",
-        "回复整理",
+        "compose_reply_step",
+        "生成最终回复",
         show_content="最终回复整理完成",
         status="completed",
-        updates_parent=True,
     ),
 }
 

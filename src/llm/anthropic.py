@@ -43,20 +43,25 @@ class AnthropicProvider(LLMProvider):
         max_tokens: int | None = None,
         reasoning_effort: str | None = None,
     ) -> LLMResponse:
-        """发起一次非流式 Anthropic Messages 请求。
+        """发起一次非流式 Anthropic Messages 请求，并统一处理重试、限流和耗时日志。"""
 
-        Args:
-            messages: 项目内部统一格式的消息序列。
-            tools: 可选工具定义，会在构造参数时转换为 Anthropic 的 tools 结构。
-            temperature: 可选采样温度。
-            max_tokens: 可选生成 token 上限。
-            reasoning_effort: 可选推理强度；Anthropic 中会映射到 thinking 配置。
+        return self._run_llm_call(
+            "chat",
+            lambda: self._chat_once(messages, tools=tools, temperature=temperature, max_tokens=max_tokens, reasoning_effort=reasoning_effort),
+        )
 
-        Returns:
-            统一的 LLMResponse。若调用异常，则返回基类封装的错误响应，而不是直接抛出异常。
-        """
+    def _chat_once(
+        self,
+        messages: Sequence[Message],
+        *,
+        tools: Sequence[JsonObject] | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
+    ) -> LLMResponse:
+        """只执行一次真实 Anthropic 请求；是否重试由基类统一决定。"""
+
         try:
-            # _build_kwargs 负责把内部统一协议转换为 Anthropic Messages 协议。
             response = self.client.messages.create(
                 **self._build_kwargs(messages, tools, False, temperature, max_tokens, reasoning_effort)
             )
@@ -74,42 +79,50 @@ class AnthropicProvider(LLMProvider):
         max_tokens: int | None = None,
         reasoning_effort: str | None = None,
     ) -> LLMResponse:
-        """发起一次流式 Anthropic Messages 请求，并把增量事件转发给回调。
+        """发起一次流式 Anthropic Messages 请求，并统一处理重试、限流和耗时日志。"""
 
-        Args:
-            messages: 对话消息序列。
-            callbacks: 流式回调集合，可能包含文本、思考内容、工具调用参数增量回调。
-            tools: 可选工具定义。
-            temperature: 可选采样温度。
-            max_tokens: 可选生成 token 上限。
-            reasoning_effort: 可选推理强度。
+        return self._run_llm_call(
+            "chat_stream",
+            lambda: self._chat_stream_once(messages, callbacks, tools=tools, temperature=temperature, max_tokens=max_tokens, reasoning_effort=reasoning_effort),
+        )
 
-        Returns:
-            聚合后的最终 LLMResponse。文本内容会在本地拼接，thinking 和工具参数增量
-            主要通过 callbacks 交给上层实时消费。
-        """
+    def _chat_stream_once(
+        self,
+        messages: Sequence[Message],
+        callbacks: StreamCallbacks,
+        *,
+        tools: Sequence[JsonObject] | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
+    ) -> LLMResponse:
+        """只执行一次真实 Anthropic 流式请求；是否重试由基类统一决定。"""
+
         content: list[str] = []
+        usage: JsonObject | None = None
+        finish_reason: str | None = None
         try:
             stream = self.client.messages.create(
                 **self._build_kwargs(messages, tools, True, temperature, max_tokens, reasoning_effort)
             )
             for event in stream:
-                # SDK 流式事件对象可能不是 dict，这里先转成统一字典结构再判断类型。
                 item = _to_dict(event)
                 event_type = item.get("type")
                 delta = item.get("delta") or {}
+                if isinstance(item.get("usage"), dict):
+                    usage = item["usage"]
+                if item.get("stop_reason"):
+                    finish_reason = item.get("stop_reason")
                 if event_type == "content_block_delta" and delta.get("type") == "text_delta":
                     text = delta.get("text") or ""
                     content.append(text)
                     if callbacks.on_content_delta:
                         callbacks.on_content_delta(text)
                 if event_type == "content_block_delta" and delta.get("type") == "thinking_delta" and callbacks.on_thinking_delta:
-                    # thinking_delta 是 Anthropic 对“思考内容”流式增量的专用事件。
                     callbacks.on_thinking_delta(delta.get("thinking") or "")
                 if event_type == "content_block_delta" and delta.get("type") == "input_json_delta" and callbacks.on_tool_call_delta:
-                    # 工具调用参数会按 JSON 片段流式返回，交给上层自行累积和解析。
                     callbacks.on_tool_call_delta({"arguments_delta": delta.get("partial_json") or ""})
-            return LLMResponse(content="".join(content), finish_reason="stop")
+            return LLMResponse(content="".join(content), finish_reason=finish_reason or "stop", usage=usage)
         except Exception as exc:
             return self._error_response(exc)
 

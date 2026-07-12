@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from fastapi import APIRouter, Request
@@ -63,7 +64,9 @@ def create_sessions_router(
     async def post_message(session_key: str, request: Request) -> JsonObject:
         """兼容旧版同步消息接口，提交后等待整次运行完成。"""
 
-        return submit_message(repo, session_key, await _json_body(request), message_handler=message_handler)
+        body = await _json_body(request)
+        # 旧接口会等待完整工作流结束，放到线程里执行，避免卡住其他异步请求。
+        return await asyncio.to_thread(submit_message, repo, session_key, body, message_handler=message_handler)
 
     @router.post("/{session_key}/runs", status_code=202)
     async def post_run(session_key: str, request: Request) -> JsonObject:
