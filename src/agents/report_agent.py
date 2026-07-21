@@ -51,6 +51,7 @@ async def report_node(state: State) -> State:
         """
         is_thinking = None
         is_First = True
+        report_markdown = ""
         async for chunk in report_agent.run_stream(task = prompt):
             if is_First:
                 is_First = False
@@ -59,14 +60,20 @@ async def report_node(state: State) -> State:
                 if chunk.type == "ThoughtEvent":
                     continue
                 if chunk.type == "TextMessage":
-                    current_state.report_markdown = chunk.content
-                    break
-
-                state,is_thinking = handlerChunk(is_thinking,chunk.content)
-                if state is None:
+                    report_markdown = chunk.content
                     continue
-                await state_queue.put(BackToFrontData(step=ExecutionState.REPORTING,state=state,data=chunk.content))
+
+                content = getattr(chunk, "content", None)
+                if content is None:
+                    continue
+                chunk_state,is_thinking = handlerChunk(is_thinking,content)
+                if chunk_state is None:
+                    continue
+                await state_queue.put(BackToFrontData(step=ExecutionState.REPORTING,state=chunk_state,data=content))
         
+        if not report_markdown:
+            raise ValueError("Report agent did not return markdown")
+        current_state.report_markdown = report_markdown
         await state_queue.put(BackToFrontData(step=ExecutionState.REPORTING,state="completed",data=None))
         return {"value": current_state}
 

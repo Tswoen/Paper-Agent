@@ -112,6 +112,7 @@ class GlobalanalyseAgent:
             # response = await self.global_analyse_agent.run(task=prompt)
             # global_analyse = response.messages[-1].content
             is_First = True
+            final_content = ""
             response = self.global_analyse_agent.run_stream(task=prompt)
             async for chunk in response: 
                 if is_First:
@@ -121,16 +122,23 @@ class GlobalanalyseAgent:
                     if chunk.type == "ThoughtEvent":
                         continue
                     if chunk.type == "TextMessage":
-                        global_analyse = {
-                            "isSuccess": True,
-                            "total_clusters": len(analyse_results),
-                            "total_papers": sum(result.paper_count for result in analyse_results),
-                            "cluster_themes": [result.theme for result in analyse_results],
-                            "global_analyse": chunk.content,
-                            "cluster_summaries": cluster_summaries
-                        }
-                        yield global_analyse
-                    yield chunk.content
+                        final_content = chunk.content
+                        continue
+                    content = getattr(chunk, "content", None)
+                    if content is not None:
+                        yield content
+
+            if not final_content:
+                raise ValueError("Global analyse agent did not return content")
+
+            yield {
+                "isSuccess": True,
+                "total_clusters": len(analyse_results),
+                "total_papers": sum(result.paper_count for result in analyse_results),
+                "cluster_themes": [result.theme for result in analyse_results],
+                "global_analyse": final_content,
+                "cluster_summaries": cluster_summaries
+            }
             
         except Exception as e:
             logger.error(f"生成全局分析时出错: \n{e}")

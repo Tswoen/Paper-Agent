@@ -213,7 +213,7 @@ def get_embedding_config(embed_info: dict) -> dict:
 
     try:
         if not embed_info:
-            embeding_dic = config.get("embedding-model")
+            embeding_dic = config.get("chroma-embedding-model")
             embedding_provider = embeding_dic.get("model-provider")
             provider_dic = config.get(embedding_provider)
             

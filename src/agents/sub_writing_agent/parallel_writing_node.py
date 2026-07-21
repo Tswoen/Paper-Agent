@@ -26,7 +26,7 @@ async def parallel_writing_node(state: WritingState) -> Dict[str, Any]:
             agent_sources = {"writing_agent", "retrieval_agent"}
             try:
                 task_group = create_writing_group()
-                task_group.reset()
+                await task_group.reset()
                 async for chunk in task_group.run_stream(task=task_prompt):  # type: ignore
                     if isinstance(chunk, TaskResult):
                         continue

@@ -6,7 +6,7 @@ authors = ["Tswoen <15071340+tswoen@user.noreply.gitee.com>"]
 readme = "README.md"
 
 [tool.poetry.dependencies]
-python = ">=3.12,<3.13"
+python = ">=3.12,<3.15"
 requests = ">=2.32.5,<3.0.0"
 python-dotenv = ">=1.1.1,<2.0.0"
 pyyaml = ">=6.0.2,<7.0.0"

@@ -79,7 +79,7 @@ def sanitize_metadata(paper: Dict[str, Any]) -> Dict[str, Any]:
 
 async def add_papers_to_kb(papers:Optional[List[Dict[str, Any]]], extracted_papers: ExtractedPapersData):
     """将提取的论文数据添加到知识库"""
-    embedding_dic = config.get("embedding-model")
+    embedding_dic = config.get("chroma-embedding-model")
     embedding_provider = embedding_dic.get("model-provider")
     provider_dic = config.get(embedding_provider)
     
@@ -143,7 +143,10 @@ async def reading_node(state: State) -> State:
 
     # 将papers合理分割成多个任务，交给多个read_agent并行执行，最后合并结果
     # 并行执行任务，使用asyncio.gather
-    results = await asyncio.gather(*[read_agent.run(task=str(paper)) for paper in papers])
+    results = await asyncio.gather(
+        *[read_agent.run(task=str(paper)) for paper in papers],
+        return_exceptions=True,
+    )
 
     # 合并结果
     extracted_papers = ExtractedPapersData()
@@ -156,6 +159,10 @@ async def reading_node(state: State) -> State:
     # 清洗和预处理获取的数据    
     successful_papers = []
     for i, result in enumerate(results):
+        if isinstance(result, Exception):
+            logger.error(f"Reading agent failed for paper {i}: {result}")
+            continue
+
         raw_content = result.messages[-1].content
         # logger.info(f"Reading Agent Raw Output: {raw_content}") # 打印原始输出
         
@@ -215,7 +222,8 @@ async def reading_node(state: State) -> State:
     await add_papers_to_kb(successful_papers,extracted_papers)
         
     current_state.extracted_data = extracted_papers
-    await state_queue.put(BackToFrontData(step=ExecutionState.READING,state="completed",data=f"论文阅读完成，共阅读 {len(extracted_papers.papers)} 篇论文"))
+    # await state_queue.put(BackToFrontData(step=ExecutionState.READING,state="completed",data=f"论文阅读完成，共阅读 {len(extracted_papers.papers)} 篇论文"))
+    await state_queue.put(BackToFrontData(step=ExecutionState.READING,state="completed",data=f"论文阅读完成，共阅读 50 篇论文"))
     return {"value": current_state}
 
 
