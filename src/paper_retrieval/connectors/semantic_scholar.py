@@ -27,6 +27,9 @@ class SemanticScholarPaperConnector(PaperSearchConnector):
             "url",
             "externalIds",
             "openAccessPdf",
+            "publicationDate",
+            "journal",
+            "publicationVenue",
         ]
     )
 
@@ -50,11 +53,26 @@ class SemanticScholarPaperConnector(PaperSearchConnector):
         response.raise_for_status()
         return self._parse_payload(response.json(), request)
 
-    async def async_search(self, request: SearchRequest) -> list[PaperDocument]:
+    async def async_search(
+        self,
+        request: SearchRequest,
+        *,
+        client: httpx.AsyncClient | None = None,
+    ) -> list[PaperDocument]:
         """异步执行 Semantic Scholar 检索，避免在异步编排里阻塞事件循环。"""
 
-        async with httpx.AsyncClient(timeout=20.0, headers=self.headers) as client:
-            response = await client.get(self._endpoint, params=self._params(request))
+        resolved_client = client or httpx.AsyncClient(timeout=20.0)
+        owns_client = client is None
+        try:
+            response = await resolved_client.get(
+                self._endpoint,
+                params=self._params(request),
+                headers=self.headers,
+                timeout=20.0,
+            )
+        finally:
+            if owns_client:
+                await resolved_client.aclose()
         response.raise_for_status()
         return self._parse_payload(response.json(), request)
 
@@ -72,7 +90,7 @@ class SemanticScholarPaperConnector(PaperSearchConnector):
 
         papers: list[PaperDocument] = []
         for item in payload.get("data", []) or []:
-            paper = self._parse_item(item)
+            paper = self.normalize_paper(item)
             if paper is None:
                 continue
             if not self._within_year_range(paper, request):
@@ -85,6 +103,8 @@ class SemanticScholarPaperConnector(PaperSearchConnector):
     def _build_query(self, request: SearchRequest) -> str:
         """把 topic / keywords 合成 Semantic Scholar 的 query。"""
 
+        if request.keyword_expression.strip():
+            return request.keyword_expression.strip()
         if request.query.strip():
             return request.query.strip()
         parts: list[str] = []
@@ -94,9 +114,12 @@ class SemanticScholarPaperConnector(PaperSearchConnector):
             parts.extend(request.keywords[:5])
         return " ".join(parts).strip()
 
-    def _parse_item(self, item: dict[str, object]) -> PaperDocument | None:
+    def normalize_paper(self, raw: object) -> PaperDocument | None:
         """把单条 Semantic Scholar 记录解析成统一论文对象。"""
 
+        if not isinstance(raw, dict):
+            return None
+        item = raw
         title = str(item.get("title") or "").strip()
         if not title:
             return None
@@ -111,26 +134,57 @@ class SemanticScholarPaperConnector(PaperSearchConnector):
                     authors.append(name)
         external_ids = item.get("externalIds") or {}
         doi = ""
+        arxiv_id = ""
         if isinstance(external_ids, dict):
             doi = str(external_ids.get("DOI") or "").strip()
+            arxiv_id = str(external_ids.get("ArXiv") or external_ids.get("Arxiv") or "").strip()
         open_access_pdf = item.get("openAccessPdf") or {}
         pdf_url = ""
         if isinstance(open_access_pdf, dict):
             pdf_url = str(open_access_pdf.get("url") or "").strip()
-        paper_id = str(item.get("paperId") or doi or title).strip()
+        semantic_id = str(item.get("paperId") or "").strip()
+        paper_id = doi or arxiv_id or semantic_id
+        venue = self._venue(item)
+        journal = item.get("journal") or {}
+        volume = ""
+        issue = ""
+        if isinstance(journal, dict):
+            volume = str(journal.get("volume") or "").strip()
+            issue = str(journal.get("issue") or "").strip()
         return PaperDocument(
-            id=paper_id,
+            id=paper_id or title,
+            paperId=paper_id,
             title=title,
             authors=authors,
             abstract=str(item.get("abstract") or "").strip() or None,
             year=self._maybe_int(item.get("year")),
-            venue=str(item.get("venue") or "").strip() or None,
+            venue=venue or None,
             url=str(item.get("url") or "").strip() or None,
             pdf_url=pdf_url or None,
             doi=doi or None,
             source=self.source_name,
-            metadata={},
+            publication_date=str(item.get("publicationDate") or "").strip(),
+            journal_conference=venue,
+            volume=volume,
+            issue=issue,
+            metadata={"semantic_scholar_id": semantic_id, "arxiv_id": arxiv_id},
         )
+
+    def _venue(self, item: dict[str, object]) -> str:
+        """从 Semantic Scholar 的多个可能字段里取期刊或会议名称。"""
+
+        venue = str(item.get("venue") or "").strip()
+        if venue:
+            return venue
+        publication_venue = item.get("publicationVenue") or {}
+        if isinstance(publication_venue, dict):
+            name = str(publication_venue.get("name") or "").strip()
+            if name:
+                return name
+        journal = item.get("journal") or {}
+        if isinstance(journal, dict):
+            return str(journal.get("name") or "").strip()
+        return ""
 
     def _maybe_int(self, value: object) -> int | None:
         """安全转换可选年份字段。"""

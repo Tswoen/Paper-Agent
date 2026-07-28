@@ -70,6 +70,8 @@ class SearchPersistenceSink:
         raw_papers: list[PaperDocument],
         scored_papers: list[JsonObject],
         selected_papers: list[PaperDocument],
+        search_summary: JsonObject,
+        search_output: JsonObject,
         agent_diagnostics: JsonObject,
         search_halted: bool,
     ) -> SearchPersistenceResult:
@@ -122,12 +124,27 @@ class SearchPersistenceSink:
         )
         artifacts.append(ranked_artifact)
 
+        output_artifact = self._write_json_artifact(
+            artifact_type="paper_search_output",
+            name="search_output.json",
+            relative_path=f"{base_dir}/search_output.json",
+            payload={
+                "turn_id": self.turn_id,
+                "topic": topic,
+                "summary": dict(search_summary),
+                "output": dict(search_output),
+                "created_at": now,
+            },
+        )
+        artifacts.append(output_artifact)
+
         manifest = {
             "turn_id": self.turn_id,
             "topic": topic,
             "search_halted": search_halted,
             "raw_paper_count": len(raw_papers),
             "selected_paper_count": len(selected_papers),
+            "summary": dict(search_summary),
             "artifacts": [artifact.to_dict() for artifact in artifacts],
             "created_at": now,
         }

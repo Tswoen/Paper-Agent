@@ -1,17 +1,19 @@
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass
 from typing import Any, Protocol, cast
 
 from src.agents.base import AgentContext
-from src.agents.searchAgent import SearchAgent, SearchIntent, load_search_agent_llm
+from src.agents.searchAgent import SearchAgent, SearchIntent, SearchSubtopic, load_search_agent_llm
 from src.graph.runtime import WorkflowRuntimeContext
+from src.graph.runtime_resources import WorkflowRuntimeResources
 from src.repositories.node_persistence.search_persistence import SearchPersistenceSink
 from src.graph.state_models import JsonObject, State
 from src.llm import ProviderSnapshot
 from src.paper_retrieval import PaperSearchService
-from src.paper_retrieval.models import PaperDocument
+from src.paper_retrieval.models import PaperDocument, SearchResponse
 from src.repositories.sessions.base import SessionRepository
 
 
@@ -26,6 +28,8 @@ class SearchNodeSink(Protocol):
         raw_papers: list[PaperDocument],
         scored_papers: list[JsonObject],
         selected_papers: list[PaperDocument],
+        search_summary: JsonObject,
+        search_output: JsonObject,
         agent_diagnostics: JsonObject,
         search_halted: bool,
     ): ...
@@ -57,27 +61,46 @@ class ScoredPaper:
         }
 
 
+@dataclass(slots=True)
+class SearchExecutionResult:
+    """保存一次按子主题检索后的合并结果。"""
+
+    papers: list[PaperDocument]
+    raw_candidate_count: int
+    sources_used: list[str]
+    source_results: dict[str, int]
+    source_errors: dict[str, str]
+
+
 def run_search_agent_node():
     """生成执行图里的检索节点。"""
 
-    def _node(state: State) -> State:
-        """执行检索节点，并在执行过程中直接同步中间结果。"""
+    async def _node(state: State) -> State:
+        """异步执行检索节点，让图层可以自然接入 ainvoke。"""
 
         resolved_service = cast(PaperSearchService, state.get("search_node_service") or PaperSearchService())
         resolved_llm = cast(ProviderSnapshot | None | str, state.get("search_node_llm") or load_search_agent_llm())
         resolved_sink = _resolve_search_sink(state)
         reporter = _resolve_reporter(state)
+        runtime_resources = _resolve_runtime_resources(state)
 
         if reporter is not None:
             reporter.started("正在生成检索条件", stage="plan_search")
             reporter.reasoning_delta("正在根据主题生成检索关键词、来源范围和筛选条件。", stage="plan_search")
 
         agent = SearchAgent(AgentContext(llm=resolved_llm))
-        agent_update = agent.run(state)
+        agent_update = await agent.async_run(state)
         intent = agent_update["search_intent"]
         search_halted = bool(agent_update.get("search_halted"))
         agent_diagnostics = dict(agent_update.get("diagnostics") or {})
 
+        search_execution = SearchExecutionResult(
+            papers=[],
+            raw_candidate_count=0,
+            sources_used=[],
+            source_results={},
+            source_errors={},
+        )
         if reporter is not None:
             reporter.progress(
                 "检索条件已准备完成",
@@ -98,7 +121,12 @@ def run_search_agent_node():
         else:
             if reporter is not None:
                 reporter.progress("正在从论文数据源拉取候选结果", stage="fetch_results")
-            raw_papers = _execute_search_intent(resolved_service, intent)
+            search_execution = await _execute_search_intent(
+                resolved_service,
+                intent,
+                runtime_resources=runtime_resources,
+            )
+            raw_papers = list(search_execution.papers)
 
         if reporter is not None:
             reporter.progress(
@@ -107,22 +135,39 @@ def run_search_agent_node():
                 raw_paper_count=len(raw_papers),
             )
 
-        # 中文注释：检索节点先做“粗筛”，没有摘要的论文直接排除。
-        # 这样阅读节点拿到的论文都带有摘要，只需要负责后面的精筛和阅读。
-        abstract_papers = _filter_papers_with_abstract(raw_papers)
-        scored_papers = _score_papers(intent, abstract_papers)
+        # 中文注释：检索节点先做“粗筛”，没有唯一编号或没有摘要的论文直接排除。
+        # 这样阅读节点拿到的论文都更稳定，也能减少后面下载和阅读时的无效工作。
+        searchable_papers = _filter_searchable_papers(raw_papers)
+        scored_papers = _score_papers(intent, searchable_papers)
         max_results = max(1, intent.max_results)
         search_results = [item.paper for item in scored_papers[:max_results]]
         search_scores = [item.to_dict() for item in scored_papers]
+        drop_stats = _build_drop_stats(raw_papers, searchable_papers)
+        search_output = _build_search_output(state["request"].topic, state["request"].constraints, intent, search_results)
         search_summary = {
             "topic": state["request"].topic,
             "search_halted": search_halted,
+            "raw_candidate_count": search_execution.raw_candidate_count,
             "raw_paper_count": len(raw_papers),
-            "abstract_paper_count": len(abstract_papers),
-            "dropped_no_abstract_count": len(raw_papers) - len(abstract_papers),
+            "deduplicated_paper_count": len(raw_papers),
+            "abstract_paper_count": len(searchable_papers),
+            "searchable_paper_count": len(searchable_papers),
+            "removed_candidate_count": drop_stats["removed_candidate_count"],
+            "dropped_no_paper_id_count": drop_stats["dropped_no_paper_id_count"],
+            "dropped_no_abstract_count": drop_stats["dropped_no_abstract_count"],
             "selected_paper_count": len(search_results),
             "max_results": max_results,
             "sources": list(intent.sources),
+            "sources_used": list(search_execution.sources_used),
+            "source_results": dict(search_execution.source_results),
+            "source_errors": dict(search_execution.source_errors),
+            "subtopics": [
+                {
+                    "subtopic": subtopic.subtopic,
+                    "keyword": subtopic.keyword,
+                }
+                for subtopic in intent.subtopics
+            ],
         }
 
         if reporter is not None:
@@ -134,12 +179,15 @@ def run_search_agent_node():
 
         search_artifact_refs: list[JsonObject] = []
         if resolved_sink is not None:
-            persistence_result = resolved_sink.persist(
+            persistence_result = await asyncio.to_thread(
+                resolved_sink.persist,
                 topic=state["request"].topic,
                 intent=intent,
                 raw_papers=raw_papers,
                 scored_papers=search_scores,
                 selected_papers=search_results,
+                search_summary=search_summary,
+                search_output=search_output,
                 agent_diagnostics=agent_diagnostics,
                 search_halted=search_halted,
             )
@@ -168,6 +216,7 @@ def run_search_agent_node():
             search_results=search_results,
             search_scores=search_scores,
             search_summary=search_summary,
+            search_output=search_output,
             search_artifact_refs=search_artifact_refs,
             read_resume_checkpoint=state.get("read_resume_checkpoint", {}),
             diagnostics={"agent": agent_diagnostics},
@@ -207,6 +256,15 @@ def _resolve_search_sink(state: State) -> SearchNodeSink | None:
     return SearchPersistenceSink(session_repo, session_key=session_key, turn_id=turn_id)
 
 
+def _resolve_runtime_resources(state: State) -> WorkflowRuntimeResources | None:
+    """从运行时上下文中取出搜索节点可复用的并发资源。"""
+
+    runtime = cast(WorkflowRuntimeContext | None, state.get("runtime_context"))
+    if runtime is None:
+        return None
+    return runtime.resources if isinstance(runtime.resources, WorkflowRuntimeResources) else None
+
+
 def _normalize_optional_str(value: Any) -> str | None:
     """把任意可选值整理成非空字符串，没有值时返回 None。"""
 
@@ -214,31 +272,89 @@ def _normalize_optional_str(value: Any) -> str | None:
     return text or None
 
 
-def _execute_search_intent(service: PaperSearchService, intent: SearchIntent) -> list[PaperDocument]:
-    """按检索意图调用检索服务，并合并去重后的论文列表。"""
+async def _execute_search_intent(
+    service: PaperSearchService,
+    intent: SearchIntent,
+    *,
+    runtime_resources: WorkflowRuntimeResources | None,
+) -> SearchExecutionResult:
+    """按每个子主题调用检索服务，并把所有候选论文合并到一起。"""
 
-    collected: list[PaperDocument] = []
-    seen: set[str] = set()
-    sources = intent.sources or [None]
-    for source in sources:
-        response = service.search(
-            query="",
-            topic=intent.topic,
-            keywords=intent.keywords,
-            source=source,
-            limit=max(1, intent.max_results),
-            year_from=intent.year_from,
-            year_to=intent.year_to,
-            excluded_terms=intent.excluded_terms,
-            truncate=False,
+    subtopics = intent.subtopics or [SearchSubtopic(subtopic=intent.topic or "综合检索", keyword=" ".join(intent.keywords))]
+    tasks = [
+        _search_one_subtopic(
+            service,
+            intent,
+            subtopic,
+            runtime_resources=runtime_resources,
         )
+        for subtopic in subtopics
+    ]
+    responses = await asyncio.gather(*tasks)
+    return _merge_subtopic_search_responses(responses)
+
+
+async def _search_one_subtopic(
+    service: PaperSearchService,
+    intent: SearchIntent,
+    subtopic: SearchSubtopic,
+    *,
+    runtime_resources: WorkflowRuntimeResources | None,
+) -> tuple[SearchSubtopic, SearchResponse]:
+    """执行单个子主题检索，让数据源自己处理检索式细节。"""
+
+    source = intent.sources[0] if len(intent.sources) == 1 else None
+    sources = list(intent.sources) if len(intent.sources) > 1 else None
+    response = await service.async_search(
+        query="",
+        topic=subtopic.subtopic,
+        keywords=[subtopic.keyword],
+        keyword_expression=subtopic.keyword,
+        source=source,
+        sources=sources,
+        limit=max(1, intent.max_results),
+        year_from=intent.year_from,
+        year_to=intent.year_to,
+        excluded_terms=intent.excluded_terms,
+        truncate=False,
+        runtime_resources=runtime_resources,
+    )
+    return subtopic, response
+
+
+def _merge_subtopic_search_responses(responses: list[tuple[SearchSubtopic, SearchResponse]]) -> SearchExecutionResult:
+    """合并多个子主题的检索响应，同时记录来源统计和错误信息。"""
+
+    papers_by_key: dict[str, PaperDocument] = {}
+    raw_candidate_count = 0
+    sources_used: list[str] = []
+    source_results: dict[str, int] = {}
+    source_errors: dict[str, str] = {}
+    for subtopic, response in responses:
+        source_count_sum = sum(response.source_results.values())
+        raw_candidate_count += source_count_sum if source_count_sum > 0 else len(response.papers)
+        for source in response.sources_used:
+            if source not in sources_used:
+                sources_used.append(source)
+        for source, count in response.source_results.items():
+            source_results[source] = source_results.get(source, 0) + int(count)
+        for source, message in response.errors.items():
+            prefix = f"{subtopic.subtopic}: {message}"
+            source_errors[source] = f"{source_errors[source]}; {prefix}" if source in source_errors else prefix
         for paper in response.papers:
-            dedupe_key = _paper_dedupe_key(paper)
-            if dedupe_key in seen:
+            _attach_search_origin(paper, subtopic)
+            key = _paper_dedupe_key(paper)
+            if key in papers_by_key:
+                _merge_duplicate_paper(papers_by_key[key], paper)
                 continue
-            seen.add(dedupe_key)
-            collected.append(paper)
-    return collected
+            papers_by_key[key] = paper
+    return SearchExecutionResult(
+        papers=list(papers_by_key.values()),
+        raw_candidate_count=raw_candidate_count,
+        sources_used=sources_used,
+        source_results=source_results,
+        source_errors=source_errors,
+    )
 
 
 def _filter_papers_with_abstract(papers: list[PaperDocument]) -> list[PaperDocument]:
@@ -254,13 +370,139 @@ def _filter_papers_with_abstract(papers: list[PaperDocument]) -> list[PaperDocum
     return filtered
 
 
+def _filter_searchable_papers(papers: list[PaperDocument]) -> list[PaperDocument]:
+    """只保留有唯一编号、也有摘要的论文。"""
+
+    filtered: list[PaperDocument] = []
+    for paper in papers:
+        # 中文注释：没有 paperId 的论文后面很难稳定去重和复用；没有摘要的论文也无法在检索节点做贴题粗筛。
+        if not (paper.paperId or "").strip():
+            continue
+        if not (paper.abstract or "").strip():
+            continue
+        filtered.append(paper)
+    return filtered
+
+
+def _build_drop_stats(raw_papers: list[PaperDocument], kept_papers: list[PaperDocument]) -> JsonObject:
+    """统计粗筛阶段删掉了多少论文，以及主要删除原因。"""
+
+    kept_keys = {_paper_dedupe_key(paper) for paper in kept_papers}
+    dropped_no_paper_id_count = 0
+    dropped_no_abstract_count = 0
+    for paper in raw_papers:
+        if _paper_dedupe_key(paper) in kept_keys:
+            continue
+        if not (paper.paperId or "").strip():
+            dropped_no_paper_id_count += 1
+            continue
+        if not (paper.abstract or "").strip():
+            dropped_no_abstract_count += 1
+    return {
+        "removed_candidate_count": len(raw_papers) - len(kept_papers),
+        "dropped_no_paper_id_count": dropped_no_paper_id_count,
+        "dropped_no_abstract_count": dropped_no_abstract_count,
+    }
+
+
+def _build_search_output(
+    topic: str,
+    constraints: JsonObject,
+    intent: SearchIntent,
+    selected_papers: list[PaperDocument],
+) -> JsonObject:
+    """整理检索节点对后续流程和前端展示都友好的输出结构。"""
+
+    subtopics: list[JsonObject] = []
+    for subtopic in intent.subtopics:
+        matched_papers = [
+            paper.to_dict()
+            for paper in selected_papers
+            if _paper_has_subtopic_origin(paper, subtopic)
+        ]
+        subtopics.append(
+            {
+                "subtopic": subtopic.subtopic,
+                "keyword": subtopic.keyword,
+                "papers": matched_papers,
+            }
+        )
+    return {
+        "topic": topic,
+        "constraint": dict(constraints or {}),
+        "subtopics": subtopics,
+    }
+
+
+def _paper_has_subtopic_origin(paper: PaperDocument, subtopic: SearchSubtopic) -> bool:
+    """判断论文是否来自指定子主题。"""
+
+    origins = paper.metadata.get("search_subtopics") if isinstance(paper.metadata, dict) else []
+    if not isinstance(origins, list):
+        return False
+    for origin in origins:
+        if not isinstance(origin, dict):
+            continue
+        if origin.get("subtopic") == subtopic.subtopic and origin.get("keyword") == subtopic.keyword:
+            return True
+    return False
+
+
+def _attach_search_origin(paper: PaperDocument, subtopic: SearchSubtopic) -> None:
+    """给论文记录补上它来自哪个子主题，方便前端按方向展示。"""
+
+    metadata = dict(paper.metadata or {})
+    origins = metadata.get("search_subtopics")
+    if not isinstance(origins, list):
+        origins = []
+    origin = {"subtopic": subtopic.subtopic, "keyword": subtopic.keyword}
+    if origin not in origins:
+        origins.append(origin)
+    metadata["search_subtopics"] = origins
+    found_sources = metadata.get("found_sources")
+    if not isinstance(found_sources, list):
+        found_sources = []
+    if paper.source and paper.source not in found_sources:
+        found_sources.append(paper.source)
+    metadata["found_sources"] = found_sources
+    paper.metadata = metadata
+
+
+def _merge_duplicate_paper(target: PaperDocument, duplicate: PaperDocument) -> None:
+    """把重复论文的来源信息补到已保留的论文上。"""
+
+    target_metadata = dict(target.metadata or {})
+    duplicate_metadata = dict(duplicate.metadata or {})
+    target_origins = target_metadata.get("search_subtopics")
+    duplicate_origins = duplicate_metadata.get("search_subtopics")
+    if not isinstance(target_origins, list):
+        target_origins = []
+    if isinstance(duplicate_origins, list):
+        for origin in duplicate_origins:
+            if origin not in target_origins:
+                target_origins.append(origin)
+    target_metadata["search_subtopics"] = target_origins
+    found_sources = target_metadata.get("found_sources")
+    if not isinstance(found_sources, list):
+        found_sources = [target.source] if target.source else []
+    if duplicate.source and duplicate.source not in found_sources:
+        found_sources.append(duplicate.source)
+    target_metadata["found_sources"] = found_sources
+    target.metadata = target_metadata
+    if not (target.abstract or "").strip() and (duplicate.abstract or "").strip():
+        target.abstract = duplicate.abstract
+    if not target.url and duplicate.url:
+        target.url = duplicate.url
+    if not target.pdf_url and duplicate.pdf_url:
+        target.pdf_url = duplicate.pdf_url
+
 
 def _score_papers(intent: SearchIntent, papers: list[PaperDocument]) -> list[ScoredPaper]:
     """根据检索意图对候选论文打分并排序。"""
 
-    # 中文注释：粗筛打分时同时参考用户原始主题和模型提取的关键词，
-    # 再拿它们去论文标题、摘要里找命中，避免只看关键词导致主题信息丢失。
-    scoring_sources = [intent.topic, *intent.keywords]
+    # 中文注释：粗筛打分只看模型生成的关键词和检索式，标题命中权重大一些，摘要命中权重小一些。
+    # 标题通常更直接说明论文是否贴题，所以这里给标题命中 2 倍分。
+    scoring_sources = [*intent.keywords, *[subtopic.keyword for subtopic in intent.subtopics]]
     tokens = _build_scoring_tokens(scoring_sources)
     phrase_terms = _build_scoring_phrases(scoring_sources)
     threshold = _score_threshold(tokens)
@@ -305,11 +547,11 @@ def _score_papers(intent: SearchIntent, papers: list[PaperDocument]) -> list[Sco
 
 
 def _paper_dedupe_key(paper: PaperDocument) -> str:
-    """为论文生成稳定的去重键，优先使用 DOI。"""
+    """为论文生成稳定的去重键，优先使用统一后的 paperId。"""
 
-    doi = (paper.doi or "").strip().lower()
-    if doi:
-        return f"doi:{doi}"
+    paper_id = (paper.paperId or "").strip().lower()
+    if paper_id:
+        return f"paper_id:{paper_id}"
     return f"title:{paper.title.strip().lower()}"
 
 
@@ -320,7 +562,7 @@ def _extract_query_terms(text: str) -> list[str]:
     results: list[str] = []
     for token in re.findall(r"[\u4e00-\u9fff]+|[a-zA-Z0-9]+(?:[-_][a-zA-Z0-9]+)*", text.lower()):
         normalized = token.strip()
-        if len(normalized) <= 1 or normalized in seen:
+        if len(normalized) <= 1 or normalized in {"and", "or", "not"} or normalized in seen:
             continue
         seen.add(normalized)
         results.append(normalized)

@@ -28,8 +28,8 @@ class FakeAnthropicClient:
         self.messages = type("Messages", (), {"create": create.create})()
 
 
-class LLMAdaptersTest(unittest.TestCase):
-    def test_openai_compat_uses_sdk_chat_completion_request(self):
+class LLMAdaptersTest(unittest.IsolatedAsyncioTestCase):
+    async def test_openai_compat_uses_sdk_chat_completion_request(self):
         client = FakeOpenAIClient({"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]})
         config = ModelConfig.from_dict(
             {
@@ -39,14 +39,14 @@ class LLMAdaptersTest(unittest.TestCase):
         )
 
         snapshot = make_provider(config, client=client)
-        response = snapshot.provider.chat([{"role": "user", "content": "hi"}])
+        response = await snapshot.provider.chat([{"role": "user", "content": "hi"}])
 
         self.assertEqual(response.content, "ok")
         kwargs = client.calls[0]
         self.assertEqual(kwargs["max_completion_tokens"], 100)
         self.assertNotIn("temperature", kwargs)
 
-    def test_anthropic_converts_tools_and_system_message(self):
+    async def test_anthropic_converts_tools_and_system_message(self):
         client = FakeAnthropicClient(
             {
                 "content": [{"type": "text", "text": "ok"}],
@@ -62,7 +62,7 @@ class LLMAdaptersTest(unittest.TestCase):
         )
 
         snapshot = make_provider(config, client=client)
-        response = snapshot.provider.chat(
+        response = await snapshot.provider.chat(
             [{"role": "system", "content": "be brief"}, {"role": "user", "content": "hi"}],
             tools=[{"type": "function", "function": {"name": "search", "parameters": {"type": "object"}}}],
         )

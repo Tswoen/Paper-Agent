@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import copy
 from datetime import datetime, timezone
 from time import perf_counter
@@ -144,6 +145,13 @@ def update_embedding_profile(repo: SettingsRepository, name: str, patch: JsonObj
 def provider_models_payload(repo: SettingsRepository, provider: str, client: Any | None = None) -> JsonObject:
     """读取指定 provider 的模型目录载荷。"""
 
+    # 中文注释：这是旧同步入口，只给还没迁移的测试或调用方过渡使用；新路由会直接 await async_provider_models_payload。
+    return _run_async_for_legacy(async_provider_models_payload(repo, provider, client=client))
+
+
+async def async_provider_models_payload(repo: SettingsRepository, provider: str, client: Any | None = None) -> JsonObject:
+    """异步读取指定 provider 的模型目录载荷。"""
+
     data = _normalized_config(repo.load())
     config = ModelConfig.from_dict(data, repo.system())
     if provider not in config.providers:
@@ -156,21 +164,28 @@ def provider_models_payload(repo: SettingsRepository, provider: str, client: Any
     if _provider_requires_key(spec) and not provider_config.api_key:
         return _models_status(provider, "not_configured", "provider api_key is not configured")
 
+    snapshot = None
     try:
         if client is not None:
             # 测试或特殊调用方可以继续传假 client；正式路径统一走 provider.list_models。
-            models = _parse_model_list(client.models.list())
+            raw_models = client.models.list()
+            if hasattr(raw_models, "__await__"):
+                raw_models = await raw_models
+            models = _parse_model_list(raw_models)
         else:
             config.agents.setdefault(
                 "__model_catalog__",
                 AgentConfig(provider=provider, model_name="__model_catalog__"),
             )
             snapshot = make_provider(config, "__model_catalog__")
-            models = snapshot.provider.list_models()
+            models = await snapshot.provider.list_models()
     except NotImplementedError:
         return _models_status(provider, "unsupported", "provider model catalog is not supported")
     except Exception as exc:
         return _models_status(provider, "error", str(exc))
+    finally:
+        if snapshot is not None:
+            await snapshot.aclose()
 
     return {
         "provider": provider,
@@ -192,14 +207,29 @@ def model_connectivity_payload(
     client: Any | None = None,
     embedding_client: Any | None = None,
 ) -> JsonObject:
-    """按当前保存的模型配置做一次最小真实调用，用来判断这条配置能不能用。
+    """按当前保存的模型配置做一次最小真实调用，用来判断这条配置能不能用。"""
 
-    中文说明：
-    1. 这里测试的是“这一行配置里的 provider + model_name 是否可调用”，不是 provider 是否能列出模型目录；
-    2. agent 会发起一条最小对话请求；
-    3. embedding_profile 会发起一次最小向量化请求；
-    4. 返回值统一成前端容易展示的结构，按钮就可以直接显示“已通过 / 未通过 / 未配置”。
-    """
+    # 中文注释：这是旧同步入口，只做临时兼容；FastAPI 路由已经改用 async_model_connectivity_payload。
+    return _run_async_for_legacy(
+        async_model_connectivity_payload(
+            repo,
+            target_type,
+            name,
+            client=client,
+            embedding_client=embedding_client,
+        )
+    )
+
+
+async def async_model_connectivity_payload(
+    repo: SettingsRepository,
+    target_type: str,
+    name: str,
+    *,
+    client: Any | None = None,
+    embedding_client: Any | None = None,
+) -> JsonObject:
+    """按当前保存的模型配置做一次最小真实异步调用。"""
 
     normalized_target = str(target_type or "").strip()
     target_name = str(name or "").strip()
@@ -214,12 +244,26 @@ def model_connectivity_payload(
     if normalized_target == "agent":
         if target_name not in config.agents:
             raise SettingsError(f"unknown agent: {target_name}", 404)
-        return _test_agent_connectivity(config, target_name, client=client)
+        return await _test_agent_connectivity(config, target_name, client=client)
     if normalized_target == "embedding_profile":
         if target_name not in config.embedding_profiles:
             raise SettingsError(f"unknown embedding profile: {target_name}", 404)
-        return _test_embedding_connectivity(config, target_name, client=embedding_client)
+        return await _test_embedding_connectivity(config, target_name, client=embedding_client)
     raise SettingsError(f"unsupported target_type: {normalized_target}")
+
+
+def _run_async_for_legacy(awaitable: Any) -> Any:
+    """让旧同步入口临时运行新的 async 实现。"""
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        # 中文注释：旧同步测试或旧同步服务调用时通常没有事件循环，可以安全地临时跑一次。
+        return asyncio.run(awaitable)
+    # 中文注释：如果已经在 FastAPI 这类 async 环境中，必须直接 await async_* 函数，不能再走同步桥。
+    if hasattr(awaitable, "close"):
+        awaitable.close()
+    raise RuntimeError("当前环境已经有事件循环，请改用 async_provider_models_payload / async_model_connectivity_payload")
 
 
 def _normalized_config(data: JsonObject) -> JsonObject:
@@ -232,7 +276,7 @@ def _normalized_config(data: JsonObject) -> JsonObject:
     return data
 
 
-def _test_agent_connectivity(config: ModelConfig, name: str, *, client: Any | None = None) -> JsonObject:
+async def _test_agent_connectivity(config: ModelConfig, name: str, *, client: Any | None = None) -> JsonObject:
     """对指定智能体配置发起一次最小对话请求。
 
     中文说明：
@@ -256,52 +300,56 @@ def _test_agent_connectivity(config: ModelConfig, name: str, *, client: Any | No
             latency_ms=_elapsed_ms(started_at),
         )
 
-    response = snapshot.provider.chat_with_retry(
-        [{"role": "user", "content": "请只回复 OK"}],
-        temperature=0,
-        max_tokens=16,
-    )
-    if not response.ok:
-        detail = response.content.strip() or "模型没有返回成功结果"
+    try:
+        response = await snapshot.provider.chat(
+            [{"role": "user", "content": "请只回复 OK"}],
+            temperature=0,
+            max_tokens=16,
+        )
+        if not response.ok:
+            detail = response.content.strip() or "模型没有返回成功结果"
+            return _connectivity_payload(
+                target_type="agent",
+                name=name,
+                provider=agent.provider,
+                model=agent.model_name,
+                status="failed",
+                message=detail,
+                latency_ms=_elapsed_ms(started_at),
+                error_kind=response.error_kind,
+                error_status_code=response.error_status_code,
+                finish_reason=response.finish_reason,
+            )
+
+        content = response.content.strip()
+        if not content:
+            return _connectivity_payload(
+                target_type="agent",
+                name=name,
+                provider=agent.provider,
+                model=agent.model_name,
+                status="failed",
+                message="模型接口已返回成功状态，但返回内容为空",
+                latency_ms=_elapsed_ms(started_at),
+                finish_reason=response.finish_reason,
+            )
+
         return _connectivity_payload(
             target_type="agent",
             name=name,
             provider=agent.provider,
             model=agent.model_name,
-            status="failed",
-            message=detail,
-            latency_ms=_elapsed_ms(started_at),
-            error_kind=response.error_kind,
-            error_status_code=response.error_status_code,
-            finish_reason=response.finish_reason,
-        )
-
-    content = response.content.strip()
-    if not content:
-        return _connectivity_payload(
-            target_type="agent",
-            name=name,
-            provider=agent.provider,
-            model=agent.model_name,
-            status="failed",
-            message="模型接口已返回成功状态，但返回内容为空",
+            status="passed",
+            message="模型已成功返回内容",
             latency_ms=_elapsed_ms(started_at),
             finish_reason=response.finish_reason,
         )
-
-    return _connectivity_payload(
-        target_type="agent",
-        name=name,
-        provider=agent.provider,
-        model=agent.model_name,
-        status="passed",
-        message="模型已成功返回内容",
-        latency_ms=_elapsed_ms(started_at),
-        finish_reason=response.finish_reason,
-    )
+    finally:
+        # 中文注释：设置页测试是短生命周期调用，完成后立即关闭 provider 自己创建的连接池。
+        await snapshot.aclose()
 
 
-def _test_embedding_connectivity(config: ModelConfig, name: str, *, client: Any | None = None) -> JsonObject:
+async def _test_embedding_connectivity(config: ModelConfig, name: str, *, client: Any | None = None) -> JsonObject:
     """对指定嵌入模型配置发起一次最小 embedding 请求。
 
     中文说明：
@@ -332,66 +380,70 @@ def _test_embedding_connectivity(config: ModelConfig, name: str, *, client: Any 
         )
 
     try:
-        response = snapshot.provider.embed_with_retry(["连通性测试"], dimensions=profile.dimensions)
-    except NotImplementedError as exc:
-        return _connectivity_payload(
-            target_type="embedding_profile",
-            name=name,
-            provider=profile.provider,
-            model=profile.model_name,
-            status="failed",
-            message=f"当前 provider 不支持 embedding：{exc}",
-            latency_ms=_elapsed_ms(started_at),
-        )
-    except Exception as exc:
-        return _connectivity_payload(
-            target_type="embedding_profile",
-            name=name,
-            provider=profile.provider,
-            model=profile.model_name,
-            status="failed",
-            message=f"嵌入模型调用失败：{exc}",
-            latency_ms=_elapsed_ms(started_at),
-        )
+        try:
+            response = await snapshot.provider.embed(["连通性测试"], dimensions=profile.dimensions)
+        except NotImplementedError as exc:
+            return _connectivity_payload(
+                target_type="embedding_profile",
+                name=name,
+                provider=profile.provider,
+                model=profile.model_name,
+                status="failed",
+                message=f"当前 provider 不支持 embedding：{exc}",
+                latency_ms=_elapsed_ms(started_at),
+            )
+        except Exception as exc:
+            return _connectivity_payload(
+                target_type="embedding_profile",
+                name=name,
+                provider=profile.provider,
+                model=profile.model_name,
+                status="failed",
+                message=f"嵌入模型调用失败：{exc}",
+                latency_ms=_elapsed_ms(started_at),
+            )
 
-    if not response.ok:
-        detail = response.content.strip() or response.error_code or response.error_type or response.error_kind or "模型没有返回成功结果"
+        if not response.ok:
+            detail = response.content.strip() or response.error_code or response.error_type or response.error_kind or "模型没有返回成功结果"
+            return _connectivity_payload(
+                target_type="embedding_profile",
+                name=name,
+                provider=profile.provider,
+                model=profile.model_name,
+                status="failed",
+                message=f"嵌入模型调用失败：{detail}",
+                latency_ms=_elapsed_ms(started_at),
+                error_kind=response.error_kind,
+                error_status_code=response.error_status_code,
+                finish_reason=response.finish_reason,
+            )
+
+        vector = response.embeddings[0] if response.embeddings else None
+        if not isinstance(vector, list) or not vector:
+            return _connectivity_payload(
+                target_type="embedding_profile",
+                name=name,
+                provider=profile.provider,
+                model=profile.model_name,
+                status="failed",
+                message="嵌入模型返回的向量为空或格式不正确",
+                latency_ms=_elapsed_ms(started_at),
+                finish_reason=response.finish_reason,
+            )
+
         return _connectivity_payload(
             target_type="embedding_profile",
             name=name,
             provider=profile.provider,
             model=profile.model_name,
-            status="failed",
-            message=f"嵌入模型调用失败：{detail}",
+            status="passed",
+            message=f"嵌入模型已成功返回 {len(vector)} 维向量",
             latency_ms=_elapsed_ms(started_at),
-            error_kind=response.error_kind,
-            error_status_code=response.error_status_code,
-            finish_reason=response.finish_reason,
+            vector_dimensions=len(vector),
         )
-
-    vector = response.embeddings[0] if response.embeddings else None
-    if not isinstance(vector, list) or not vector:
-        return _connectivity_payload(
-            target_type="embedding_profile",
-            name=name,
-            provider=profile.provider,
-            model=profile.model_name,
-            status="failed",
-            message="嵌入模型返回的向量为空或格式不正确",
-            latency_ms=_elapsed_ms(started_at),
-            finish_reason=response.finish_reason,
-        )
-
-    return _connectivity_payload(
-        target_type="embedding_profile",
-        name=name,
-        provider=profile.provider,
-        model=profile.model_name,
-        status="passed",
-        message=f"嵌入模型已成功返回 {len(vector)} 维向量",
-        latency_ms=_elapsed_ms(started_at),
-        vector_dimensions=len(vector),
-    )
+    finally:
+        # 中文注释：设置页测试结束后释放 provider 自己创建的异步连接，避免出现未关闭连接警告。
+        await snapshot.aclose()
 
 
 def _apply_optional_provider_field(provider: JsonObject, patch: JsonObject, snake_name: str, camel_name: str) -> None:

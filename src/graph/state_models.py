@@ -20,6 +20,7 @@ class State(TypedDict, total=False):
     search_results: list[PaperDocument]
     search_scores: list[JsonObject]
     search_summary: JsonObject
+    search_output: JsonObject
     search_artifact_refs: list[JsonObject]
     read_results: list[JsonObject]
     read_summary: JsonObject
@@ -52,6 +53,8 @@ class SearchNodeSink(Protocol):
         raw_papers: list[PaperDocument],
         scored_papers: list[JsonObject],
         selected_papers: list[PaperDocument],
+        search_summary: JsonObject,
+        search_output: JsonObject,
         agent_diagnostics: JsonObject,
         search_halted: bool,
     ) -> Any:

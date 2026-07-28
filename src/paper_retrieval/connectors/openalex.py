@@ -19,12 +19,13 @@ class OpenAlexPaperConnector(PaperSearchConnector):
     def __init__(self, client: httpx.Client | None = None):
         """初始化 HTTP 客户端。"""
 
+        self.headers = {
+            "User-Agent": "papers-agents/0.1 paper-retrieval",
+            "Accept": "application/json",
+        }
         self.client = client or httpx.Client(
             timeout=20.0,
-            headers={
-                "User-Agent": "papers-agents/0.1 paper-retrieval",
-                "Accept": "application/json",
-            },
+            headers=self.headers,
         )
 
     def search(self, request: SearchRequest) -> list[PaperDocument]:
@@ -34,17 +35,26 @@ class OpenAlexPaperConnector(PaperSearchConnector):
         response.raise_for_status()
         return self._parse_payload(response.json(), request)
 
-    async def async_search(self, request: SearchRequest) -> list[PaperDocument]:
+    async def async_search(
+        self,
+        request: SearchRequest,
+        *,
+        client: httpx.AsyncClient | None = None,
+    ) -> list[PaperDocument]:
         """异步执行 OpenAlex 检索，避免在异步编排里阻塞事件循环。"""
 
-        async with httpx.AsyncClient(
-            timeout=20.0,
-            headers={
-                "User-Agent": "papers-agents/0.1 paper-retrieval",
-                "Accept": "application/json",
-            },
-        ) as client:
-            response = await client.get(self._endpoint, params=self._params(request))
+        resolved_client = client or httpx.AsyncClient(timeout=20.0)
+        owns_client = client is None
+        try:
+            response = await resolved_client.get(
+                self._endpoint,
+                params=self._params(request),
+                headers=self.headers,
+                timeout=20.0,
+            )
+        finally:
+            if owns_client:
+                await resolved_client.aclose()
         response.raise_for_status()
         return self._parse_payload(response.json(), request)
 
@@ -69,7 +79,7 @@ class OpenAlexPaperConnector(PaperSearchConnector):
 
         papers: list[PaperDocument] = []
         for item in payload.get("results", []) or []:
-            paper = self._parse_item(item)
+            paper = self.normalize_paper(item)
             if paper is None:
                 continue
             if self._contains_excluded_terms(paper, request.excluded_terms):
@@ -80,6 +90,8 @@ class OpenAlexPaperConnector(PaperSearchConnector):
     def _build_query(self, request: SearchRequest) -> str:
         """把 topic / keywords 组合成 OpenAlex 搜索串。"""
 
+        if request.keyword_expression.strip():
+            return request.keyword_expression.strip()
         if request.query.strip():
             return request.query.strip()
         parts: list[str] = []
@@ -89,9 +101,12 @@ class OpenAlexPaperConnector(PaperSearchConnector):
             parts.extend(request.keywords[:5])
         return " ".join(parts).strip()
 
-    def _parse_item(self, item: dict[str, object]) -> PaperDocument | None:
+    def normalize_paper(self, raw: object) -> PaperDocument | None:
         """把单条 OpenAlex work 记录解析成统一论文对象。"""
 
+        if not isinstance(raw, dict):
+            return None
+        item = raw
         title = str(item.get("title") or "").strip()
         if not title:
             return None
@@ -118,17 +133,32 @@ class OpenAlexPaperConnector(PaperSearchConnector):
         doi = str(item.get("doi") or "").strip()
         if doi.startswith("https://doi.org/"):
             doi = doi.removeprefix("https://doi.org/")
+        openalex_id = str(item.get("id") or "").strip()
+        paper_id = doi or openalex_id
+        publication_date = str(item.get("publication_date") or "").strip()
+        biblio = item.get("biblio") or {}
+        volume = ""
+        issue = ""
+        if isinstance(biblio, dict):
+            volume = str(biblio.get("volume") or "").strip()
+            issue = str(biblio.get("issue") or "").strip()
         return PaperDocument(
-            id=str(item.get("id") or title),
+            id=paper_id or title,
+            paperId=paper_id,
             title=title,
             authors=authors,
-            abstract=None,
+            abstract=self._abstract_from_inverted_index(item.get("abstract_inverted_index")),
             year=self._maybe_int(item.get("publication_year")),
             venue=venue or None,
-            url=str(item.get("id") or "").strip() or None,
+            url=openalex_id or None,
             pdf_url=pdf_url or None,
             doi=doi or None,
             source=self.source_name,
+            publication_date=publication_date,
+            journal_conference=venue,
+            volume=volume,
+            issue=issue,
+            language=str(item.get("language") or "").strip(),
             metadata={
                 "cited_by_count": item.get("cited_by_count"),
                 "type": item.get("type"),
@@ -142,6 +172,24 @@ class OpenAlexPaperConnector(PaperSearchConnector):
             return int(value) if value is not None else None
         except (TypeError, ValueError):
             return None
+
+    def _abstract_from_inverted_index(self, value: object) -> str | None:
+        """把 OpenAlex 的摘要词表还原成普通摘要文本。"""
+
+        if not isinstance(value, dict):
+            return None
+        positions: dict[int, str] = {}
+        for word, raw_indexes in value.items():
+            if not isinstance(raw_indexes, list):
+                continue
+            for raw_index in raw_indexes:
+                try:
+                    positions[int(raw_index)] = str(word)
+                except (TypeError, ValueError):
+                    continue
+        if not positions:
+            return None
+        return " ".join(positions[index] for index in sorted(positions))
 
     def _contains_excluded_terms(self, paper: PaperDocument, excluded_terms: list[str]) -> bool:
         """对标题和摘要做排除词过滤。"""

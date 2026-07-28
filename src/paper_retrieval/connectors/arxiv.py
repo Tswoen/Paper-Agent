@@ -23,12 +23,13 @@ class ArxivPaperConnector(PaperSearchConnector):
     def __init__(self, client: httpx.Client | None = None):
         """初始化 HTTP 客户端。"""
 
+        self.headers = {
+            "User-Agent": "papers-agents/0.1 paper-retrieval",
+            "Accept": "application/atom+xml, application/xml;q=0.9, */*;q=0.8",
+        }
         self.client = client or httpx.Client(
             timeout=20.0,
-            headers={
-                "User-Agent": "papers-agents/0.1 paper-retrieval",
-                "Accept": "application/atom+xml, application/xml;q=0.9, */*;q=0.8",
-            },
+            headers=self.headers,
         )
 
     def search(self, request: SearchRequest) -> list[PaperDocument]:
@@ -48,18 +49,19 @@ class ArxivPaperConnector(PaperSearchConnector):
         response.raise_for_status()
         return self._parse_response_text(response.text, request)
 
-    async def async_search(self, request: SearchRequest) -> list[PaperDocument]:
+    async def async_search(
+        self,
+        request: SearchRequest,
+        *,
+        client: httpx.AsyncClient | None = None,
+    ) -> list[PaperDocument]:
         """异步执行 arXiv 检索，避免在异步编排里阻塞事件循环。"""
 
         query = self._build_query(request)
-        async with httpx.AsyncClient(
-            timeout=20.0,
-            headers={
-                "User-Agent": "papers-agents/0.1 paper-retrieval",
-                "Accept": "application/atom+xml, application/xml;q=0.9, */*;q=0.8",
-            },
-        ) as client:
-            response = await client.get(
+        resolved_client = client or httpx.AsyncClient(timeout=20.0)
+        owns_client = client is None
+        try:
+            response = await resolved_client.get(
                 self._endpoint,
                 params={
                     "search_query": query,
@@ -68,7 +70,12 @@ class ArxivPaperConnector(PaperSearchConnector):
                     "sortBy": "relevance",
                     "sortOrder": "descending",
                 },
+                headers=self.headers,
+                timeout=20.0,
             )
+        finally:
+            if owns_client:
+                await resolved_client.aclose()
         response.raise_for_status()
         return self._parse_response_text(response.text, request)
 
@@ -78,7 +85,7 @@ class ArxivPaperConnector(PaperSearchConnector):
         root = ET.fromstring(text)
         papers: list[PaperDocument] = []
         for entry in root.findall("atom:entry", self._atom_ns):
-            paper = self._parse_entry(entry)
+            paper = self.normalize_paper(entry)
             if paper is None:
                 continue
             if not self._within_year_range(paper, request):
@@ -99,6 +106,8 @@ class ArxivPaperConnector(PaperSearchConnector):
     def _choose_query_text(self, request: SearchRequest) -> str:
         """优先使用上层原始 query，没有时再用 topic 和 keywords 兜底。"""
 
+        if request.keyword_expression.strip():
+            return request.keyword_expression.strip()
         if request.query.strip():
             return request.query.strip()
         parts: list[str] = []
@@ -113,9 +122,12 @@ class ArxivPaperConnector(PaperSearchConnector):
 
         return " ".join(query.split())
 
-    def _parse_entry(self, entry: ET.Element) -> PaperDocument | None:
+    def normalize_paper(self, raw: object) -> PaperDocument | None:
         """把单个 Atom entry 解析成统一论文对象。"""
 
+        if not isinstance(raw, ET.Element):
+            return None
+        entry = raw
         title = self._text(entry, "atom:title")
         if not title:
             return None
@@ -134,8 +146,10 @@ class ArxivPaperConnector(PaperSearchConnector):
                 pdf_url = href
             if title_attr == "doi" and href:
                 doi = href.rsplit("/", 1)[-1]
+        unique_id = doi or paper_id
         return PaperDocument(
-            id=paper_id,
+            id=unique_id or title,
+            paperId=unique_id,
             title=title,
             authors=authors,
             abstract=summary,
@@ -145,7 +159,10 @@ class ArxivPaperConnector(PaperSearchConnector):
             pdf_url=pdf_url or None,
             doi=doi or None,
             source=self.source_name,
-            metadata={"published": published_text},
+            publication_date=published_text,
+            journal_conference="arXiv",
+            language="en",
+            metadata={"published": published_text, "arxiv_id": paper_id},
         )
 
     def _text(self, entry: ET.Element, path: str) -> str:

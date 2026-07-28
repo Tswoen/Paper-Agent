@@ -1,3 +1,4 @@
+import asyncio
 import tempfile
 import unittest
 
@@ -24,6 +25,11 @@ class _FakeProvider:
         if self.response is not None:
             return self.response
         return LLMResponse(content=self.response_text, finish_reason="stop")
+
+    async def chat(self, messages, **kwargs):
+        """给阅读节点提供 async 接口，和现在的图执行主链路保持一致。"""
+
+        return self.chat_with_retry(messages, **kwargs)
 
 
 def _fake_snapshot(response_text: str | None = None, response: LLMResponse | None = None) -> ProviderSnapshot:
@@ -78,6 +84,34 @@ class _StubService:
             ],
         )
 
+    async def async_search(self, **kwargs):
+        """异步检索入口支持单源和多源两种调用，方便验证统一异步接口。"""
+
+        self.calls.append(kwargs)
+        sources = list(kwargs.get("sources") or [])
+        source = kwargs.get("source")
+        if source:
+            sources = [source]
+        if not sources:
+            sources = ["openalex"]
+        papers = [
+            PaperDocument(
+                id=f"graph-paper-{item}",
+                title=f"LangGraph Powered Paper Search {item}",
+                authors=["Graph Tester"],
+                abstract="LangGraph powered paper search uses agents to review literature.",
+                year=2026,
+                source=item,
+            )
+            for item in sources
+        ]
+        return SearchResponse(
+            query=kwargs["query"],
+            sources_used=list(sources),
+            source_results={item: 1 for item in sources},
+            papers=papers,
+        )
+
 
 class GraphTest(unittest.TestCase):
     """验证通用图入口在当前搜索场景下的行为稳定性。"""
@@ -88,12 +122,14 @@ class GraphTest(unittest.TestCase):
         graph = build_graph()
 
         self.assertTrue(hasattr(graph, "invoke"))
+        self.assertTrue(hasattr(graph, "ainvoke"))
 
     def test_run_graph_returns_ranked_papers(self):
         """验证图执行后会把论文结果写入共享状态与稳定返回值。"""
 
         stub = _StubService()
-        result = run_graph(
+        result = asyncio.run(
+            run_graph(
             ReviewRequest(
                 topic="multi-agent literature review",
                 constraints={"sources": ["openalex"], "max_results": 5},
@@ -103,6 +139,7 @@ class GraphTest(unittest.TestCase):
                 "search_node_llm": _fake_snapshot(),
                 "read_node_llm": _read_snapshot(),
             },
+            )
         )
 
         self.assertGreaterEqual(len(stub.calls), 1)
@@ -114,10 +151,11 @@ class GraphTest(unittest.TestCase):
         self.assertGreaterEqual(len(result.state["search_scores"]), 1)
 
     def test_run_graph_executes_each_requested_source_with_full_limit(self):
-        """验证多个来源都会执行，且每个来源都使用完整 max_results。"""
+        """验证搜索节点会把多来源请求收口到一次异步服务调用里。"""
 
         stub = _StubService()
-        result = run_graph(
+        result = asyncio.run(
+            run_graph(
             ReviewRequest(
                 topic="multi-agent literature review",
                 constraints={"sources": ["openalex", "arxiv"], "max_results": 5},
@@ -127,10 +165,12 @@ class GraphTest(unittest.TestCase):
                 "search_node_llm": _fake_snapshot(),
                 "read_node_llm": _read_snapshot(),
             },
+            )
         )
 
-        self.assertEqual([call["source"] for call in stub.calls], ["openalex", "arxiv"])
-        self.assertEqual([call["limit"] for call in stub.calls], [5, 5])
+        self.assertEqual(len(stub.calls), 1)
+        self.assertEqual(stub.calls[0]["sources"], ["openalex", "arxiv"])
+        self.assertEqual(stub.calls[0]["limit"], 5)
         self.assertLessEqual(len(result.papers), 5)
 
     def test_run_graph_persists_artifacts_when_session_context_is_provided(self):
@@ -140,7 +180,8 @@ class GraphTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             repo = SQLiteSessionRepository(storage_root=temp_dir)
             session = repo.create("Paper search")
-            result = run_graph(
+            result = asyncio.run(
+                run_graph(
                 ReviewRequest(
                     topic="multi-agent literature review",
                     constraints={"sources": ["openalex"], "max_results": 3},
@@ -151,16 +192,23 @@ class GraphTest(unittest.TestCase):
                 state_overrides={
                     "search_node_service": stub,
                     "search_node_llm": _fake_snapshot(),
-                "read_node_llm": _read_snapshot(),
+                    "read_node_llm": _read_snapshot(),
                 },
+                )
             )
 
             thread = repo.get(session.key).thread()
             artifact_names = [artifact["name"] for artifact in thread["artifacts"]]
-            event_types = [event["event_type"] for event in thread["events"]]
+            completed_search_events = [
+                event
+                for event in thread["events"]
+                if event["event_type"] == "runtime_event"
+                and event["metadata"].get("id") == "turn-search-1:search"
+                and event["metadata"].get("status") == "completed"
+            ]
 
             self.assertIn("search_manifest.json", artifact_names)
-            self.assertIn("node_completed", event_types)
+            self.assertTrue(completed_search_events)
             self.assertGreaterEqual(len(result.state["search_artifact_refs"]), 1)
 
     def test_read_node_saves_checkpoint_when_model_is_unavailable(self):
@@ -172,7 +220,8 @@ class GraphTest(unittest.TestCase):
             session = repo.create("Paper read checkpoint")
 
             with self.assertRaises(RuntimeError):
-                run_graph(
+                asyncio.run(
+                    run_graph(
                     ReviewRequest(
                         topic="multi-agent literature review",
                         constraints={"sources": ["openalex"], "max_results": 3},
@@ -192,18 +241,25 @@ class GraphTest(unittest.TestCase):
                             )
                         ),
                     },
+                    )
                 )
 
             thread = repo.get(session.key).thread()
             checkpoint_artifacts = [
                 artifact for artifact in thread["artifacts"] if artifact["artifact_type"] == "paper_read_checkpoint"
             ]
-            failed_events = [event for event in thread["events"] if event["event_type"] == "node_failed"]
+            failed_events = [
+                event
+                for event in thread["events"]
+                if event["event_type"] == "runtime_event"
+                and event["metadata"].get("status") == "failed"
+                and event["metadata"].get("metadata", {}).get("recovery_status") == "waiting_model"
+            ]
 
             self.assertEqual(len(checkpoint_artifacts), 1)
             self.assertEqual(checkpoint_artifacts[0]["name"], "read_checkpoint.json")
             self.assertTrue(failed_events)
-            self.assertEqual(failed_events[-1]["metadata"]["recovery_status"], "waiting_model")
+            self.assertEqual(failed_events[-1]["metadata"]["metadata"]["recovery_status"], "waiting_model")
 
     def test_read_node_can_resume_from_checkpoint(self):
         """验证模型恢复可用后可跳过检索并从 checkpoint 继续阅读。"""
@@ -231,13 +287,15 @@ class GraphTest(unittest.TestCase):
         }
         stub = _StubService()
 
-        result = run_graph(
+        result = asyncio.run(
+            run_graph(
             ReviewRequest(topic="placeholder"),
             state_overrides={
                 "read_resume_checkpoint": checkpoint,
                 "search_node_service": stub,
                 "read_node_llm": _read_snapshot(),
             },
+            )
         )
 
         self.assertEqual(stub.calls, [])

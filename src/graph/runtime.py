@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
-from typing import Any, Callable, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Protocol
+
+
+if TYPE_CHECKING:
+    from src.graph.runtime_resources import WorkflowRuntimeResources
 
 from src.models.sessions import utc_now
 
@@ -30,6 +34,10 @@ class WorkflowRuntimeContext:
     run_id: str | None = None
     workflow_name: str = "paper_graph"
     sync_port: WorkflowSyncPort | None = None
+    # 中文注释：resources 里放的是单次 run 共用的并发控制对象和公共资源，
+    # 例如下载限流、共用 AsyncClient、embedding 连接等。节点通过 runtime_context
+    # 就能拿到这些资源，不需要再往 State 顶层散落很多字段。
+    resources: WorkflowRuntimeResources | None = None
 
 
 class InlineWorkflowSyncPort:
@@ -323,14 +331,16 @@ class WorkflowNodeReporter:
         stage_display = self._stage_display(stage)
         resolved_status = stage_display.status or status
         resolved_show_content = stage_display.show_content or show_content
-        event_id = self._node_event_id() if stage_display.updates_parent else self._step_event_id(stage_display.event_key)
+        custom_event_key = str(extra.get("event_key") or stage_display.event_key).strip() or stage_display.event_key
+        custom_title = str(extra.get("stage_title") or stage_display.title).strip() or stage_display.title
+        event_id = self._node_event_id() if stage_display.updates_parent else self._step_event_id(custom_event_key)
         parent_id = None if stage_display.updates_parent else self._node_event_id()
         event_type = "workflow_node" if stage_display.updates_parent else "workflow_step"
         return self._emit_runtime_event(
             event_id=event_id,
             parent_id=parent_id,
             event_type=event_type,
-            title=stage_display.title,
+            title=custom_title,
             status=resolved_status,
             show_content=resolved_show_content,
             extra=extra,
@@ -386,6 +396,8 @@ class WorkflowNodeReporter:
             # 中文注释：stage 已经单独放过；其他字段原样放进 metadata，方便前端展示详情或恢复按钮使用。
             if key == "stage":
                 continue
+            if key in {"event_key", "stage_title"}:
+                continue
             metadata[key] = copy.deepcopy(value)
         return metadata
 
@@ -434,6 +446,8 @@ def _detail_content_from_extra(extra: JsonObject) -> JsonObject | None:
     for key, value in extra.items():
         # 中文注释：stage 只是分类字段，标题里已经能看出来；详情里重复展示会显得啰嗦。
         if key == "stage":
+            continue
+        if key in {"event_key", "stage_title"}:
             continue
         detail[key] = copy.deepcopy(value)
     return detail or None

@@ -69,6 +69,7 @@ class PaperReadResult:
     note: ReadNote = field(default_factory=ReadNote)
     relevance: ReadRelevance = field(default_factory=ReadRelevance)
     full_text: FullTextStatus = field(default_factory=FullTextStatus)
+    extraction: JsonObject = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
 
     def to_dict(self) -> JsonObject:
@@ -79,5 +80,6 @@ class PaperReadResult:
             "note": self.note.to_dict(),
             "relevance": self.relevance.to_dict(),
             "full_text": self.full_text.to_dict(),
+            "extraction": dict(self.extraction),
             "warnings": list(self.warnings),
         }

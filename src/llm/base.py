@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
-import threading
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Mapping as MappingABC
+from collections.abc import Awaitable, Mapping as MappingABC
 from dataclasses import dataclass, field
 from email.utils import parsedate_to_datetime
 from typing import Any, Callable, Mapping, Sequence
@@ -237,10 +237,17 @@ class LLMProvider(ABC):
         self.retry_max_delay_s = max(self.retry_initial_delay_s, float(retry_max_delay_s if retry_max_delay_s is not None else 10.0))
         self.max_concurrency = max(1, int(max_concurrency or 2))
         self.include_stream_usage = True if include_stream_usage is None else bool(include_stream_usage)
-        self._semaphore = threading.BoundedSemaphore(self.max_concurrency)
+        # 中文注释：provider 内部只保留一个“兜底并发保护”。真正的工作流并发上限，
+        # 后续会优先由 WorkflowRuntimeResources 里的 read_model_semaphore / embedding_semaphore 控制。
+        self._semaphore = asyncio.BoundedSemaphore(self.max_concurrency)
+        # 中文注释：外部传进来的 client 通常由调用方负责关闭；provider 自己创建的 client 才在 aclose 里关闭。
+        self._owns_client = client is None
+        # 中文注释：旧同步 LangGraph 还没改完前，会短期通过这个 Runner 跑 async 主接口。
+        # 它复用同一个事件循环，避免每次 asyncio.run 都新建/关闭循环导致 async client 连接池出问题。
+        self._sync_runner: asyncio.Runner | None = None
 
     @abstractmethod
-    def chat(
+    async def chat(
         self,
         messages: Sequence[Message],
         *,
@@ -252,12 +259,12 @@ class LLMProvider(ABC):
         """执行一次非流式对话请求。
 
         子类需要把内部统一消息格式转换为目标厂商协议，并把原始响应解析成
-        `LLMResponse`。这里定义的是 provider 必须遵守的最小接口契约。
+        `LLMResponse`。这里定义的是 provider 必须遵守的最小异步接口契约。
         """
         raise NotImplementedError
 
     @abstractmethod
-    def chat_stream(
+    async def chat_stream(
         self,
         messages: Sequence[Message],
         callbacks: StreamCallbacks,
@@ -275,7 +282,7 @@ class LLMProvider(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def embed(
+    async def embed(
         self,
         inputs: Sequence[str],
         *,
@@ -295,11 +302,11 @@ class LLMProvider(ABC):
         raise NotImplementedError
 
     def chat_with_retry(self, messages: Sequence[Message], **kwargs: Any) -> LLMResponse:
-        """兼容旧调用名，实际控制逻辑已经收敛到 `chat` 内部。"""
+        """兼容旧同步调用名，后续图执行改成 async 后会删除。"""
 
-        # 旧业务代码仍然调用 chat_with_retry。这里不要再循环重试，避免和 provider
-        # 公共入口里的重试叠加成 3 x 3 次请求。
-        return self.chat(messages, **kwargs)
+        # 中文注释：这里不再写第二套重试逻辑，只把旧同步调用临时桥接到 async 主接口。
+        # 新代码请直接 `await provider.chat(...)`，不要继续扩大这个同步入口的使用范围。
+        return self._run_async_compat(self.chat(messages, **kwargs))
 
     def chat_stream_with_retry(
         self,
@@ -307,67 +314,111 @@ class LLMProvider(ABC):
         callbacks: StreamCallbacks,
         **kwargs: Any,
     ) -> LLMResponse:
-        """兼容旧流式调用名，实际控制逻辑已经收敛到 `chat_stream` 内部。"""
+        """兼容旧同步流式调用名，后续图执行改成 async 后会删除。"""
 
-        return self.chat_stream(messages, callbacks, **kwargs)
+        return self._run_async_compat(self.chat_stream(messages, callbacks, **kwargs))
 
     def embed_with_retry(self, inputs: Sequence[str], **kwargs: Any) -> EmbeddingResponse:
-        """兼容旧 embedding 调用名，实际控制逻辑已经收敛到 `embed` 内部。"""
+        """兼容旧同步 embedding 调用名，后续图执行改成 async 后会删除。"""
 
-        return self.embed(inputs, **kwargs)
+        return self._run_async_compat(self.embed(inputs, **kwargs))
 
     async def async_chat(self, messages: Sequence[Message], **kwargs: Any) -> LLMResponse:
-        """在异步路由里调用同步 chat，避免直接卡住 FastAPI 事件循环。"""
+        """旧异步调用名；现在直接转到 async 主接口，不再用线程包装。"""
 
-        return await asyncio.to_thread(self.chat, messages, **kwargs)
+        return await self.chat(messages, **kwargs)
 
     async def async_chat_stream(self, messages: Sequence[Message], callbacks: StreamCallbacks, **kwargs: Any) -> LLMResponse:
-        """在异步路由里调用同步流式 chat，避免直接卡住 FastAPI 事件循环。"""
+        """旧异步流式调用名；现在直接转到 async 主接口，不再用线程包装。"""
 
-        return await asyncio.to_thread(self.chat_stream, messages, callbacks, **kwargs)
+        return await self.chat_stream(messages, callbacks, **kwargs)
 
     async def async_embed(self, inputs: Sequence[str], **kwargs: Any) -> EmbeddingResponse:
-        """在异步路由里调用同步 embedding，避免直接卡住 FastAPI 事件循环。"""
+        """旧异步 embedding 调用名；现在直接转到 async 主接口，不再用线程包装。"""
 
-        return await asyncio.to_thread(self.embed, inputs, **kwargs)
+        return await self.embed(inputs, **kwargs)
 
-    def list_models(self) -> list[JsonObject]:
+    async def list_models(self) -> list[JsonObject]:
         """列出 provider 可用模型；不支持的 provider 直接给出清楚提示。"""
 
         raise NotImplementedError("当前 provider 不支持读取模型目录")
 
-    def _run_llm_call(self, operation: str, call_once: Callable[[], LLMResponse]) -> LLMResponse:
+    async def aclose(self) -> None:
+        """关闭 provider 自己创建的异步客户端。"""
+
+        # 中文注释：测试或调用方传进来的 client 可能还要继续复用，所以这里只关闭 provider 自己 new 的 client。
+        if self._owns_client and self.client is not None:
+            close = getattr(self.client, "aclose", None)
+            if close is not None:
+                result = close()
+                if inspect.isawaitable(result):
+                    await result
+            else:
+                close = getattr(self.client, "close", None)
+                if close is not None:
+                    close()
+        self._close_sync_runner()
+
+    def _run_async_compat(self, awaitable: Awaitable[Any]) -> Any:
+        """给尚未迁移的同步图节点临时运行 async 主接口。"""
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            # 中文注释：同步线程里没有正在运行的事件循环，可以安全使用同一个 Runner 复用循环。
+            if self._sync_runner is None:
+                self._sync_runner = asyncio.Runner()
+            return self._sync_runner.run(awaitable)
+        # 中文注释：如果已经在 async 环境中，就不能再走同步桥，否则会把事件循环套住。
+        # 这种场景说明调用方已经具备 await 条件，应直接 await provider.chat/embed。
+        if hasattr(awaitable, "close"):
+            awaitable.close()
+        raise RuntimeError("同步兼容接口不能在已有事件循环中调用，请改用 await provider.chat(...) / await provider.embed(...)")
+
+    def _close_sync_runner(self) -> None:
+        """关闭旧同步桥使用的 Runner。"""
+
+        if self._sync_runner is None:
+            return
+        try:
+            self._sync_runner.close()
+        finally:
+            self._sync_runner = None
+
+    async def _run_llm_call(self, operation: str, call_once: Callable[[], Awaitable[LLMResponse]]) -> LLMResponse:
         """按统一规则执行一次文本模型调用，包含限流、重试和耗时日志。"""
 
         last = LLMResponse(finish_reason="error", error_kind="unknown", error_should_retry=True)
         started_at = time.perf_counter()
         attempts = 0
-        with self._semaphore:
+        async with self._semaphore:
             for attempt in range(self.max_retries):
                 attempts = attempt + 1
                 try:
-                    last = call_once()
+                    # 中文注释：这里真正等待 provider 的异步 SDK 请求完成，不再把同步请求塞到线程里。
+                    last = await call_once()
                 except Exception as exc:
                     # 少数 provider 的底层方法可能直接抛异常，这里统一转成响应对象。
                     last = self._error_response(exc)
                 if last.ok or not self._should_retry(last) or attempt == self.max_retries - 1:
                     self._log_call_result(operation, last, attempts, started_at)
                     return last
-                time.sleep(self._retry_delay(last, attempt))
+                await asyncio.sleep(self._retry_delay(last, attempt))
         self._log_call_result(operation, last, attempts, started_at)
         return last
 
-    def _run_embedding_call(self, operation: str, call_once: Callable[[], EmbeddingResponse]) -> EmbeddingResponse:
+    async def _run_embedding_call(self, operation: str, call_once: Callable[[], Awaitable[EmbeddingResponse]]) -> EmbeddingResponse:
         """按统一规则执行一次 embedding 调用，包含限流、重试和耗时日志。"""
 
         last = EmbeddingResponse(finish_reason="error", error_kind="unknown", error_should_retry=True)
         started_at = time.perf_counter()
         attempts = 0
-        with self._semaphore:
+        async with self._semaphore:
             for attempt in range(self.max_retries):
                 attempts = attempt + 1
                 try:
-                    last = call_once()
+                    # 中文注释：embedding 也是网络 I/O，请直接 await 异步客户端，不再阻塞线程。
+                    last = await call_once()
                 except NotImplementedError:
                     # 不支持 embedding 是明确能力问题，不应吞掉或重试。
                     raise
@@ -376,7 +427,7 @@ class LLMProvider(ABC):
                 if last.ok or not self._should_retry(last) or attempt == self.max_retries - 1:
                     self._log_call_result(operation, last, attempts, started_at)
                     return last
-                time.sleep(self._retry_delay(last, attempt))
+                await asyncio.sleep(self._retry_delay(last, attempt))
         self._log_call_result(operation, last, attempts, started_at)
         return last
 

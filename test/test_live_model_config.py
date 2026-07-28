@@ -11,7 +11,7 @@ def _live_test_enabled() -> bool:
 
 
 @unittest.skipUnless(_live_test_enabled(), "set RUN_LIVE_MODEL_TEST=1 to run live model integration tests")
-class LiveModelConfigTest(unittest.TestCase):
+class LiveModelConfigTest(unittest.IsolatedAsyncioTestCase):
     def _load_snapshot(self):
         config_path = Path("config/model.json")
         self.assertTrue(config_path.exists(), "config/model.json does not exist")
@@ -25,10 +25,10 @@ class LiveModelConfigTest(unittest.TestCase):
         snapshot = make_provider(config, agent_name)
         return agent_name, snapshot
 
-    def test_can_create_agent_from_model_json_and_chat(self):
+    async def test_can_create_agent_from_model_json_and_chat(self):
         agent_name, snapshot = self._load_snapshot()
 
-        response = snapshot.provider.chat(
+        response = await snapshot.provider.chat(
             [{"role": "user", "content": "Reply with exactly OK."}],
             max_tokens=16,
         )
@@ -37,11 +37,11 @@ class LiveModelConfigTest(unittest.TestCase):
         self.assertTrue(response.ok, f"chat failed for agent {agent_name}: {response.content}")
         self.assertTrue((response.content or "").strip(), f"empty response for agent {agent_name}")
 
-    def test_can_create_agent_from_model_json_and_chat_stream(self):
+    async def test_can_create_agent_from_model_json_and_chat_stream(self):
         agent_name, snapshot = self._load_snapshot()
         chunks: list[str] = []
 
-        response = snapshot.provider.chat_stream(
+        response = await snapshot.provider.chat_stream(
             [{"role": "user", "content": "Reply with exactly OK."}],
             StreamCallbacks(on_content_delta=chunks.append),
             max_tokens=16,

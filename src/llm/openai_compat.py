@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import inspect
 import json
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
 import httpx
@@ -30,16 +31,18 @@ class OpenAICompatProvider(LLMProvider):
         self.spec = spec
         if self.client is None:
             # 延迟导入便于测试注入 fake client，也避免未安装依赖时导入整个包失败。
-            from openai import OpenAI
+            from openai import AsyncOpenAI
 
-            self.client = OpenAI(
+            self.client = AsyncOpenAI(
                 api_key=self.api_key,
                 base_url=self.api_base,
                 default_headers=self.extra_headers or None,
                 timeout=self.timeout_s,
+                # 中文注释：项目基类已经统一做重试、计时和 Retry-After 处理，SDK 这里不再额外重试，避免实际请求次数翻倍。
+                max_retries=0,
             )
 
-    def chat(
+    async def chat(
         self,
         messages: Sequence[Message],
         *,
@@ -50,12 +53,12 @@ class OpenAICompatProvider(LLMProvider):
     ) -> LLMResponse:
         """发起一次非流式 Chat Completions 请求，并统一处理重试、限流和耗时日志。"""
 
-        return self._run_llm_call(
+        return await self._run_llm_call(
             "chat",
             lambda: self._chat_once(messages, tools=tools, temperature=temperature, max_tokens=max_tokens, reasoning_effort=reasoning_effort),
         )
 
-    def _chat_once(
+    async def _chat_once(
         self,
         messages: Sequence[Message],
         *,
@@ -67,14 +70,16 @@ class OpenAICompatProvider(LLMProvider):
         """只执行一次真实请求；是否重试由基类统一决定。"""
 
         try:
-            response = self.client.chat.completions.create(
-                **self._build_kwargs(messages, tools, False, temperature, max_tokens, reasoning_effort)
+            response = await _maybe_await(
+                self.client.chat.completions.create(
+                    **self._build_kwargs(messages, tools, False, temperature, max_tokens, reasoning_effort)
+                )
             )
             return self._parse_response(response)
         except Exception as exc:
             return self._error_response(exc)
 
-    def chat_stream(
+    async def chat_stream(
         self,
         messages: Sequence[Message],
         callbacks: StreamCallbacks,
@@ -86,12 +91,12 @@ class OpenAICompatProvider(LLMProvider):
     ) -> LLMResponse:
         """发起一次流式 Chat Completions 请求，并统一处理重试、限流和耗时日志。"""
 
-        return self._run_llm_call(
+        return await self._run_llm_call(
             "chat_stream",
             lambda: self._chat_stream_once(messages, callbacks, tools=tools, temperature=temperature, max_tokens=max_tokens, reasoning_effort=reasoning_effort),
         )
 
-    def _chat_stream_once(
+    async def _chat_stream_once(
         self,
         messages: Sequence[Message],
         callbacks: StreamCallbacks,
@@ -107,10 +112,12 @@ class OpenAICompatProvider(LLMProvider):
         usage: JsonObject | None = None
         finish_reason: str | None = None
         try:
-            stream = self.client.chat.completions.create(
-                **self._build_kwargs(messages, tools, True, temperature, max_tokens, reasoning_effort)
+            stream = await _maybe_await(
+                self.client.chat.completions.create(
+                    **self._build_kwargs(messages, tools, True, temperature, max_tokens, reasoning_effort)
+                )
             )
-            for event in stream:
+            async for event in _aiter(stream):
                 # OpenAI 兼容流式事件通常把增量内容放在 choices[0].delta 中。
                 event_dict = _to_dict(event)
                 if isinstance(event_dict.get("usage"), dict):
@@ -134,7 +141,7 @@ class OpenAICompatProvider(LLMProvider):
         except Exception as exc:
             return self._error_response(exc)
 
-    def embed(
+    async def embed(
         self,
         inputs: Sequence[str],
         *,
@@ -142,9 +149,9 @@ class OpenAICompatProvider(LLMProvider):
     ) -> EmbeddingResponse:
         """发起一次 OpenAI 兼容 embedding 请求，并统一处理重试、限流和耗时日志。"""
 
-        return self._run_embedding_call("embed", lambda: self._embed_once(inputs, dimensions=dimensions))
+        return await self._run_embedding_call("embed", lambda: self._embed_once(inputs, dimensions=dimensions))
 
-    def _embed_once(
+    async def _embed_once(
         self,
         inputs: Sequence[str],
         *,
@@ -166,15 +173,15 @@ class OpenAICompatProvider(LLMProvider):
             # embedding 也允许复用 provider 上配置的额外请求体，便于兼容不同代理服务。
             payload = merge_body(payload, self.extra_body)
         try:
-            body = self._post_embedding(endpoint, headers, payload)
+            body = await self._post_embedding(endpoint, headers, payload)
             return self._parse_embedding_response(body, len(texts))
         except Exception as exc:
             return self._embedding_error_response(exc)
 
-    def list_models(self) -> list[JsonObject]:
+    async def list_models(self) -> list[JsonObject]:
         """读取 OpenAI 兼容 provider 的模型目录，并转换成前端统一结构。"""
 
-        response = self.client.models.list()
+        response = await _maybe_await(self.client.models.list())
         raw = _to_dict(response) if hasattr(response, "model_dump") or isinstance(response, dict) else response
         data = raw.get("data", raw) if isinstance(raw, dict) else raw
         models: list[JsonObject] = []
@@ -254,7 +261,7 @@ class OpenAICompatProvider(LLMProvider):
             return self.model.split("/", 1)[1]
         return self.model
 
-    def _post_embedding(self, endpoint: str, headers: JsonObject, payload: JsonObject) -> JsonObject:
+    async def _post_embedding(self, endpoint: str, headers: JsonObject, payload: JsonObject) -> JsonObject:
         """发送 embedding HTTP 请求并返回 JSON 响应体。
 
         Args:
@@ -265,16 +272,20 @@ class OpenAICompatProvider(LLMProvider):
         Returns:
             供应商返回的 JSON 字典。
 
-        如果外部注入的 client 带有 post 方法，就优先复用它，方便设置页或测试传入
-        假客户端；正式运行时没有这种假客户端，就临时创建 httpx.Client 发请求。
+        如果外部注入的 client 带有异步 post 方法，就优先复用它，方便设置页或测试传入
+        假客户端；正式运行时没有这种假客户端，就临时创建 httpx.AsyncClient 发请求。
         """
-        http_client = self.client if hasattr(self.client, "post") else None
+        # 中文注释：AsyncOpenAI 自己也可能有内部 post 方法，但那不是普通 HTTP client。
+        # 只有测试注入的轻量 HTTP 假客户端才走这里，正式 SDK client 走下面的 httpx.AsyncClient。
+        http_client = self.client if hasattr(self.client, "post") and not hasattr(self.client, "chat") else None
         if http_client is not None:
             response = http_client.post(endpoint, headers=headers, json=payload)
+            if inspect.isawaitable(response):
+                response = await response
             response.raise_for_status()
             return response.json()
-        with httpx.Client(timeout=float(max(1, self.timeout_s))) as client:
-            response = client.post(endpoint, headers=headers, json=payload)
+        async with httpx.AsyncClient(timeout=float(max(1, self.timeout_s))) as client:
+            response = await client.post(endpoint, headers=headers, json=payload)
             if response.status_code >= 400:
                 raise ProviderHttpError(response.status_code, response.text, dict(response.headers))
             return response.json()
@@ -416,6 +427,25 @@ def _is_reasoning_model(model: str) -> bool:
     # 只检查斜杠后的真实模型名，避免 provider 前缀影响判断。
     lower = model.lower().split("/", 1)[-1]
     return lower.startswith(("o1", "o3", "o4", "gpt-5"))
+
+
+async def _maybe_await(value: Any) -> Any:
+    """如果 SDK 或测试假对象返回 awaitable，就等待它；否则直接返回原值。"""
+
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+async def _aiter(stream: Any) -> AsyncIterator[Any]:
+    """兼容真实异步流和测试里常见的同步假流。"""
+
+    if hasattr(stream, "__aiter__"):
+        async for item in stream:
+            yield item
+        return
+    for item in stream:
+        yield item
 
 
 def _to_dict(value: Any) -> JsonObject:

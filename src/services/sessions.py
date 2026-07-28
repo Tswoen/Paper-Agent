@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import copy
 import inspect
 import uuid
@@ -209,15 +210,43 @@ def invoke_message_handler(
 ) -> None:
     """兼容新旧两种消息处理器，统一触发运行逻辑。"""
 
+    result = _call_message_handler(handler, chat_id, content, frame, emit)
+    if inspect.isawaitable(result):
+        # 中文注释：旧同步入口还在用时，如果消息处理器已经改成 async，
+        # 这里临时开一个事件循环把它跑完，避免同步接口直接失效。
+        with asyncio.Runner() as runner:
+            result = runner.run(result)
+    _emit_legacy_result(result, emit)
+
+
+async def invoke_message_handler_async(
+    handler: MessageHandler,
+    chat_id: str,
+    content: str,
+    frame: JsonObject,
+    emit: RuntimeEventEmitter,
+) -> None:
+    """异步触发消息处理器，让后台 run 能直接 await 整条工作流。"""
+
+    result = _call_message_handler(handler, chat_id, content, frame, emit)
+    if inspect.isawaitable(result):
+        result = await result
+    _emit_legacy_result(result, emit)
+
+
+def _call_message_handler(
+    handler: MessageHandler,
+    chat_id: str,
+    content: str,
+    frame: JsonObject,
+    emit: RuntimeEventEmitter,
+) -> Any:
+    """兼容新旧协议的处理器签名，只负责真正调用，不负责等待返回值。"""
+
     parameter_count = _parameter_count(handler)
     if parameter_count >= 4 or parameter_count < 0:
-        result = handler(chat_id, content, frame, emit)
-        if result is not None:
-            _emit_legacy_result(result, emit)
-        return
-
-    result = handler(chat_id, content, frame)
-    _emit_legacy_result(result, emit)
+        return handler(chat_id, content, frame, emit)
+    return handler(chat_id, content, frame)
 
 
 def _emit_legacy_result(result: Any, emit: RuntimeEventEmitter) -> None:

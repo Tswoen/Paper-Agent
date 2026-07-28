@@ -3,7 +3,7 @@ from .contracts import AgentRunInput, AgentRunOutput, EvidenceItem, ReviewArtifa
 from .default_tools import build_default_tool_registry, build_paper_search_tool
 from .environment import AgentEnvironment
 from .registry import AgentRegistry
-from .searchAgent import SearchAgent, SearchIntent, build_search_agent
+from .searchAgent import SearchAgent, SearchIntent, SearchSubtopic, build_search_agent
 from .skills import SkillRegistry, SkillSpec
 from .tools import Tool, ToolRegistry, ToolSpec, not_implemented_tool
 
@@ -21,6 +21,7 @@ __all__ = [
     "ReviewTask",
     "SearchAgent",
     "SearchIntent",
+    "SearchSubtopic",
     "SkillRegistry",
     "SkillSpec",
     "Tool",

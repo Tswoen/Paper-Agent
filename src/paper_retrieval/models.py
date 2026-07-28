@@ -24,22 +24,48 @@ class PaperDocument:
     pdf_url: str | None = None
     doi: str | None = None
     source: str | None = None
+    paperId: str | None = None
+    publication_date: str = ""
+    journal_conference: str = ""
+    volume: str = ""
+    issue: str = ""
+    language: str = ""
     metadata: JsonObject = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """补齐统一字段的默认值。
+
+        中文注释：旧代码通常只传 `id` 和 `venue`；新检索链路会使用 `paperId` 和
+        `journal_conference`。这里把两个体系轻轻对齐，避免一次改动牵连太多下游代码。
+        如果 connector 明确传入 `paperId=""`，表示这个来源没有可靠唯一编号，不会被这里覆盖。
+        """
+
+        if self.paperId is None:
+            self.paperId = self.doi or self.id
+        if not self.journal_conference and self.venue:
+            self.journal_conference = self.venue
 
     def to_dict(self) -> JsonObject:
         """把领域对象转成普通字典，便于工具层、调试和接口输出直接消费。"""
 
         return {
             "id": self.id,
+            "paperId": self.paperId or "",
             "title": self.title,
             "authors": list(self.authors),
-            "abstract": self.abstract,
-            "year": self.year,
+            "year": self.year or "",
+            "abstract": self.abstract or "",
+            "source": self.source or "",
+            "url": self.url or "",
+            "publication_date": self.publication_date,
+            "journal/conference": self.journal_conference,
+            "journal_conference": self.journal_conference,
+            "volume": self.volume,
+            "issue": self.issue,
+            "language": self.language,
             "venue": self.venue,
-            "url": self.url,
             "pdf_url": self.pdf_url,
             "doi": self.doi,
-            "source": self.source,
             "metadata": dict(self.metadata),
         }
 
@@ -58,7 +84,9 @@ class SearchRequest:
     query: str = ""
     topic: str = ""
     keywords: list[str] = field(default_factory=list)
+    keyword_expression: str = ""
     source: str | None = None
+    sources: list[str] = field(default_factory=list)
     limit: int = 10
     year_from: int | None = None
     year_to: int | None = None

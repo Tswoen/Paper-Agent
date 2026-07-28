@@ -9,7 +9,7 @@ from src.graph.state_models import JsonObject, State
 def run_compose_reply_node():
     """生成工作流里最后一条助手回复，并在节点内直接发给前端。"""
 
-    def _node(state: State) -> State:
+    async def _node(state: State) -> State:
         """根据检索结果拼装最终回复，同时把结果写成实时事件。"""
 
         runtime = state.get("runtime_context")

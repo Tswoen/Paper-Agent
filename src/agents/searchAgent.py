@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -12,15 +14,36 @@ from .contracts import JsonObject
 
 
 @dataclass(slots=True)
+class SearchSubtopic:
+    """单个细分研究方向，以及它对应的检索关键词表达式。
+
+    中文注释：`subtopic` 是给人看的研究方向，`keyword` 是交给论文数据库检索的关键词串。
+    关键词串统一使用形如 `(k1 and k2) or (k3 and k4)` 的格式，后续每个数据源再自己转换成适合自己的查询写法。
+    """
+
+    subtopic: str
+    keyword: str
+
+
+@dataclass(slots=True)
+class SearchPlan:
+    """保存模型生成的检索计划，避免把“子主题”和“关键词列表”拆散传递。"""
+
+    keywords: list[str] = field(default_factory=list)
+    subtopics: list[SearchSubtopic] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class SearchIntent:
     """描述搜索阶段的检索意图。
 
-    这一层负责表达“我们想搜什么”，例如主题、关键词、年份和来源约束，
-    但不负责生成具体的数据源查询语句。
+    这一层负责表达“我们想搜什么”，例如主题、细分方向、关键词、年份和来源约束。
+    具体到每个网站如何写查询参数，仍然交给 paper_retrieval 里的 connector 自己处理。
     """
 
     topic: str
     keywords: list[str] = field(default_factory=list)
+    subtopics: list[SearchSubtopic] = field(default_factory=list)
     excluded_terms: list[str] = field(default_factory=list)
     year_from: int | None = None
     year_to: int | None = None
@@ -60,9 +83,9 @@ class SearchAgent(BaseAgent):
         当前搜索阶段直接终止，不再使用基于规则的关键词兜底。
         """
 
-        keywords, raw_model_output, diagnostics = self._generate_keywords_with_llm(state)
-        intent = self._build_search_intent(state, keywords or [])
-        search_halted = keywords is None
+        plan, raw_model_output, diagnostics = self._generate_keywords_with_llm(state)
+        intent = self._build_search_intent(state, plan or SearchPlan())
+        search_halted = plan is None
         return {
             "search_intent": intent,
             "search_halted": search_halted,
@@ -72,11 +95,27 @@ class SearchAgent(BaseAgent):
             },
         }
 
-    def _generate_keywords_with_llm(self, state: JsonObject) -> tuple[list[str] | None, str | None, JsonObject]:
-        """调用大模型生成检索关键词。
+    async def async_run(self, state: JsonObject) -> JsonObject:
+        """异步执行搜索 Agent，给异步工作流直接使用。"""
+
+        self._validate_state(state)
+        plan, raw_model_output, diagnostics = await self._generate_keywords_with_llm_async(state)
+        intent = self._build_search_intent(state, plan or SearchPlan())
+        search_halted = plan is None
+        return {
+            "search_intent": intent,
+            "search_halted": search_halted,
+            "diagnostics": {
+                **diagnostics,
+                "raw_model_output": raw_model_output,
+            },
+        }
+
+    def _generate_keywords_with_llm(self, state: JsonObject) -> tuple[SearchPlan | None, str | None, JsonObject]:
+        """调用大模型生成检索计划。
 
         返回值包含：
-        1. 解析成功的关键词列表；如果为 None，表示搜索阶段应直接终止；
+        1. 解析成功的检索计划；如果为 None，表示搜索阶段应直接终止；
         2. 模型原始输出，便于调试；
         3. 本次调用的诊断信息。
         """
@@ -96,8 +135,8 @@ class SearchAgent(BaseAgent):
                     "message": response.content or response.error_kind or "模型调用失败，搜索阶段已终止。",
                 },
             )
-        keywords = self._parse_llm_keywords(raw_model_output)
-        if keywords is None:
+        plan = self._parse_llm_search_plan(raw_model_output)
+        if plan is None:
             return (
                 None,
                 raw_model_output,
@@ -107,31 +146,80 @@ class SearchAgent(BaseAgent):
                     "message": "模型已有输出，但未能解析为约定 JSON，搜索阶段已终止。",
                 },
             )
-        return keywords, raw_model_output, {"used_llm": True, "status": "ok", "message": "已使用大模型生成检索关键词。"}
+        return plan, raw_model_output, {"used_llm": True, "status": "ok", "message": "已使用大模型生成检索关键词。"}
+
+    async def _generate_keywords_with_llm_async(self, state: JsonObject) -> tuple[SearchPlan | None, str | None, JsonObject]:
+        """异步调用大模型生成检索计划。"""
+
+        if self.context.llm is None:
+            return None, None, {"used_llm": False, "status": "no_llm", "message": "未注入可用 LLM，搜索阶段已终止。"}
+        messages = self._build_llm_messages(state)
+        response = await self._call_provider_chat_async(messages)
+        raw_model_output = response.content or ""
+        if not response.ok:
+            return (
+                None,
+                raw_model_output,
+                {
+                    "used_llm": False,
+                    "status": "llm_error",
+                    "message": response.content or response.error_kind or "模型调用失败，搜索阶段已终止。",
+                },
+            )
+        plan = self._parse_llm_search_plan(raw_model_output)
+        if plan is None:
+            return (
+                None,
+                raw_model_output,
+                {
+                    "used_llm": False,
+                    "status": "llm_parse_failed",
+                    "message": "模型已有输出，但未能解析为约定 JSON，搜索阶段已终止。",
+                },
+            )
+        return plan, raw_model_output, {"used_llm": True, "status": "ok", "message": "已使用大模型生成检索关键词。"}
+
+    async def _call_provider_chat_async(self, messages: list[JsonObject]):
+        """优先走真正的异步 provider；只有老接口缺失时才退回同步兼容入口。"""
+
+        provider = self.context.llm.provider
+        chat = getattr(provider, "chat", None)
+        if callable(chat):
+            response = chat(messages, max_tokens=800)
+            if inspect.isawaitable(response):
+                return await response
+            return response
+        # 中文注释：这一步只是给极少数还没补齐 async 接口的旧 provider 兜底。
+        # 新链路正常情况下会直接走上面的 await provider.chat(...)。
+        return await asyncio.to_thread(provider.chat_with_retry, messages, max_tokens=800)
 
     def _build_llm_messages(self, state: JsonObject) -> list[JsonObject]:
         """构造给大模型的消息。
 
         这里刻意不出现任何具体搜索引擎名称，也不要求模型理解后端检索细节，
-        只让它专注生成语义关键词和必要的检索辅助信息。
+        只让它专注把主题拆成几个适合检索的研究方向，并给每个方向生成关键词表达式。
         """
 
         request = state["request"]
         system_prompt = """
-作为一名论文查询助手，我将根据您的输入进行语义分析，提取查询条件，并将其转化为精确的英文检索条件。
+你是一名论文检索助手。请把用户输入的论文调研主题拆成若干个较小的研究方向，然后为每个研究方向生成英文检索关键词。
 
-例如，若您需要“近三年关于Transformer模型在机器翻译中的应用研究”，我将提取查询条件：Transformer, machine translation, 并限定年份为2023-2025，然后按照指定的格式输出。
+输出要求：
+1. 严格输出合法 JSON，不要输出 Markdown、解释文字或代码块。
+2. JSON 字段必须包含 subtopics。
+3. subtopics 是数组，每一项包含：
+   - subtopic: 简短研究方向，可以用中文或英文。
+   - keyword: 英文检索关键词表达式，格式必须类似 "(k1 and k2) or (k3 and k4)"。
+4. keyword 里只放真正有检索意义的英文词或短语，不要放年份、数据源名称，也不要放无意义的大词。
+5. 如果主题很窄，也至少给出 1 个 subtopic。
 
-请严格输出合法 JSON，字段必须包含：
-- keywords: 英文检索条件数组
-'JSON 结构为：{"keywords":["..."]}。'
-
-"请只输出 JSON 对象，不要输出 Markdown、解释文本或代码块。"
+JSON 示例：
+{"subtopics":[{"subtopic":"Transformer 在机器翻译中的建模方法","keyword":"(transformer and machine translation) or (attention mechanism and neural machine translation)"}]}
 """
         user_prompt = json.dumps(
             {
                 "topic": getattr(request, "topic", ""),
-                "task": "请根据 topic 提炼适合学术检索的关键词。",
+                "task": "请根据 topic 拆分研究方向，并为每个方向生成英文检索关键词表达式。",
             },
             ensure_ascii=False,
         )
@@ -140,8 +228,12 @@ class SearchAgent(BaseAgent):
             {"role": "user", "content": user_prompt},
         ]
 
-    def _parse_llm_keywords(self, raw_model_output: str) -> list[str] | None:
-        """把模型输出解析成关键词列表。"""
+    def _parse_llm_search_plan(self, raw_model_output: str) -> SearchPlan | None:
+        """把模型输出解析成检索计划。
+
+        中文注释：新版模型会返回 subtopics；旧版测试或旧提示词可能只返回 keywords。
+        这里兼容两种格式，避免因为模型输出还没升级就让整个检索节点停掉。
+        """
 
         json_payload = self._extract_json_object(raw_model_output)
         if json_payload is None:
@@ -150,16 +242,21 @@ class SearchAgent(BaseAgent):
             data = json.loads(json_payload)
         except json.JSONDecodeError:
             return None
+        subtopics = self._parse_subtopics(data.get("subtopics"))
         keywords = self._clean_string_list(data.get("keywords"))
-        if not keywords:
+        if not subtopics and keywords:
+            subtopics = [SearchSubtopic(subtopic="综合检索", keyword=self._keyword_expression_from_terms(keywords))]
+        if not subtopics:
             return None
-        return keywords
+        if not keywords:
+            keywords = self._keywords_from_subtopics(subtopics)
+        return SearchPlan(keywords=keywords, subtopics=subtopics)
 
-    def _build_search_intent(self, state: JsonObject, keywords: list[str]) -> SearchIntent:
+    def _build_search_intent(self, state: JsonObject, plan: SearchPlan) -> SearchIntent:
         """根据请求约束和 LLM 关键词构建稳定的检索意图。
 
-        中文注释：这里只接收 LLM 已解析出的关键词，不再把 topic 做规则分词，
-        也不再把 LLM 关键词与启发式关键词做融合去重。
+        中文注释：这里只接收 LLM 已解析出的子主题和关键词，不再把 topic 做规则分词，
+        这样检索方向完全来自模型明确给出的计划，排查问题时也更容易看懂。
         """
 
         request = state["request"]
@@ -167,13 +264,48 @@ class SearchAgent(BaseAgent):
         topic = str(getattr(request, "topic", "")).strip()
         return SearchIntent(
             topic=topic,
-            keywords=list(keywords),
+            keywords=list(plan.keywords),
+            subtopics=list(plan.subtopics),
             excluded_terms=self._normalize_string_list(constraints.get("excluded_terms")),
             year_from=self._coerce_optional_int(constraints.get("year_from")),
             year_to=self._coerce_optional_int(constraints.get("year_to")),
             max_results=self._coerce_positive_int(constraints.get("max_results"), default=10),
             sources=self._normalize_string_list(constraints.get("sources")),
         )
+
+    def _parse_subtopics(self, values: Any) -> list[SearchSubtopic]:
+        """解析模型返回的子主题列表。"""
+
+        if not isinstance(values, list):
+            return []
+        subtopics: list[SearchSubtopic] = []
+        for item in values:
+            if not isinstance(item, dict):
+                continue
+            subtopic = str(item.get("subtopic") or "").strip()
+            keyword = str(item.get("keyword") or "").strip()
+            if not subtopic or not keyword:
+                continue
+            subtopics.append(SearchSubtopic(subtopic=subtopic, keyword=keyword))
+        return subtopics
+
+    def _keywords_from_subtopics(self, subtopics: list[SearchSubtopic]) -> list[str]:
+        """从子主题检索式里整理出旧字段 keywords 需要的关键词列表。"""
+
+        return self._deduplicate_terms([subtopic.keyword for subtopic in subtopics])
+
+    def _keyword_expression_from_terms(self, keywords: list[str]) -> str:
+        """把旧版关键词列表包装成 `(k1 and k2) or ...` 形式。"""
+
+        cleaned = self._deduplicate_terms(keywords)
+        groups: list[str] = []
+        for index in range(0, len(cleaned), 2):
+            pair = cleaned[index : index + 2]
+            if len(pair) == 1:
+                groups.append(f"({pair[0]})")
+            else:
+                groups.append(f"({pair[0]} and {pair[1]})")
+        return " or ".join(groups)
 
     def _extract_json_object(self, text: str) -> str | None:
         """从模型输出中提取第一个 JSON 对象。"""

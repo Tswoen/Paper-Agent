@@ -15,8 +15,8 @@ JsonObject = dict[str, Any]
 def build_paper_workflow_message_handler(repo: SessionRepository):
     """构建把会话消息交给论文工作流执行的处理器。"""
 
-    def _handler(chat_id: str, content: str, frame: JsonObject, emit: RuntimeEventEmitter) -> None:
-        """把会话输入交给工作流执行，并把同步能力注入图状态。"""
+    async def _handler(chat_id: str, content: str, frame: JsonObject, emit: RuntimeEventEmitter) -> None:
+        """把会话输入交给异步工作流执行，并把运行时能力注入图状态。"""
 
         turn_id = str(frame.get("turn_id") or "")
         run_id = str(frame.get("run_id") or "") or None
@@ -40,7 +40,7 @@ def build_paper_workflow_message_handler(repo: SessionRepository):
         checkpoint = frame.get("read_resume_checkpoint")
         request = _request_from_checkpoint(checkpoint) or ReviewRequest(topic=content)
         state_overrides = {"read_resume_checkpoint": checkpoint} if isinstance(checkpoint, dict) else None
-        run_graph(
+        await run_graph(
             request,
             runtime=runtime,
             session_repo=repo,

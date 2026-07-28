@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import inspect
 import json
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
 from .base import EmbeddingResponse, JsonObject, LLMProvider, LLMResponse, Message, StreamCallbacks, ToolCallRequest
@@ -25,16 +26,18 @@ class AnthropicProvider(LLMProvider):
         self.spec = spec
         if self.client is None:
             # base_url 可指向官方 Anthropic，也可指向 Anthropic 协议兼容代理。
-            from anthropic import Anthropic
+            from anthropic import AsyncAnthropic
 
-            self.client = Anthropic(
+            self.client = AsyncAnthropic(
                 api_key=self.api_key,
                 base_url=self.api_base,
                 default_headers=self.extra_headers or None,
                 timeout=self.timeout_s,
+                # 中文注释：项目基类已经统一处理重试和日志，SDK 这里关闭额外重试，避免请求次数变得不可控。
+                max_retries=0,
             )
 
-    def chat(
+    async def chat(
         self,
         messages: Sequence[Message],
         *,
@@ -45,12 +48,12 @@ class AnthropicProvider(LLMProvider):
     ) -> LLMResponse:
         """发起一次非流式 Anthropic Messages 请求，并统一处理重试、限流和耗时日志。"""
 
-        return self._run_llm_call(
+        return await self._run_llm_call(
             "chat",
             lambda: self._chat_once(messages, tools=tools, temperature=temperature, max_tokens=max_tokens, reasoning_effort=reasoning_effort),
         )
 
-    def _chat_once(
+    async def _chat_once(
         self,
         messages: Sequence[Message],
         *,
@@ -62,14 +65,16 @@ class AnthropicProvider(LLMProvider):
         """只执行一次真实 Anthropic 请求；是否重试由基类统一决定。"""
 
         try:
-            response = self.client.messages.create(
-                **self._build_kwargs(messages, tools, False, temperature, max_tokens, reasoning_effort)
+            response = await _maybe_await(
+                self.client.messages.create(
+                    **self._build_kwargs(messages, tools, False, temperature, max_tokens, reasoning_effort)
+                )
             )
             return self._parse_response(response)
         except Exception as exc:
             return self._error_response(exc)
 
-    def chat_stream(
+    async def chat_stream(
         self,
         messages: Sequence[Message],
         callbacks: StreamCallbacks,
@@ -81,12 +86,12 @@ class AnthropicProvider(LLMProvider):
     ) -> LLMResponse:
         """发起一次流式 Anthropic Messages 请求，并统一处理重试、限流和耗时日志。"""
 
-        return self._run_llm_call(
+        return await self._run_llm_call(
             "chat_stream",
             lambda: self._chat_stream_once(messages, callbacks, tools=tools, temperature=temperature, max_tokens=max_tokens, reasoning_effort=reasoning_effort),
         )
 
-    def _chat_stream_once(
+    async def _chat_stream_once(
         self,
         messages: Sequence[Message],
         callbacks: StreamCallbacks,
@@ -102,10 +107,12 @@ class AnthropicProvider(LLMProvider):
         usage: JsonObject | None = None
         finish_reason: str | None = None
         try:
-            stream = self.client.messages.create(
-                **self._build_kwargs(messages, tools, True, temperature, max_tokens, reasoning_effort)
+            stream = await _maybe_await(
+                self.client.messages.create(
+                    **self._build_kwargs(messages, tools, True, temperature, max_tokens, reasoning_effort)
+                )
             )
-            for event in stream:
+            async for event in _aiter(stream):
                 item = _to_dict(event)
                 event_type = item.get("type")
                 delta = item.get("delta") or {}
@@ -126,7 +133,7 @@ class AnthropicProvider(LLMProvider):
         except Exception as exc:
             return self._error_response(exc)
 
-    def embed(
+    async def embed(
         self,
         inputs: Sequence[str],
         *,
@@ -187,12 +194,14 @@ class AnthropicProvider(LLMProvider):
             kwargs["system"] = system
         if tools:
             kwargs["tools"] = [_convert_tool(tool) for tool in tools]
-        if settings.temperature is not None and not settings.reasoning_effort:
-            # 开启 thinking 模式时通常不再显式传 temperature，避免与上游约束冲突。
+        effort = _normalize_effort(settings.reasoning_effort)
+        if settings.temperature is not None and effort is None and _anthropic_accepts_temperature(self._request_model_name()):
+            # 中文注释：新版 Claude 模型会拒绝 temperature 等采样参数；只有确认可接收时才发送。
             kwargs["temperature"] = settings.temperature
-        if settings.reasoning_effort and settings.reasoning_effort != "none":
-            # Anthropic thinking 需要 token 预算；这里用最小可解释映射。
-            kwargs["thinking"] = {"type": "enabled", "budget_tokens": min(settings.max_tokens or 4096, 2048)}
+        if effort is not None:
+            # 中文注释：新版 Claude 使用 adaptive thinking，不再发送旧的 budget_tokens，避免 400 参数错误。
+            kwargs["thinking"] = {"type": "adaptive"}
+            kwargs["output_config"] = {"effort": effort}
         if self.extra_body:
             # Anthropic 兼容网关的扩展字段也走 SDK extra_body。
             kwargs["extra_body"] = self.extra_body
@@ -331,6 +340,55 @@ def _convert_tool_call(call: JsonObject) -> JsonObject:
             # 遇到非标准 JSON 参数时保底包一层，至少保留原始信息供上层处理。
             arguments = {"value": arguments}
     return {"type": "tool_use", "id": call.get("id"), "name": function.get("name"), "input": arguments}
+
+
+def _normalize_effort(value: str | None) -> str | None:
+    """把配置里的 reasoning_effort 转成 Claude 当前支持的 effort 值。"""
+
+    if not value:
+        return None
+    normalized = str(value).strip().lower().replace("-", "")
+    if normalized in {"", "none", "off", "disabled"}:
+        return None
+    if normalized in {"low", "medium", "high", "xhigh", "max"}:
+        return normalized
+    # 中文注释：遇到旧配置或未知值时使用 high，既保留“开启推理”的意图，又避免传非法参数。
+    return "high"
+
+
+def _anthropic_accepts_temperature(model: str) -> bool:
+    """判断当前 Claude 模型是否适合发送 temperature 参数。"""
+
+    name = model.lower().split("/", 1)[-1]
+    # 中文注释：Opus 4.7/4.8、Sonnet 5、Fable 5 等新模型会拒绝采样参数，
+    # 设置页连通性测试常传 temperature=0，所以这里主动跳过，避免可用模型被误判失败。
+    blocked_prefixes = (
+        "claude-opus-4-7",
+        "claude-opus-4-8",
+        "claude-sonnet-5",
+        "claude-fable-5",
+        "claude-mythos-5",
+    )
+    return not name.startswith(blocked_prefixes)
+
+
+async def _maybe_await(value: Any) -> Any:
+    """如果 SDK 或测试假对象返回 awaitable，就等待它；否则直接返回原值。"""
+
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+async def _aiter(stream: Any) -> AsyncIterator[Any]:
+    """兼容真实异步流和测试里常见的同步假流。"""
+
+    if hasattr(stream, "__aiter__"):
+        async for item in stream:
+            yield item
+        return
+    for item in stream:
+        yield item
 
 
 def _to_dict(value: Any) -> JsonObject:

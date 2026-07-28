@@ -31,6 +31,13 @@ class ProviderSnapshot:
     context_window_tokens: int | None
     signature: str
 
+    async def aclose(self) -> None:
+        """关闭快照里 provider 自己创建的异步客户端。"""
+
+        # 中文注释：短生命周期调用（例如设置页连通性测试）结束后可以直接关快照，
+        # 不需要知道底层 provider 用的是 OpenAI、Anthropic 还是兼容网关。
+        await self.provider.aclose()
+
 
 def make_provider(
     config: ModelConfig,

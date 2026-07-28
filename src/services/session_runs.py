@@ -3,14 +3,16 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import threading
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
 from src.graph.runtime import InlineWorkflowSyncPort, WorkflowRuntimeContext
+from src.graph.runtime_resources import WorkflowRuntimeResources
 from src.models.sessions import SessionRecord, utc_now
 from src.repositories.sessions.base import SessionRepository
-from src.services.sessions import AssistantMessageBuffer, MessageHandler, SessionError, invoke_message_handler
+from src.services.sessions import AssistantMessageBuffer, MessageHandler, SessionError, invoke_message_handler_async
 from src.utils import get_logger, logging_context
 
 
@@ -38,12 +40,14 @@ class SessionRunBroker:
         """初始化内存 broker。"""
 
         self._runs: dict[str, RunBrokerState] = {}
-        self._lock = asyncio.Lock()
+        # 中文注释：这里改成普通锁，是为了同一套 broker 同时支持 async 调用
+        # 和“当前事件循环里直接同步发布事件”的 nowait 调用，不再强依赖 await lock。
+        self._lock = threading.RLock()
 
     async def open_run(self, session_key: str, run_id: str, turn_id: str, created_at: str) -> None:
         """注册一条新的 run 记录，让后续事件可以被订阅。"""
 
-        async with self._lock:
+        with self._lock:
             self._runs[run_id] = RunBrokerState(
                 session_key=session_key,
                 run_id=run_id,
@@ -54,7 +58,12 @@ class SessionRunBroker:
     async def publish(self, run_id: str, event: JsonObject) -> JsonObject:
         """向指定 run 广播一条事件，并保留一份内存历史。"""
 
-        async with self._lock:
+        return self.publish_nowait(run_id, event)
+
+    def publish_nowait(self, run_id: str, event: JsonObject) -> JsonObject:
+        """在当前事件循环里立即广播事件，避免后台 run 再走线程桥接。"""
+
+        with self._lock:
             state = self._runs.get(run_id)
             if state is None:
                 raise SessionError(f"run not found: {run_id}", 404)
@@ -64,13 +73,18 @@ class SessionRunBroker:
             subscribers = list(state.subscribers)
 
         for queue in subscribers:
-            await queue.put(copy.deepcopy(event_copy))
+            queue.put_nowait(copy.deepcopy(event_copy))
         return event_copy
 
     async def close_run(self, run_id: str) -> None:
         """标记指定 run 已经结束，并通知所有订阅者退出。"""
 
-        async with self._lock:
+        self.close_run_nowait(run_id)
+
+    def close_run_nowait(self, run_id: str) -> None:
+        """同步关闭事件流，供异步后台任务在同一事件循环里直接调用。"""
+
+        with self._lock:
             state = self._runs.get(run_id)
             if state is None or state.closed:
                 return
@@ -78,13 +92,13 @@ class SessionRunBroker:
             subscribers = list(state.subscribers)
 
         for queue in subscribers:
-            await queue.put(None)
+            queue.put_nowait(None)
 
     async def subscribe(self, run_id: str):
         """订阅指定 run 的事件流，并在订阅开始时补发已有历史。"""
 
         queue: asyncio.Queue[JsonObject | None] = asyncio.Queue()
-        async with self._lock:
+        with self._lock:
             state = self._runs.get(run_id)
             if state is None:
                 raise SessionError(f"run not found: {run_id}", 404)
@@ -104,7 +118,7 @@ class SessionRunBroker:
                     break
                 yield copy.deepcopy(item)
         finally:
-            async with self._lock:
+            with self._lock:
                 state = self._runs.get(run_id)
                 if state is not None and queue in state.subscribers:
                     state.subscribers.remove(queue)
@@ -188,10 +202,8 @@ class SessionRunService:
             persist_event=True,
         )
 
-        loop = asyncio.get_running_loop()
         asyncio.create_task(
             self._run_in_background(
-                loop=loop,
                 session_key=session_key,
                 run_id=run_id,
                 turn_id=turn_id,
@@ -218,58 +230,36 @@ class SessionRunService:
     async def _run_in_background(
         self,
         *,
-        loop: asyncio.AbstractEventLoop,
         session_key: str,
         run_id: str,
         turn_id: str,
         content: str,
         body: JsonObject,
     ) -> None:
-        """在线程池里执行阻塞工作流，避免占住主事件循环。"""
-
-        await asyncio.to_thread(
-            self._run_sync,
-            loop,
-            session_key,
-            run_id,
-            turn_id,
-            content,
-            body,
-        )
-
-    def _run_sync(
-        self,
-        loop: asyncio.AbstractEventLoop,
-        session_key: str,
-        run_id: str,
-        turn_id: str,
-        content: str,
-        body: JsonObject,
-    ) -> None:
-        """在线程里执行同步工作流，并通过线程安全桥接回主循环。"""
+        """直接在当前事件循环里执行异步工作流，不再把整套图塞进线程。"""
 
         resolved_handler = self.message_handler
         assistant_buffer = AssistantMessageBuffer()
         saw_turn_end = False
+        # 中文注释：每次后台 run 都创建自己独立的一份运行时资源，后面节点可以通过
+        # runtime_context 共享这些资源，不会和别的 run 混用。
+        resources = WorkflowRuntimeResources()
 
         def emit(event: JsonObject) -> JsonObject:
-            """把工作线程里的事件交回主循环，同时更新本地助手缓冲区。"""
+            """同步发布当前 run 事件，同时更新本地助手缓冲区。"""
 
             nonlocal saw_turn_end
             event_copy = copy.deepcopy(event)
             assistant_buffer.apply(event_copy)
             if str(event_copy.get("event") or "") == "turn_end":
                 saw_turn_end = True
-            return asyncio.run_coroutine_threadsafe(
-                self._publish_runtime_event(
-                    session_key,
-                    run_id,
-                    turn_id,
-                    event_copy,
-                    persist_event=True,
-                ),
-                loop,
-            ).result()
+            return self._publish_runtime_event_nowait(
+                session_key,
+                run_id,
+                turn_id,
+                event_copy,
+                persist_event=True,
+            )
 
         runtime_context = WorkflowRuntimeContext(
             session_key=session_key,
@@ -283,6 +273,7 @@ class SessionRunService:
                 turn_id=turn_id,
                 workflow_name="paper_graph",
             ),
+            resources=resources,
         )
 
         try:
@@ -301,7 +292,7 @@ class SessionRunService:
                 )
                 if resolved_handler is None:
                     raise SessionError("message handler is not configured", 500)
-                invoke_message_handler(
+                await invoke_message_handler_async(
                     resolved_handler,
                     session_key,
                     content,
@@ -317,26 +308,22 @@ class SessionRunService:
                             "timestamp": utc_now(),
                         }
                     )
-                asyncio.run_coroutine_threadsafe(
-                    self._finalize_success(session_key, run_id, turn_id, assistant_buffer),
-                    loop,
-                ).result()
+                self._finalize_success(session_key, run_id, turn_id, assistant_buffer)
                 logger.info("后台 run 执行完成")
         except Exception as error:
             logger.exception("后台 run 执行失败")
-            asyncio.run_coroutine_threadsafe(
-                self._finalize_failure(
-                    session_key=session_key,
-                    run_id=run_id,
-                    turn_id=turn_id,
-                    assistant_buffer=assistant_buffer,
-                    error=error,
-                    already_closed=saw_turn_end,
-                ),
-                loop,
-            ).result()
+            self._finalize_failure(
+                session_key=session_key,
+                run_id=run_id,
+                turn_id=turn_id,
+                assistant_buffer=assistant_buffer,
+                error=error,
+                already_closed=saw_turn_end,
+            )
+        finally:
+            await resources.aclose()
 
-    async def _finalize_success(
+    def _finalize_success(
         self,
         session_key: str,
         run_id: str,
@@ -348,9 +335,9 @@ class SessionRunService:
         assistant_buffer.persist(self.repo, session_key, turn_id)
         self.repo.set_status(session_key, "completed")
         self.repo.set_run_started_at(session_key, None)
-        await self.broker.close_run(run_id)
+        self.broker.close_run_nowait(run_id)
 
-    async def _finalize_failure(
+    def _finalize_failure(
         self,
         *,
         session_key: str,
@@ -362,7 +349,7 @@ class SessionRunService:
     ) -> None:
         """在 run 失败时补发错误和终止事件，并统一收口状态。"""
 
-        await self._publish_runtime_event(
+        self._publish_runtime_event_nowait(
             session_key,
             run_id,
             turn_id,
@@ -377,7 +364,7 @@ class SessionRunService:
             persist_event=True,
         )
         if not already_closed:
-            await self._publish_runtime_event(
+            self._publish_runtime_event_nowait(
                 session_key,
                 run_id,
                 turn_id,
@@ -392,7 +379,7 @@ class SessionRunService:
         assistant_buffer.persist(self.repo, session_key, turn_id)
         self.repo.set_status(session_key, "failed")
         self.repo.set_run_started_at(session_key, None)
-        await self.broker.close_run(run_id)
+        self.broker.close_run_nowait(run_id)
 
     async def _publish_runtime_event(
         self,
@@ -404,6 +391,25 @@ class SessionRunService:
         persist_event: bool,
     ) -> JsonObject:
         """标准化一条运行事件，并同时完成落库和广播。"""
+
+        return self._publish_runtime_event_nowait(
+            session_key,
+            run_id,
+            turn_id,
+            event,
+            persist_event=persist_event,
+        )
+
+    def _publish_runtime_event_nowait(
+        self,
+        session_key: str,
+        run_id: str,
+        turn_id: str,
+        event: JsonObject,
+        *,
+        persist_event: bool,
+    ) -> JsonObject:
+        """在当前事件循环里同步落库并广播事件，避免再做线程安全桥接。"""
 
         normalized_event = self._normalize_event(session_key, run_id, turn_id, event)
         if persist_event:
@@ -425,8 +431,7 @@ class SessionRunService:
             )
             normalized_event["event_id"] = str(event_record.get("id") or "")
             normalized_event["stream_seq"] = int(event_record.get("seq_no") or 0)
-        published_event = await self.broker.publish(run_id, normalized_event)
-        return published_event
+        return self.broker.publish_nowait(run_id, normalized_event)
 
     def _normalize_event(self, session_key: str, run_id: str, turn_id: str, event: JsonObject) -> JsonObject:
         """补齐统一字段，保证历史事件和实时事件结构一致。"""

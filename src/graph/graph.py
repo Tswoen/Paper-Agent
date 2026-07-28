@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -47,7 +48,7 @@ def build_graph():
     return workflow.compile(name="paper_graph")
 
 
-def run_graph(
+async def run_graph(
     request: ReviewRequest,
     *,
     runtime: WorkflowRuntimeContext | None = None,
@@ -56,15 +57,68 @@ def run_graph(
     turn_id: str | None = None,
     state_overrides: dict[str, Any] | None = None,
 ) -> GraphRunResult:
-    """运行执行图，并把运行上下文一并注入共享状态。"""
+    """异步运行执行图，并把运行上下文一并注入共享状态。"""
 
-    # 中文注释：这里仍然保留一个统一的 run_graph 入口，外层不需要感知图里具体有几个节点。
     graph = build_graph()
+    initial_state = _build_initial_state(
+        request,
+        runtime=runtime,
+        session_repo=session_repo,
+        session_key=session_key,
+        turn_id=turn_id,
+        state_overrides=state_overrides,
+    )
+    final_state = await graph.ainvoke(initial_state)
+    papers = list(final_state.get("search_results") or [])
+    diagnostics = dict(final_state.get("diagnostics") or {})
+    return GraphRunResult(
+        papers=papers,
+        state=dict(final_state),
+        diagnostics=diagnostics,
+    )
+
+
+def run_graph_sync(
+    request: ReviewRequest,
+    *,
+    runtime: WorkflowRuntimeContext | None = None,
+    session_repo: SessionRepository | None = None,
+    session_key: str | None = None,
+    turn_id: str | None = None,
+    state_overrides: dict[str, Any] | None = None,
+) -> GraphRunResult:
+    """给旧同步入口保留一个很薄的兼容壳。"""
+
+    with asyncio.Runner() as runner:
+        return runner.run(
+            run_graph(
+                request,
+                runtime=runtime,
+                session_repo=session_repo,
+                session_key=session_key,
+                turn_id=turn_id,
+                state_overrides=state_overrides,
+            )
+        )
+
+
+def _build_initial_state(
+    request: ReviewRequest,
+    *,
+    runtime: WorkflowRuntimeContext | None,
+    session_repo: SessionRepository | None,
+    session_key: str | None,
+    turn_id: str | None,
+    state_overrides: dict[str, Any] | None,
+) -> State:
+    """整理图执行需要的初始状态，避免同步和异步入口各自拼一遍。"""
+
     initial_state = State(
         request=request,
         search_results=[],
         search_scores=[],
         search_summary={},
+        search_output={},
         search_artifact_refs=[],
         read_results=[],
         read_summary={},
@@ -75,7 +129,8 @@ def run_graph(
         assistant_message_metadata={},
     )
 
-    # 中文注释：直接从脚本调用且传入会话时，也建立最小进度上报能力，保证产物和进度记录不会分离。
+    # 中文注释：直接从脚本调用且传入会话时，也建立最小进度上报能力，
+    # 这样图里产生的进度和产物仍然会落到同一个会话仓库里。
     if runtime is None and session_repo is not None and session_key and turn_id:
         runtime = WorkflowRuntimeContext(
             session_key=session_key,
@@ -89,7 +144,6 @@ def run_graph(
             ),
         )
 
-    # 中文注释：会话信息、运行信息和节点依赖都放进共享状态，让节点自己决定何时同步中间结果。
     if session_repo is not None:
         initial_state["session_repo"] = session_repo
     if session_key:
@@ -98,20 +152,9 @@ def run_graph(
         initial_state["turn_id"] = turn_id
     if runtime is not None:
         initial_state["runtime_context"] = runtime
-
-    # 中文注释：这个覆盖入口继续保留，方便测试时注入桩服务，不影响正式运行接口。
     if state_overrides:
         initial_state.update(state_overrides)
-    initial_state = _merge_read_checkpoint(initial_state)
-
-    final_state = graph.invoke(initial_state)
-    papers = list(final_state.get("search_results") or [])
-    diagnostics = dict(final_state.get("diagnostics") or {})
-    return GraphRunResult(
-        papers=papers,
-        state=dict(final_state),
-        diagnostics=diagnostics,
-    )
+    return _merge_read_checkpoint(initial_state)
 
 
 def _merge_read_checkpoint(state: State) -> State:
@@ -165,6 +208,12 @@ def _papers_from_checkpoint(value: Any) -> list[PaperDocument]:
                 pdf_url=str(item.get("pdf_url")) if item.get("pdf_url") is not None else None,
                 doi=str(item.get("doi")) if item.get("doi") is not None else None,
                 source=str(item.get("source")) if item.get("source") is not None else None,
+                paperId=str(item.get("paperId")) if item.get("paperId") is not None else None,
+                publication_date=str(item.get("publication_date") or ""),
+                journal_conference=str(item.get("journal_conference") or item.get("journal/conference") or ""),
+                volume=str(item.get("volume") or ""),
+                issue=str(item.get("issue") or ""),
+                language=str(item.get("language") or ""),
                 metadata=dict(item.get("metadata") or {}) if isinstance(item.get("metadata"), dict) else {},
             )
         )

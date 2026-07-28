@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import html
 import json
 import re
@@ -8,6 +9,10 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 from src.paper_retrieval.models import PaperDocument
+from src.utils.read_utils.pdf_parsers import get_pdf_parser
+
+
+_UNSUPPORTED_FULLTEXT_WARNING = "暂不支持该全文文件格式"
 
 
 @dataclass(slots=True)
@@ -25,16 +30,77 @@ def convert_fulltext_to_markdown(
     source_path: Path,
     source_url: str | None,
 ) -> MarkdownConversion:
-    """把已下载的 PDF 或 HTML 全文转换成唯一的 Markdown 正文文件。"""
+    """兼容旧同步流程的全文解析入口，主逻辑统一交给异步实现。"""
 
-    markdown_path = source_path.parent / "paper.md"
-    if markdown_path.is_file() and markdown_path.stat().st_size > 0:
-        return MarkdownConversion(markdown_path=markdown_path, page_count=_read_page_count(markdown_path))
-    if source_path.suffix.lower() == ".pdf":
-        return _convert_pdf(paper, source_path, source_url, markdown_path)
-    if source_path.suffix.lower() in {".html", ".htm"}:
-        return _convert_html(paper, source_path, source_url, markdown_path)
-    return MarkdownConversion(warnings=["暂不支持该全文文件格式"])
+    # 中文注释：模块四整理之后，外层主入口改成了 async。
+    # 这里保留一个同步壳，只是为了让还没改成 async 的阅读节点继续可用。
+    awaitable = async_convert_fulltext_to_markdown(
+        paper,
+        source_path=source_path,
+        source_url=source_url,
+    )
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        # 中文注释：普通同步脚本或旧节点调用这里时，临时开一个事件循环把异步逻辑跑完。
+        # 这样全文解析只保留一套真正的主逻辑，后面继续维护时不会出现两份代码越改越不一致。
+        with asyncio.Runner() as runner:
+            return runner.run(awaitable)
+    # 中文注释：如果已经在 async 环境里，就不能再走这个同步兼容壳。
+    # 这里直接报错，提醒调用方改成 await 异步入口，避免把事件循环卡死。
+    if hasattr(awaitable, "close"):
+        awaitable.close()
+    raise RuntimeError("同步全文解析兼容接口不能在已有事件循环中调用，请改用 await async_convert_fulltext_to_markdown(...)")
+
+
+async def async_convert_fulltext_to_markdown(
+    paper: PaperDocument,
+    *,
+    source_path: Path,
+    source_url: str | None,
+) -> MarkdownConversion:
+    """异步全文转换入口，供后续 async 阅读流程直接调用。"""
+
+    markdown_path = _markdown_output_path(source_path)
+    # 中文注释：哪怕只是看缓存文件存不存在，本质上也是本地磁盘操作。
+    # 这里照样放进 to_thread，避免异步阅读流程在高并发时被本地文件检查拖慢。
+    cached = await asyncio.to_thread(_load_cached_markdown, markdown_path)
+    if cached is not None:
+        return cached
+
+    suffix = source_path.suffix.lower()
+    if suffix == ".pdf":
+        # 中文注释：PDF 解析和 Markdown 写入都是最容易卡住主流程的本地重操作。
+        # 这里只把真正重的那一小段丢进线程，不把整个阅读节点都包进线程里。
+        return await asyncio.to_thread(_convert_pdf_with_parser, paper, source_path, source_url, markdown_path)
+    if suffix in {".html", ".htm"}:
+        # 中文注释：HTML 读取、正文提取、Markdown 落盘同样都是阻塞型本地操作。
+        # 处理方式和 PDF 保持一致，边界清楚，后面接异步阅读流程会更稳。
+        return await asyncio.to_thread(_convert_html, paper, source_path, source_url, markdown_path)
+    return MarkdownConversion(warnings=[_UNSUPPORTED_FULLTEXT_WARNING])
+
+
+def _markdown_output_path(source_path: Path) -> Path:
+    """统一计算 Markdown 结果文件路径，避免不同入口各自拼路径。"""
+
+    return source_path.parent / "paper.md"
+
+
+def _load_cached_markdown(markdown_path: Path) -> MarkdownConversion | None:
+    """读取已经生成好的 Markdown 缓存，没有缓存时返回空值。"""
+
+    if not _has_non_empty_file(markdown_path):
+        return None
+    return MarkdownConversion(markdown_path=markdown_path, page_count=_read_page_count(markdown_path))
+
+
+def _has_non_empty_file(path: Path) -> bool:
+    """判断已有 Markdown 缓存是否存在，并且里面确实有内容。"""
+
+    try:
+        return path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
 
 
 def _convert_pdf(paper: PaperDocument, source_path: Path, source_url: str | None, markdown_path: Path) -> MarkdownConversion:
@@ -101,6 +167,27 @@ def _normalise_text(value: str) -> str:
     """整理 PDF 抽取出的多余空行，让正文更适合后续分段。"""
 
     return re.sub(r"\n{3,}", "\n\n", value.replace("\x00", "")).strip()
+
+
+def _convert_pdf_with_parser(paper: PaperDocument, source_path: Path, source_url: str | None, markdown_path: Path) -> MarkdownConversion:
+    """使用可替换的 PDF 解析器生成 Markdown。
+
+    中文注释：阅读节点只需要 Markdown，不应该关心 PDF 到底是 pypdf、PyMuPDF
+    还是其它工具解析的。这里先使用 pypdf 解析器，后续新增解析器时只需要改
+    get_pdf_parser 的选择规则。
+    """
+
+    parser = get_pdf_parser("pypdf")
+    parsed = parser.parse(source_path)
+    if parsed.warnings:
+        return MarkdownConversion(warnings=parsed.warnings)
+    if not parsed.pages:
+        return MarkdownConversion(warnings=["PDF 中没有可读取的正文"])
+    body: list[str] = [_markdown_header(paper, source_url, len(parsed.pages))]
+    for page in parsed.pages:
+        body.extend([f"<!-- page: {page.page_number} -->", page.text])
+    markdown_path.write_text("\n\n".join(body).strip() + "\n", encoding="utf-8")
+    return MarkdownConversion(markdown_path=markdown_path, page_count=len(parsed.pages))
 
 
 class _ArticleHtmlParser(HTMLParser):
