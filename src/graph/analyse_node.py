@@ -1,5 +1,722 @@
-'''
-分析节点：横向比多篇
+from __future__ import annotations
 
-阅读节点已经获取了每篇论文的阅读笔记，现在利用这些笔记进行多篇论文的分析，总结出
-'''
+import asyncio
+import json
+import re
+from pathlib import Path
+from typing import Any, cast
+
+from src.graph.runtime import WorkflowRuntimeContext
+from src.graph.state_models import JsonObject, State
+from src.llm import ModelConfig, ProviderSnapshot, SystemConfig, make_provider
+from src.llm.base import LLMResponse
+from src.models.sessions import utc_now
+from src.repositories.sessions.base import SessionRepository
+
+
+ANALYSIS_VERSION = "1.0"
+
+
+def run_analyse_node():
+    """生成论文分析节点。
+
+    中文说明：
+    阅读节点已经把每篇论文整理成结构化摘要，分析节点只做三件事：
+    1. 按子主题把这些结构化摘要分组；
+    2. 让模型分别分析每个子主题，再做一次全局综合分析；
+    3. 把最终报告放回 state，后面的回复节点和前端就能直接使用。
+    """
+
+    async def _node(state: State) -> State:
+        """执行分析节点，并尽量保证模型不可用时也返回稳定结构。"""
+
+        request = state.get("request")
+        if request is None:
+            raise ValueError("分析节点缺少用户综述主题，无法继续分析")
+
+        reporter = _resolve_reporter(state)
+        read_results = list(state.get("read_results") or [])
+        read_summary = dict(state.get("read_summary") or {})
+        search_summary = dict(state.get("search_summary") or {})
+        llm = _resolve_llm(state)
+
+        if reporter is not None:
+            reporter.started("正在按子主题分析论文", stage="analyse_start")
+
+        groups = _build_subtopic_groups(read_results, read_summary, search_summary)
+        model_used = llm.model if isinstance(llm, ProviderSnapshot) else "unavailable"
+
+        if not groups:
+            report = _empty_report(topic=request.topic, model_used=model_used)
+        else:
+            subtopic_analyses: list[JsonObject] = []
+            for index, group in enumerate(groups, start=1):
+                if reporter is not None:
+                    reporter.progress(
+                        f"正在分析子主题：{group['subtopic']}",
+                        stage="analyse_subtopic",
+                        completed=index - 1,
+                        total=len(groups),
+                        subtopic=group["subtopic"],
+                    )
+                analysis = await _analyse_one_subtopic(
+                    group,
+                    topic=request.topic,
+                    llm=llm,
+                )
+                subtopic_analyses.append(analysis)
+
+            if reporter is not None:
+                reporter.progress("正在综合所有子主题的分析结果", stage="analyse_overall")
+
+            overall_analysis = await _analyse_overall(
+                topic=request.topic,
+                subtopic_analyses=subtopic_analyses,
+                llm=llm,
+            )
+            report = _build_final_report(
+                topic=request.topic,
+                subtopic_analyses=subtopic_analyses,
+                overall_analysis=overall_analysis,
+                model_used=model_used,
+            )
+
+        artifact_refs = list(state.get("analysis_artifact_refs") or [])
+        persisted = await _persist_report_if_possible(state, report)
+        if persisted:
+            artifact_refs.append(persisted)
+            if reporter is not None:
+                reporter.artifact(persisted, stage="analysis_artifact_ready")
+
+        if reporter is not None:
+            reporter.completed(
+                "论文分析节点已完成",
+                stage="analyse_done",
+                subtopic_count=report["execution_metadata"]["subtopic_count"],
+                total_papers_analyzed=report["execution_metadata"]["total_papers_analyzed"],
+            )
+
+        updated = dict(state)
+        updated.update(
+            analysis_report=report,
+            analysis_artifact_refs=artifact_refs,
+            current_step="analyse",
+        )
+        return cast(State, updated)
+
+    return _node
+
+
+async def _analyse_one_subtopic(group: JsonObject, *, topic: str, llm: ProviderSnapshot | None) -> JsonObject:
+    """分析一个子主题。
+
+    中文说明：
+    这里的输入只使用阅读节点产出的结构化摘要，不重新读取 PDF，也不重新检索论文。
+    这样逻辑简单，用户想排查结果时也能直接回到 read_results 找来源。
+    """
+
+    if llm is None:
+        return _fallback_subtopic_analysis(group, reason="未配置可用分析模型")
+    try:
+        response = await _call_analysis_model(
+            llm,
+            _subtopic_messages(topic=topic, group=group),
+        )
+    except Exception as exc:
+        return _fallback_subtopic_analysis(group, reason=f"分析模型调用失败：{exc}")
+    if not response.ok:
+        return _fallback_subtopic_analysis(group, reason=_model_error_message(response))
+    parsed = _extract_json_object(response.content)
+    if parsed is None:
+        return _fallback_subtopic_analysis(group, reason="模型没有返回可解析的 JSON")
+    return _normalize_subtopic_analysis(parsed, group)
+
+
+async def _analyse_overall(topic: str, subtopic_analyses: list[JsonObject], llm: ProviderSnapshot | None) -> JsonObject:
+    """综合所有子主题的分析摘要，得到全局分析。"""
+
+    if llm is None:
+        return _fallback_overall_analysis(topic, subtopic_analyses, reason="未配置可用分析模型")
+    try:
+        response = await _call_analysis_model(
+            llm,
+            _overall_messages(topic=topic, subtopic_analyses=subtopic_analyses),
+        )
+    except Exception as exc:
+        return _fallback_overall_analysis(topic, subtopic_analyses, reason=f"分析模型调用失败：{exc}")
+    if not response.ok:
+        return _fallback_overall_analysis(topic, subtopic_analyses, reason=_model_error_message(response))
+    parsed = _extract_json_object(response.content)
+    if parsed is None:
+        return _fallback_overall_analysis(topic, subtopic_analyses, reason="模型没有返回可解析的 JSON")
+    group = {
+        "subtopic": "全局综合分析",
+        "search_keyword": "",
+        "paper_count": sum(int(item.get("paper_count") or 0) for item in subtopic_analyses),
+        "papers": [],
+    }
+    return _normalize_subtopic_analysis(parsed, group)
+
+
+async def _call_analysis_model(llm: ProviderSnapshot, messages: list[JsonObject]) -> LLMResponse:
+    """调用分析模型。
+
+    中文说明：
+    reasoning_effort='medium' 用来请求支持思考模式的模型多想一步。
+    如果当前模型不支持这个参数，provider 通常会按自己的兼容逻辑忽略或透传。
+    """
+
+    return await llm.provider.chat(
+        messages,
+        temperature=0.2,
+        max_tokens=4000,
+        reasoning_effort="medium",
+    )
+
+
+def _subtopic_messages(*, topic: str, group: JsonObject) -> list[JsonObject]:
+    """为单个子主题生成提示词。"""
+
+    paper_ids = [paper["paperId"] for paper in group["papers"]]
+    return [
+        {
+            "role": "system",
+            "content": (
+                "你是论文综述分析助手。请先认真思考不同论文之间的关系，但最终只输出 JSON，"
+                "不要输出 Markdown、解释文字或代码块。所有判断都必须带论文引用，引用格式使用 [paperId]。"
+            ),
+        },
+        {
+            "role": "user",
+            "content": json.dumps(
+                {
+                    "任务": "按子主题分析阅读节点产出的论文结构化摘要",
+                    "用户综述主题": topic,
+                    "子主题": group["subtopic"],
+                    "检索关键词": group["search_keyword"],
+                    "允许引用的paperId": paper_ids,
+                    "输出要求": _analysis_schema_hint(),
+                    "论文结构化摘要": group["papers"],
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+        },
+    ]
+
+
+def _overall_messages(*, topic: str, subtopic_analyses: list[JsonObject]) -> list[JsonObject]:
+    """为全局综合分析生成提示词。"""
+
+    summaries = [
+        {
+            "subtopic": item.get("subtopic"),
+            "paper_count": item.get("paper_count"),
+            "subtopic_summary": item.get("subtopic_summary") or item.get("研究现状"),
+            "一致点": item.get("一致点", []),
+            "矛盾点": item.get("矛盾点", []),
+            "研究空白": item.get("研究空白", []),
+            "时间线演化": item.get("时间线演化", []),
+            "研究热度趋势": item.get("研究热度趋势", ""),
+        }
+        for item in subtopic_analyses
+    ]
+    return [
+        {
+            "role": "system",
+            "content": (
+                "你是论文综述分析助手。请先认真比较各子主题之间的联系和差异，最终只输出 JSON。"
+                "所有结论都尽量保留来自子主题分析中的 [paperId] 引用。"
+            ),
+        },
+        {
+            "role": "user",
+            "content": json.dumps(
+                {
+                    "任务": "根据各子主题分析摘要做全局综合分析",
+                    "用户综述主题": topic,
+                    "输出要求": _analysis_schema_hint(),
+                    "各子主题分析摘要": summaries,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+        },
+    ]
+
+
+def _analysis_schema_hint() -> JsonObject:
+    """给模型看的输出格式说明。
+
+    中文说明：
+    字段名尽量贴近用户给出的格式，后续程序就能用固定字段或正则比较容易地读取。
+    """
+
+    return {
+        "subtopic": "子主题名称，全局综合分析时填“全局综合分析”",
+        "search_keyword": "检索关键词，没有就填空字符串",
+        "paper_count": "本次分析覆盖的论文数量",
+        "paperIds": ["本次分析实际使用的 paperId 列表"],
+        "subtopic_summary": "一段话概括研究现状，必须出现 [paperId]",
+        "研究现状": "和 subtopic_summary 含义相同，可以写得稍详细，必须出现 [paperId]",
+        "一致点": [{"point": "共识点", "paperIds": ["paperId1"], "evidence": "一句话说明，必须出现 [paperId]"}],
+        "矛盾点": [
+            {
+                "title": "矛盾点标题",
+                "positions": [{"claim": "某一方观点", "paperIds": ["paperId1"], "evidence": "必须出现 [paperId]"}],
+                "explanation": "这个矛盾目前怎么解释，必须出现 [paperId]",
+            }
+        ],
+        "研究空白": [{"type": "地区/时间/视角/方法/其他", "gap": "空白说明，必须出现 [paperId]", "paperIds": ["paperId1"]}],
+        "时间线演化": [{"stage": "阶段名称", "years": "年份范围", "feature": "阶段特征，必须出现 [paperId]", "paperIds": ["paperId1"]}],
+        "技术方法栈演变": "方法从早期到近期怎么变化，必须出现 [paperId]",
+        "研究方法趋势": "主流研究方法怎么变化，必须出现 [paperId]",
+        "研究热度趋势": "近2-3年论文数量变化趋势和原因，必须出现 [paperId]",
+        "relationships": [{"relation": "与其他主题或变量的关系", "paperIds": ["paperId1"], "evidence": "必须出现 [paperId]"}],
+    }
+
+
+def _build_subtopic_groups(read_results: list[JsonObject], read_summary: JsonObject, search_summary: JsonObject) -> list[JsonObject]:
+    """把阅读结果按子主题分组。
+
+    中文说明：
+    优先用 read_results 里的论文 metadata.search_subtopics，因为这里能拿到完整阅读笔记。
+    read_summary.subtopics 主要作为关键词补充，避免重复遍历时丢掉检索词。
+    """
+
+    keywords = _subtopic_keywords(read_summary, search_summary)
+    grouped: dict[str, JsonObject] = {}
+    for item in read_results:
+        paper = dict(item.get("paper") or {})
+        if not paper:
+            continue
+        origins = _paper_origins(paper)
+        if not origins:
+            origins = [{"subtopic": "综合阅读", "keyword": ""}]
+        for origin in origins:
+            subtopic = str(origin.get("subtopic") or "综合阅读").strip() or "综合阅读"
+            keyword = str(origin.get("keyword") or keywords.get(subtopic) or "").strip()
+            group = grouped.setdefault(
+                subtopic,
+                {
+                    "subtopic": subtopic,
+                    "search_keyword": keyword,
+                    "papers": [],
+                },
+            )
+            if keyword and not group.get("search_keyword"):
+                group["search_keyword"] = keyword
+            group["papers"].append(_paper_analysis_input(item))
+
+    groups = list(grouped.values())
+    for group in groups:
+        # 中文说明：同一篇论文可能被多个来源命中；在同一个子主题里只保留一次，避免模型重复统计。
+        group["papers"] = _deduplicate_paper_inputs(list(group["papers"]))
+        group["paper_count"] = len(group["papers"])
+    return groups
+
+
+def _paper_analysis_input(item: JsonObject) -> JsonObject:
+    """把单篇阅读结果压成分析模型需要的结构化摘要。"""
+
+    paper = dict(item.get("paper") or {})
+    note = dict(item.get("note") or {})
+    relevance = dict(item.get("relevance") or {})
+    full_text = dict(item.get("full_text") or {})
+    extraction = dict(item.get("extraction") or {})
+    paper_id = str(paper.get("paperId") or paper.get("id") or "").strip()
+    return {
+        "paperId": paper_id,
+        "title": _shorten(paper.get("title"), 220),
+        "year": paper.get("year") or "",
+        "authors": list(paper.get("authors") or [])[:8],
+        "venue": paper.get("journal_conference") or paper.get("journal/conference") or paper.get("venue") or "",
+        "abstract": _shorten(paper.get("abstract"), 900),
+        "structured_summary": {
+            "main_question": _shorten(note.get("main_question"), 400),
+            "methods": _shorten_list(note.get("methods"), 8, 180),
+            "datasets": _shorten_list(note.get("datasets"), 8, 180),
+            "contributions": _shorten_list(note.get("contributions"), 8, 220),
+            "limitations": _shorten_list(note.get("limitations"), 8, 220),
+            "main_results": _shorten_list(note.get("main_results"), 8, 220),
+            "short_summary": _shorten(note.get("short_summary"), 500),
+            "evidence_level": note.get("evidence_level") or "",
+        },
+        "relevance": {
+            "score": relevance.get("score", 0),
+            "decision": relevance.get("decision") or "",
+            "reason": _shorten(relevance.get("reason"), 300),
+        },
+        "full_text_status": full_text.get("status") or "",
+        "extraction": _shorten_json(extraction, 1200),
+        "warnings": _shorten_list(item.get("warnings"), 5, 160),
+    }
+
+
+def _normalize_subtopic_analysis(parsed: JsonObject, group: JsonObject) -> JsonObject:
+    """整理模型返回的 JSON，补齐后续代码依赖的固定字段。"""
+
+    paper_ids = [str(paper.get("paperId") or "").strip() for paper in group.get("papers", []) if str(paper.get("paperId") or "").strip()]
+    fallback = _fallback_subtopic_analysis(group, reason="")
+    result = {**fallback, **dict(parsed)}
+    result["subtopic"] = str(result.get("subtopic") or group.get("subtopic") or "综合分析")
+    result["search_keyword"] = str(result.get("search_keyword") or group.get("search_keyword") or "")
+    result["paper_count"] = int(group.get("paper_count") or result.get("paper_count") or 0)
+    result["paperIds"] = paper_ids if paper_ids else _list_value(result.get("paperIds"))
+    result["subtopic_summary"] = _text_with_citation(result.get("subtopic_summary") or result.get("研究现状"), paper_ids)
+    result["研究现状"] = _text_with_citation(result.get("研究现状") or result["subtopic_summary"], paper_ids)
+    result["一致点"] = _list_value(result.get("一致点"))
+    result["矛盾点"] = _list_value(result.get("矛盾点"))
+    result["研究空白"] = _list_value(result.get("研究空白"))
+    result["时间线演化"] = _list_value(result.get("时间线演化"))
+    result["relationships"] = _list_value(result.get("relationships"))
+    result["技术方法栈演变"] = _text_with_citation(result.get("技术方法栈演变"), paper_ids)
+    result["研究方法趋势"] = _text_with_citation(result.get("研究方法趋势"), paper_ids)
+    result["研究热度趋势"] = _text_with_citation(result.get("研究热度趋势"), paper_ids)
+    return result
+
+
+def _fallback_subtopic_analysis(group: JsonObject, *, reason: str) -> JsonObject:
+    """生成兜底子主题分析。
+
+    中文说明：
+    兜底结果不冒充真正的深度分析，只保证字段齐全，并把可引用的论文编号列出来。
+    这样前端或后续节点不会因为模型暂时不可用而拿到空结构。
+    """
+
+    paper_ids = [str(paper.get("paperId") or "").strip() for paper in group.get("papers", []) if str(paper.get("paperId") or "").strip()]
+    citation = _citation_tail(paper_ids)
+    summary = f"当前子主题共有 {len(paper_ids)} 篇论文可用于分析，建议结合这些论文的结构化摘要继续判断。{citation}"
+    if reason:
+        summary = f"{summary} 说明：{reason}。"
+    return {
+        "subtopic": str(group.get("subtopic") or "综合分析"),
+        "search_keyword": str(group.get("search_keyword") or ""),
+        "paper_count": int(group.get("paper_count") or len(paper_ids)),
+        "paperIds": paper_ids,
+        "subtopic_summary": summary,
+        "研究现状": summary,
+        "一致点": [],
+        "矛盾点": [],
+        "研究空白": [],
+        "时间线演化": _fallback_timeline(group),
+        "技术方法栈演变": f"暂未能稳定归纳方法栈演变，需要模型进一步分析。{citation}",
+        "研究方法趋势": f"暂未能稳定归纳研究方法趋势，需要模型进一步分析。{citation}",
+        "研究热度趋势": f"暂未能稳定判断近 2-3 年热度趋势，需要模型进一步分析。{citation}",
+        "relationships": [],
+    }
+
+
+def _fallback_overall_analysis(topic: str, subtopic_analyses: list[JsonObject], *, reason: str) -> JsonObject:
+    """生成兜底全局分析。"""
+
+    all_ids = _paper_ids_from_analyses(subtopic_analyses)
+    citation = _citation_tail(all_ids)
+    summary = f"《{topic}》目前已完成 {len(subtopic_analyses)} 个子主题的初步分析，后续可继续比较子主题之间的共识、矛盾和空白。{citation}"
+    if reason:
+        summary = f"{summary} 说明：{reason}。"
+    return {
+        "subtopic": "全局综合分析",
+        "search_keyword": "",
+        "paper_count": sum(int(item.get("paper_count") or 0) for item in subtopic_analyses),
+        "paperIds": all_ids,
+        "subtopic_summary": summary,
+        "研究现状": summary,
+        "一致点": [],
+        "矛盾点": [],
+        "研究空白": [],
+        "时间线演化": [],
+        "技术方法栈演变": f"暂未能稳定归纳全局方法栈演变。{citation}",
+        "研究方法趋势": f"暂未能稳定归纳全局研究方法趋势。{citation}",
+        "研究热度趋势": f"暂未能稳定判断全局近 2-3 年热度趋势。{citation}",
+        "relationships": [],
+    }
+
+
+def _build_final_report(
+    *,
+    topic: str,
+    subtopic_analyses: list[JsonObject],
+    overall_analysis: JsonObject,
+    model_used: str,
+) -> JsonObject:
+    """组装最终报告。"""
+
+    total_papers = len(set(_paper_ids_from_analyses(subtopic_analyses)))
+    return {
+        "analysis_version": ANALYSIS_VERSION,
+        "topic": topic,
+        "overall_framework": overall_analysis.get("subtopic_summary") or overall_analysis.get("研究现状") or "",
+        "overall_analysis": overall_analysis,
+        "subtopic_analyses": subtopic_analyses,
+        "execution_metadata": {
+            "total_papers_analyzed": total_papers,
+            "subtopic_count": len(subtopic_analyses),
+            "model_used": model_used,
+            "created_at": utc_now(),
+        },
+    }
+
+
+def _empty_report(*, topic: str, model_used: str) -> JsonObject:
+    """没有阅读结果时返回空报告。"""
+
+    return {
+        "analysis_version": ANALYSIS_VERSION,
+        "topic": topic,
+        "overall_framework": "暂无可分析的阅读结果。",
+        "overall_analysis": _fallback_overall_analysis(topic, [], reason="阅读节点没有产出论文摘要"),
+        "subtopic_analyses": [],
+        "execution_metadata": {
+            "total_papers_analyzed": 0,
+            "subtopic_count": 0,
+            "model_used": model_used,
+            "created_at": utc_now(),
+        },
+    }
+
+
+def _extract_json_object(text: str) -> JsonObject | None:
+    """从模型输出里用正则提取 JSON 对象。
+
+    中文说明：
+    理想情况下模型只输出 JSON。但有时它会包一层 ```json 代码块，
+    所以这里先匹配代码块，再退一步匹配第一个 { 到最后一个 }。
+    """
+
+    candidates: list[str] = []
+    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.IGNORECASE | re.DOTALL)
+    if fenced:
+        candidates.append(fenced.group(1))
+    loose = re.search(r"(\{.*\})", text, flags=re.DOTALL)
+    if loose:
+        candidates.append(loose.group(1))
+    candidates.append(text)
+    for candidate in candidates:
+        try:
+            value = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            return cast(JsonObject, value)
+    return None
+
+
+def _resolve_llm(state: State) -> ProviderSnapshot | None:
+    """优先使用外部注入模型，没有注入时读取本地默认模型。"""
+
+    injected = state.get("analysis_node_llm") or state.get("read_node_llm")
+    if isinstance(injected, ProviderSnapshot):
+        return injected
+    if injected is None:
+        return load_analysis_llm()
+    return None
+
+
+def load_analysis_llm() -> ProviderSnapshot | None:
+    """读取模型配置并装配分析模型，配置不可用时返回 None。"""
+
+    model_path = Path("config/model.json")
+    if not model_path.exists():
+        return None
+    try:
+        system_config = SystemConfig.load()
+        model_config = ModelConfig.from_dict(json.loads(model_path.read_text(encoding="utf-8")), system_config)
+        return make_provider(model_config, system_config.read.agent_name)
+    except Exception:
+        return None
+
+
+def _resolve_reporter(state: State):
+    """从运行上下文里取出分析节点的上报器。"""
+
+    runtime = cast(WorkflowRuntimeContext | None, state.get("runtime_context"))
+    if runtime is None or runtime.sync_port is None:
+        return None
+    return runtime.sync_port.for_node("analyse", "论文分析")
+
+
+async def _persist_report_if_possible(state: State, report: JsonObject) -> JsonObject | None:
+    """有会话仓库时保存分析报告。"""
+
+    repo = cast(SessionRepository | None, state.get("session_repo"))
+    session_key = _optional_text(state.get("session_key"))
+    turn_id = _optional_text(state.get("turn_id"))
+    if repo is None or not session_key or not turn_id:
+        return None
+    try:
+        record = await asyncio.to_thread(
+            repo.write_artifact,
+            session_key,
+            "paper_analysis_report",
+            "analysis_report.json",
+            json.dumps(report, ensure_ascii=False, indent=2),
+            relative_path=f"artifacts/analysis/{turn_id}/analysis_report.json",
+            metadata={"turn_id": turn_id, "format": "json", "analysis_version": ANALYSIS_VERSION},
+        )
+    except Exception:
+        return None
+    return {
+        "artifact_id": str(record["id"]),
+        "artifact_type": str(record["artifact_type"]),
+        "name": str(record["name"]),
+        "path": str(record["path"]),
+        "size": int(record["size"]),
+        "created_at": str(record["created_at"]),
+        "metadata": dict(record.get("metadata") or {}),
+    }
+
+
+def _subtopic_keywords(read_summary: JsonObject, search_summary: JsonObject) -> dict[str, str]:
+    """整理子主题对应的检索关键词。"""
+
+    keywords: dict[str, str] = {}
+    for source in (search_summary, read_summary):
+        for item in list(source.get("subtopics") or []):
+            if not isinstance(item, dict):
+                continue
+            subtopic = str(item.get("subtopic") or "").strip()
+            keyword = str(item.get("keyword") or item.get("search_keyword") or "").strip()
+            if subtopic and keyword and subtopic not in keywords:
+                keywords[subtopic] = keyword
+    return keywords
+
+
+def _paper_origins(paper: JsonObject) -> list[JsonObject]:
+    """从论文 metadata 中读取它属于哪些子主题。"""
+
+    metadata = paper.get("metadata") if isinstance(paper.get("metadata"), dict) else {}
+    origins = metadata.get("search_subtopics") if isinstance(metadata, dict) else []
+    if not isinstance(origins, list):
+        return []
+    cleaned: list[JsonObject] = []
+    for origin in origins:
+        if not isinstance(origin, dict):
+            continue
+        subtopic = str(origin.get("subtopic") or "").strip()
+        if not subtopic:
+            continue
+        cleaned.append({"subtopic": subtopic, "keyword": str(origin.get("keyword") or "").strip()})
+    return cleaned
+
+
+def _deduplicate_paper_inputs(papers: list[JsonObject]) -> list[JsonObject]:
+    """同一组里按 paperId 去重。"""
+
+    seen: set[str] = set()
+    deduplicated: list[JsonObject] = []
+    for paper in papers:
+        paper_id = str(paper.get("paperId") or "").strip()
+        if paper_id and paper_id in seen:
+            continue
+        if paper_id:
+            seen.add(paper_id)
+        deduplicated.append(paper)
+    return deduplicated
+
+
+def _fallback_timeline(group: JsonObject) -> list[JsonObject]:
+    """根据年份生成一个很保守的兜底时间线。"""
+
+    papers = list(group.get("papers") or [])
+    years = [int(paper["year"]) for paper in papers if str(paper.get("year") or "").isdigit()]
+    paper_ids = [str(paper.get("paperId") or "").strip() for paper in papers if str(paper.get("paperId") or "").strip()]
+    if not years:
+        return []
+    return [
+        {
+            "stage": "已有论文阶段",
+            "years": f"{min(years)}-{max(years)}",
+            "feature": f"该阶段已有论文提供了初步材料，但仍需要模型进一步归纳研究关注点。{_citation_tail(paper_ids)}",
+            "paperIds": paper_ids,
+        }
+    ]
+
+
+def _paper_ids_from_analyses(analyses: list[JsonObject]) -> list[str]:
+    """从子主题分析里尽量收集 paperId。"""
+
+    ids: list[str] = []
+    pattern = re.compile(r"\[([^\[\]]+)\]")
+    for analysis in analyses:
+        for paper_id in _list_value(analysis.get("paperIds")):
+            text_id = str(paper_id or "").strip()
+            if text_id and text_id not in ids:
+                ids.append(text_id)
+        text = json.dumps(analysis, ensure_ascii=False)
+        for match in pattern.findall(text):
+            paper_id = match.strip()
+            # 中文说明：JSON 数组会长得像 ["P1"]，它不是正文里的 [paperId] 引用。
+            # 这里跳过带引号或逗号的内容，只保留真正的文本引用。
+            if '"' in paper_id or "'" in paper_id or "," in paper_id:
+                continue
+            if paper_id and paper_id not in ids:
+                ids.append(paper_id)
+    return ids
+
+
+def _text_with_citation(value: Any, paper_ids: list[str]) -> str:
+    """保证关键文本字段至少带一个论文引用。"""
+
+    text = str(value or "").strip()
+    if not text:
+        text = "暂无稳定结论。"
+    if paper_ids and not re.search(r"\[[^\[\]]+\]", text):
+        text = f"{text}{_citation_tail(paper_ids[:3])}"
+    return text
+
+
+def _citation_tail(paper_ids: list[str]) -> str:
+    """把 paperId 列表变成 [paperId] 引用尾巴。"""
+
+    cleaned = [paper_id for paper_id in paper_ids if paper_id]
+    return "".join(f"[{paper_id}]" for paper_id in cleaned[:6])
+
+
+def _list_value(value: Any) -> list[Any]:
+    """把模型返回的列表字段整理成列表。"""
+
+    return value if isinstance(value, list) else []
+
+
+def _optional_text(value: Any) -> str | None:
+    """把可选值整理成非空字符串。"""
+
+    text = str(value or "").strip()
+    return text or None
+
+
+def _shorten(value: Any, limit: int) -> str:
+    """截短很长的文本，避免一次分析塞进过多无关内容。"""
+
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3].rstrip() + "..."
+
+
+def _shorten_list(value: Any, max_items: int, item_limit: int) -> list[str]:
+    """截短列表字段，保留最重要的前几条。"""
+
+    if not isinstance(value, list):
+        return []
+    return [_shorten(item, item_limit) for item in value[:max_items] if str(item or "").strip()]
+
+
+def _shorten_json(value: JsonObject, limit: int) -> JsonObject:
+    """把复杂提取结果转成短 JSON，避免提示词太长。"""
+
+    if not value:
+        return {}
+    text = _shorten(json.dumps(value, ensure_ascii=False), limit)
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return {"summary": text}
+    return parsed if isinstance(parsed, dict) else {"summary": text}
+
+
+def _model_error_message(response: LLMResponse) -> str:
+    """把模型失败响应整理成用户能看懂的一句话。"""
+
+    return str(response.content or response.error_kind or "分析模型调用失败")

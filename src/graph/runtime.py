@@ -170,6 +170,22 @@ _STAGE_DISPLAY: dict[tuple[str, str], RuntimeStageDisplay] = {
         status="completed",
         updates_parent=True,
     ),
+    ("analyse", "analyse_start"): RuntimeStageDisplay("analyse", "论文分析", updates_parent=True),
+    ("analyse", "analyse_subtopic"): RuntimeStageDisplay("analyse_subtopic", "分析子主题"),
+    ("analyse", "analyse_overall"): RuntimeStageDisplay("analyse_overall", "综合子主题"),
+    ("analyse", "analysis_artifact_ready"): RuntimeStageDisplay(
+        "analysis_artifact_ready",
+        "保存分析报告",
+        show_content="分析报告已保存",
+        status="completed",
+    ),
+    ("analyse", "analyse_done"): RuntimeStageDisplay(
+        "analyse",
+        "论文分析",
+        show_content="论文分析已完成",
+        status="completed",
+        updates_parent=True,
+    ),
     ("compose_reply", "compose_start"): RuntimeStageDisplay("compose_reply", "回复整理", updates_parent=True),
     ("compose_reply", "compose_reply"): RuntimeStageDisplay("compose_reply_step", "生成最终回复"),
     ("compose_reply", "compose_done"): RuntimeStageDisplay(

@@ -7,6 +7,7 @@ from typing import Any
 from langgraph.graph import END, START, StateGraph
 
 from src.agents.contracts import ReviewRequest
+from src.graph.analyse_node import run_analyse_node
 from src.graph.reply_node import run_compose_reply_node
 from src.graph.read_node import run_read_node
 from src.graph.runtime import InlineWorkflowSyncPort, WorkflowRuntimeContext
@@ -40,10 +41,12 @@ def build_graph():
     workflow = StateGraph(State)
     workflow.add_node("run_search_agent", run_search_agent_node())
     workflow.add_node("run_read", run_read_node())
+    workflow.add_node("run_analyse", run_analyse_node())
     workflow.add_node("compose_reply", run_compose_reply_node())
     workflow.add_conditional_edges(START, _entrypoint, {"run_search_agent": "run_search_agent", "run_read": "run_read"})
     workflow.add_edge("run_search_agent", "run_read")
-    workflow.add_edge("run_read", "compose_reply")
+    workflow.add_edge("run_read", "run_analyse")
+    workflow.add_edge("run_analyse", "compose_reply")
     workflow.add_edge("compose_reply", END)
     return workflow.compile(name="paper_graph")
 
@@ -123,6 +126,8 @@ def _build_initial_state(
         read_results=[],
         read_summary={},
         read_artifact_refs=[],
+        analysis_report={},
+        analysis_artifact_refs=[],
         diagnostics={},
         current_step="init",
         assistant_message="",

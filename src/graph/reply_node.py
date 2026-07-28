@@ -18,8 +18,10 @@ def run_compose_reply_node():
         read_results = list(state.get("read_results") or [])
         summary = dict(state.get("search_summary") or {})
         read_summary = dict(state.get("read_summary") or {})
+        analysis_report = dict(state.get("analysis_report") or {})
         artifact_refs = list(state.get("search_artifact_refs") or [])
         read_artifact_refs = list(state.get("read_artifact_refs") or [])
+        analysis_artifact_refs = list(state.get("analysis_artifact_refs") or [])
         diagnostics = dict(state.get("diagnostics") or {})
 
         if reporter is not None:
@@ -30,6 +32,13 @@ def run_compose_reply_node():
             assistant_text = "未检索到符合条件的论文结果。"
         else:
             lines = ["已完成论文检索与阅读，结果如下："]
+            if analysis_report:
+                metadata = dict(analysis_report.get("execution_metadata") or {})
+                lines[0] = (
+                    "已完成论文检索、阅读与分析，结果如下："
+                    f"\n分析覆盖 {metadata.get('total_papers_analyzed', 0)} 篇论文、"
+                    f"{metadata.get('subtopic_count', 0)} 个子主题。"
+                )
             results_by_paper_id = {str(item.get("paper", {}).get("id") or ""): item for item in read_results}
             for index, paper in enumerate(papers[:5], start=1):
                 result = results_by_paper_id.get(paper.id, {})
@@ -51,6 +60,8 @@ def run_compose_reply_node():
             "search_artifact_refs": artifact_refs,
             "read_summary": read_summary,
             "read_artifact_refs": read_artifact_refs,
+            "analysis_report": analysis_report,
+            "analysis_artifact_refs": analysis_artifact_refs,
         }
 
         if reporter is not None:
@@ -75,6 +86,8 @@ def run_compose_reply_node():
             read_results=read_results,
             read_summary=read_summary,
             read_artifact_refs=read_artifact_refs,
+            analysis_report=analysis_report,
+            analysis_artifact_refs=analysis_artifact_refs,
             read_resume_checkpoint=state.get("read_resume_checkpoint", {}),
             diagnostics=diagnostics,
             current_step="reply",
@@ -84,6 +97,7 @@ def run_compose_reply_node():
             search_node_service=state.get("search_node_service"),
             search_node_llm=state.get("search_node_llm"),
             read_node_llm=state.get("read_node_llm"),
+            analysis_node_llm=state.get("analysis_node_llm"),
             search_node_sink=state.get("search_node_sink"),
             runtime_context=runtime,
             assistant_message=assistant_text,

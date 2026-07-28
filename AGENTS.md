@@ -9,6 +9,9 @@ Paper-Agent 是一个面向科研人员和学生的智能论文检索与调研�
 5.要保证整个系统的目录结构清晰干净，不要什么文件都放到一个目录下，让人看起来很乱
 6.不需要兼容之前写的旧代码，要改就改的干净一些，全局都修改
 
+# 项目结构
+各个节点的Agent相关的放在src\agents中，创建对应的节点的Agent。具体仿照src\agents\searchAgent.py的实现
+
 # 开发准则
 
 Behavioral guidelines to reduce common LLM coding mistakes. Merge with project-specific instructions as needed.

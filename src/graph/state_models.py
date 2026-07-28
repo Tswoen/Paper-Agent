@@ -26,6 +26,8 @@ class State(TypedDict, total=False):
     read_summary: JsonObject
     read_artifact_refs: list[JsonObject]
     read_resume_checkpoint: JsonObject
+    analysis_report: JsonObject
+    analysis_artifact_refs: list[JsonObject]
     diagnostics: JsonObject
     current_step: str
     assistant_message: str
@@ -37,6 +39,7 @@ class State(TypedDict, total=False):
     search_node_service: PaperSearchService
     search_node_llm: ProviderSnapshot | None | str
     read_node_llm: ProviderSnapshot | None | str
+    analysis_node_llm: ProviderSnapshot | None | str
     # 中文注释：这里使用本地协议占位类型，避免在运行时导入 `search_node`
     # 造成循环依赖，同时确保 LangGraph 反射 `State` 注解时能找到合法类型名。
     search_node_sink: "SearchNodeSink"

@@ -61,7 +61,7 @@ class SearchAgent(BaseAgent):
     真正的 query 拼接和来源适配由 paper_retrieval 层完成。
     """
 
-
+    # 通过指定AgentSpec.llm_profile来确定使用的配置文件中的哪个Agent配置
     spec = AgentSpec(
         name="search_agent",
         role="search",

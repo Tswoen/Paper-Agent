@@ -19,3 +19,7 @@ read:
   chunk_overlap: 150
   vector_store_path: data/vector_store
   vector_store_collection: papers
+
+# anayse节点的相关系统配置
+analyse:
+  agent_name: default_agent
