@@ -3,13 +3,12 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from pathlib import Path
 from typing import Any, cast
 
+from src.agents.analyseAgent import AnalyseAgent, build_analyse_agent, load_analyse_agent_llm
 from src.graph.runtime import WorkflowRuntimeContext
 from src.graph.state_models import JsonObject, State
-from src.llm import ModelConfig, ProviderSnapshot, SystemConfig, make_provider
-from src.llm.base import LLMResponse
+from src.llm import ProviderSnapshot
 from src.models.sessions import utc_now
 from src.repositories.sessions.base import SessionRepository
 
@@ -39,6 +38,7 @@ def run_analyse_node():
         read_summary = dict(state.get("read_summary") or {})
         search_summary = dict(state.get("search_summary") or {})
         llm = _resolve_llm(state)
+        agent = build_analyse_agent(llm)
 
         if reporter is not None:
             reporter.started("正在按子主题分析论文", stage="analyse_start")
@@ -62,7 +62,7 @@ def run_analyse_node():
                 analysis = await _analyse_one_subtopic(
                     group,
                     topic=request.topic,
-                    llm=llm,
+                    agent=agent,
                 )
                 subtopic_analyses.append(analysis)
 
@@ -72,7 +72,7 @@ def run_analyse_node():
             overall_analysis = await _analyse_overall(
                 topic=request.topic,
                 subtopic_analyses=subtopic_analyses,
-                llm=llm,
+                agent=agent,
             )
             report = _build_final_report(
                 topic=request.topic,
@@ -107,7 +107,7 @@ def run_analyse_node():
     return _node
 
 
-async def _analyse_one_subtopic(group: JsonObject, *, topic: str, llm: ProviderSnapshot | None) -> JsonObject:
+async def _analyse_one_subtopic(group: JsonObject, *, topic: str, agent: AnalyseAgent) -> JsonObject:
     """分析一个子主题。
 
     中文说明：
@@ -115,165 +115,25 @@ async def _analyse_one_subtopic(group: JsonObject, *, topic: str, llm: ProviderS
     这样逻辑简单，用户想排查结果时也能直接回到 read_results 找来源。
     """
 
-    if llm is None:
-        return _fallback_subtopic_analysis(group, reason="未配置可用分析模型")
-    try:
-        response = await _call_analysis_model(
-            llm,
-            _subtopic_messages(topic=topic, group=group),
-        )
-    except Exception as exc:
-        return _fallback_subtopic_analysis(group, reason=f"分析模型调用失败：{exc}")
-    if not response.ok:
-        return _fallback_subtopic_analysis(group, reason=_model_error_message(response))
-    parsed = _extract_json_object(response.content)
-    if parsed is None:
-        return _fallback_subtopic_analysis(group, reason="模型没有返回可解析的 JSON")
-    return _normalize_subtopic_analysis(parsed, group)
+    result = await agent.async_analyse_subtopic(topic=topic, group=group)
+    if result.parsed is None:
+        return _fallback_subtopic_analysis(group, reason=result.reason)
+    return _normalize_subtopic_analysis(result.parsed, group)
 
 
-async def _analyse_overall(topic: str, subtopic_analyses: list[JsonObject], llm: ProviderSnapshot | None) -> JsonObject:
+async def _analyse_overall(topic: str, subtopic_analyses: list[JsonObject], agent: AnalyseAgent) -> JsonObject:
     """综合所有子主题的分析摘要，得到全局分析。"""
 
-    if llm is None:
-        return _fallback_overall_analysis(topic, subtopic_analyses, reason="未配置可用分析模型")
-    try:
-        response = await _call_analysis_model(
-            llm,
-            _overall_messages(topic=topic, subtopic_analyses=subtopic_analyses),
-        )
-    except Exception as exc:
-        return _fallback_overall_analysis(topic, subtopic_analyses, reason=f"分析模型调用失败：{exc}")
-    if not response.ok:
-        return _fallback_overall_analysis(topic, subtopic_analyses, reason=_model_error_message(response))
-    parsed = _extract_json_object(response.content)
-    if parsed is None:
-        return _fallback_overall_analysis(topic, subtopic_analyses, reason="模型没有返回可解析的 JSON")
+    result = await agent.async_analyse_overall(topic=topic, subtopic_analyses=subtopic_analyses)
+    if result.parsed is None:
+        return _fallback_overall_analysis(topic, subtopic_analyses, reason=result.reason)
     group = {
         "subtopic": "全局综合分析",
         "search_keyword": "",
         "paper_count": sum(int(item.get("paper_count") or 0) for item in subtopic_analyses),
         "papers": [],
     }
-    return _normalize_subtopic_analysis(parsed, group)
-
-
-async def _call_analysis_model(llm: ProviderSnapshot, messages: list[JsonObject]) -> LLMResponse:
-    """调用分析模型。
-
-    中文说明：
-    reasoning_effort='medium' 用来请求支持思考模式的模型多想一步。
-    如果当前模型不支持这个参数，provider 通常会按自己的兼容逻辑忽略或透传。
-    """
-
-    return await llm.provider.chat(
-        messages,
-        temperature=0.2,
-        max_tokens=4000,
-        reasoning_effort="medium",
-    )
-
-
-def _subtopic_messages(*, topic: str, group: JsonObject) -> list[JsonObject]:
-    """为单个子主题生成提示词。"""
-
-    paper_ids = [paper["paperId"] for paper in group["papers"]]
-    return [
-        {
-            "role": "system",
-            "content": (
-                "你是论文综述分析助手。请先认真思考不同论文之间的关系，但最终只输出 JSON，"
-                "不要输出 Markdown、解释文字或代码块。所有判断都必须带论文引用，引用格式使用 [paperId]。"
-            ),
-        },
-        {
-            "role": "user",
-            "content": json.dumps(
-                {
-                    "任务": "按子主题分析阅读节点产出的论文结构化摘要",
-                    "用户综述主题": topic,
-                    "子主题": group["subtopic"],
-                    "检索关键词": group["search_keyword"],
-                    "允许引用的paperId": paper_ids,
-                    "输出要求": _analysis_schema_hint(),
-                    "论文结构化摘要": group["papers"],
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-        },
-    ]
-
-
-def _overall_messages(*, topic: str, subtopic_analyses: list[JsonObject]) -> list[JsonObject]:
-    """为全局综合分析生成提示词。"""
-
-    summaries = [
-        {
-            "subtopic": item.get("subtopic"),
-            "paper_count": item.get("paper_count"),
-            "subtopic_summary": item.get("subtopic_summary") or item.get("研究现状"),
-            "一致点": item.get("一致点", []),
-            "矛盾点": item.get("矛盾点", []),
-            "研究空白": item.get("研究空白", []),
-            "时间线演化": item.get("时间线演化", []),
-            "研究热度趋势": item.get("研究热度趋势", ""),
-        }
-        for item in subtopic_analyses
-    ]
-    return [
-        {
-            "role": "system",
-            "content": (
-                "你是论文综述分析助手。请先认真比较各子主题之间的联系和差异，最终只输出 JSON。"
-                "所有结论都尽量保留来自子主题分析中的 [paperId] 引用。"
-            ),
-        },
-        {
-            "role": "user",
-            "content": json.dumps(
-                {
-                    "任务": "根据各子主题分析摘要做全局综合分析",
-                    "用户综述主题": topic,
-                    "输出要求": _analysis_schema_hint(),
-                    "各子主题分析摘要": summaries,
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-        },
-    ]
-
-
-def _analysis_schema_hint() -> JsonObject:
-    """给模型看的输出格式说明。
-
-    中文说明：
-    字段名尽量贴近用户给出的格式，后续程序就能用固定字段或正则比较容易地读取。
-    """
-
-    return {
-        "subtopic": "子主题名称，全局综合分析时填“全局综合分析”",
-        "search_keyword": "检索关键词，没有就填空字符串",
-        "paper_count": "本次分析覆盖的论文数量",
-        "paperIds": ["本次分析实际使用的 paperId 列表"],
-        "subtopic_summary": "一段话概括研究现状，必须出现 [paperId]",
-        "研究现状": "和 subtopic_summary 含义相同，可以写得稍详细，必须出现 [paperId]",
-        "一致点": [{"point": "共识点", "paperIds": ["paperId1"], "evidence": "一句话说明，必须出现 [paperId]"}],
-        "矛盾点": [
-            {
-                "title": "矛盾点标题",
-                "positions": [{"claim": "某一方观点", "paperIds": ["paperId1"], "evidence": "必须出现 [paperId]"}],
-                "explanation": "这个矛盾目前怎么解释，必须出现 [paperId]",
-            }
-        ],
-        "研究空白": [{"type": "地区/时间/视角/方法/其他", "gap": "空白说明，必须出现 [paperId]", "paperIds": ["paperId1"]}],
-        "时间线演化": [{"stage": "阶段名称", "years": "年份范围", "feature": "阶段特征，必须出现 [paperId]", "paperIds": ["paperId1"]}],
-        "技术方法栈演变": "方法从早期到近期怎么变化，必须出现 [paperId]",
-        "研究方法趋势": "主流研究方法怎么变化，必须出现 [paperId]",
-        "研究热度趋势": "近2-3年论文数量变化趋势和原因，必须出现 [paperId]",
-        "relationships": [{"relation": "与其他主题或变量的关系", "paperIds": ["paperId1"], "evidence": "必须出现 [paperId]"}],
-    }
+    return _normalize_subtopic_analysis(result.parsed, group)
 
 
 def _build_subtopic_groups(read_results: list[JsonObject], read_summary: JsonObject, search_summary: JsonObject) -> list[JsonObject]:
@@ -476,55 +336,15 @@ def _empty_report(*, topic: str, model_used: str) -> JsonObject:
     }
 
 
-def _extract_json_object(text: str) -> JsonObject | None:
-    """从模型输出里用正则提取 JSON 对象。
-
-    中文说明：
-    理想情况下模型只输出 JSON。但有时它会包一层 ```json 代码块，
-    所以这里先匹配代码块，再退一步匹配第一个 { 到最后一个 }。
-    """
-
-    candidates: list[str] = []
-    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.IGNORECASE | re.DOTALL)
-    if fenced:
-        candidates.append(fenced.group(1))
-    loose = re.search(r"(\{.*\})", text, flags=re.DOTALL)
-    if loose:
-        candidates.append(loose.group(1))
-    candidates.append(text)
-    for candidate in candidates:
-        try:
-            value = json.loads(candidate)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(value, dict):
-            return cast(JsonObject, value)
-    return None
-
-
 def _resolve_llm(state: State) -> ProviderSnapshot | None:
-    """优先使用外部注入模型，没有注入时读取本地默认模型。"""
+    """优先使用外部注入的分析模型，没有注入时读取 AnalyseAgent 自己的模型配置。"""
 
-    injected = state.get("analysis_node_llm") or state.get("read_node_llm")
+    injected = state.get("analysis_node_llm")
     if isinstance(injected, ProviderSnapshot):
         return injected
     if injected is None:
-        return load_analysis_llm()
+        return load_analyse_agent_llm()
     return None
-
-
-def load_analysis_llm() -> ProviderSnapshot | None:
-    """读取模型配置并装配分析模型，配置不可用时返回 None。"""
-
-    model_path = Path("config/model.json")
-    if not model_path.exists():
-        return None
-    try:
-        system_config = SystemConfig.load()
-        model_config = ModelConfig.from_dict(json.loads(model_path.read_text(encoding="utf-8")), system_config)
-        return make_provider(model_config, system_config.read.agent_name)
-    except Exception:
-        return None
 
 
 def _resolve_reporter(state: State):
@@ -715,8 +535,3 @@ def _shorten_json(value: JsonObject, limit: int) -> JsonObject:
         return {"summary": text}
     return parsed if isinstance(parsed, dict) else {"summary": text}
 
-
-def _model_error_message(response: LLMResponse) -> str:
-    """把模型失败响应整理成用户能看懂的一句话。"""
-
-    return str(response.content or response.error_kind or "分析模型调用失败")

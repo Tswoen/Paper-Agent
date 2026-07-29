@@ -37,6 +37,15 @@
       "provider": "openrouter_main",
       "model_name": "deepseek/deepseek-chat-v3-0324",
       "temperature": 0.3
+    },
+    "analyse_agent": {
+      "label": "Analyse Agent",
+      "provider": "openai_official",
+      "model_name": "gpt-5",
+      "temperature": 0.2,
+      "max_tokens": 4000,
+      "context_window_tokens": 128000,
+      "reasoning_effort": "medium"
     }
   },
   "embedding_profiles": {

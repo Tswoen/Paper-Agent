@@ -19,9 +19,12 @@ def run_compose_reply_node():
         summary = dict(state.get("search_summary") or {})
         read_summary = dict(state.get("read_summary") or {})
         analysis_report = dict(state.get("analysis_report") or {})
+        writing_outline = dict(state.get("writing_outline") or {})
+        writing_outline_report = dict(state.get("writing_outline_report") or {})
         artifact_refs = list(state.get("search_artifact_refs") or [])
         read_artifact_refs = list(state.get("read_artifact_refs") or [])
         analysis_artifact_refs = list(state.get("analysis_artifact_refs") or [])
+        writing_outline_artifact_refs = list(state.get("writing_outline_artifact_refs") or [])
         diagnostics = dict(state.get("diagnostics") or {})
 
         if reporter is not None:
@@ -39,6 +42,8 @@ def run_compose_reply_node():
                     f"\n分析覆盖 {metadata.get('total_papers_analyzed', 0)} 篇论文、"
                     f"{metadata.get('subtopic_count', 0)} 个子主题。"
                 )
+            if writing_outline:
+                lines.append(f"写作大纲已生成，共 {len(writing_outline)} 章，可在 writing_outline 字段中查看结构化对象。")
             results_by_paper_id = {str(item.get("paper", {}).get("id") or ""): item for item in read_results}
             for index, paper in enumerate(papers[:5], start=1):
                 result = results_by_paper_id.get(paper.id, {})
@@ -62,6 +67,9 @@ def run_compose_reply_node():
             "read_artifact_refs": read_artifact_refs,
             "analysis_report": analysis_report,
             "analysis_artifact_refs": analysis_artifact_refs,
+            "writing_outline": writing_outline,
+            "writing_outline_report": writing_outline_report,
+            "writing_outline_artifact_refs": writing_outline_artifact_refs,
         }
 
         if reporter is not None:
@@ -88,6 +96,9 @@ def run_compose_reply_node():
             read_artifact_refs=read_artifact_refs,
             analysis_report=analysis_report,
             analysis_artifact_refs=analysis_artifact_refs,
+            writing_outline=writing_outline,
+            writing_outline_report=writing_outline_report,
+            writing_outline_artifact_refs=writing_outline_artifact_refs,
             read_resume_checkpoint=state.get("read_resume_checkpoint", {}),
             diagnostics=diagnostics,
             current_step="reply",
@@ -98,6 +109,7 @@ def run_compose_reply_node():
             search_node_llm=state.get("search_node_llm"),
             read_node_llm=state.get("read_node_llm"),
             analysis_node_llm=state.get("analysis_node_llm"),
+            writing_outline_node_llm=state.get("writing_outline_node_llm"),
             search_node_sink=state.get("search_node_sink"),
             runtime_context=runtime,
             assistant_message=assistant_text,

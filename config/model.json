@@ -24,6 +24,15 @@
       "max_tokens": 4000,
       "context_window_tokens": 64000,
       "reasoning_effort": "none"
+    },
+    "analyse_agent": {
+      "label": "Analyse Agent",
+      "provider": "openrouter_main",
+      "model_name": "DeepSeek-V4-Flash[free]",
+      "temperature": 0.2,
+      "max_tokens": 4000,
+      "context_window_tokens": 64000,
+      "reasoning_effort": "medium"
     }
   },
   "embedding_profiles": {

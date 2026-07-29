@@ -13,6 +13,7 @@ from src.graph.read_node import run_read_node
 from src.graph.runtime import InlineWorkflowSyncPort, WorkflowRuntimeContext
 from src.graph.search_node import run_search_agent_node
 from src.graph.state_models import State
+from src.graph.writing_outline_node import run_writing_outline_node
 from src.paper_retrieval.models import PaperDocument
 from src.repositories.sessions.base import SessionRepository
 
@@ -42,11 +43,13 @@ def build_graph():
     workflow.add_node("run_search_agent", run_search_agent_node())
     workflow.add_node("run_read", run_read_node())
     workflow.add_node("run_analyse", run_analyse_node())
+    workflow.add_node("run_writing_outline", run_writing_outline_node())
     workflow.add_node("compose_reply", run_compose_reply_node())
     workflow.add_conditional_edges(START, _entrypoint, {"run_search_agent": "run_search_agent", "run_read": "run_read"})
     workflow.add_edge("run_search_agent", "run_read")
     workflow.add_edge("run_read", "run_analyse")
-    workflow.add_edge("run_analyse", "compose_reply")
+    workflow.add_edge("run_analyse", "run_writing_outline")
+    workflow.add_edge("run_writing_outline", "compose_reply")
     workflow.add_edge("compose_reply", END)
     return workflow.compile(name="paper_graph")
 
@@ -128,6 +131,9 @@ def _build_initial_state(
         read_artifact_refs=[],
         analysis_report={},
         analysis_artifact_refs=[],
+        writing_outline={},
+        writing_outline_report={},
+        writing_outline_artifact_refs=[],
         diagnostics={},
         current_step="init",
         assistant_message="",

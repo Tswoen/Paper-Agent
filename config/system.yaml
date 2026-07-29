@@ -20,6 +20,8 @@ read:
   vector_store_path: data/vector_store
   vector_store_collection: papers
 
-# anayse节点的相关系统配置
+# analyse 节点的相关系统配置
 analyse:
-  agent_name: default_agent
+  agent_name: analyse_agent
+
+write:
