@@ -4,6 +4,7 @@ from .default_tools import build_default_tool_registry, build_paper_search_tool
 from .environment import AgentEnvironment
 from .analyseAgent import AnalyseAgent, build_analyse_agent
 from .registry import AgentRegistry
+from .readAgent import AbstractReadResult, ReadAgent, build_read_agent
 from .searchAgent import SearchAgent, SearchIntent, SearchSubtopic, build_search_agent
 from .writingOutlineAgent import WritingOutlineAgent, build_writing_outline_agent
 from .skills import SkillRegistry, SkillSpec
@@ -16,12 +17,14 @@ __all__ = [
     "AgentRunInput",
     "AgentRunOutput",
     "AgentSpec",
+    "AbstractReadResult",
     "AnalyseAgent",
     "BaseAgent",
     "EvidenceItem",
     "ReviewArtifact",
     "ReviewRequest",
     "ReviewTask",
+    "ReadAgent",
     "SearchAgent",
     "SearchIntent",
     "SearchSubtopic",
@@ -34,6 +37,7 @@ __all__ = [
     "build_default_tool_registry",
     "build_analyse_agent",
     "build_paper_search_tool",
+    "build_read_agent",
     "build_search_agent",
     "build_writing_outline_agent",
     "not_implemented_tool",

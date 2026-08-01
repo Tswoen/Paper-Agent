@@ -1,0 +1,714 @@
+from __future__ import annotations
+
+import json
+import re
+from pathlib import Path
+from typing import Any, Literal, TypedDict
+
+from langgraph.graph import END, START, StateGraph
+
+from src.llm import ModelConfig, ProviderSnapshot, SystemConfig, make_provider
+from src.utils.read_utils.cache import safe_cache_name
+from src.utils.read_utils.chunkers import TextChunk, load_chunks_file
+
+from .base import AgentContext, AgentSpec, BaseAgent
+from .contracts import JsonObject
+
+
+WritingAction = Literal["tool", "draft"]
+
+
+class SectionLoopState(TypedDict, total=False):
+    """单个小节写作循环内部使用的状态。
+
+    中文注释：
+    主工作流的 State 很大，里面有检索、阅读、分析、大纲等很多字段。
+    单个小节写作只需要其中一小部分，所以这里单独放一个小状态，避免节点之间
+    互相传一大包用不上的数据。
+    """
+
+    section_id: str
+    task: str
+    evidence_map: list[Any]
+    previous_sections: list[JsonObject]
+    word_count: int
+    read_results: list[JsonObject]
+    cache_dir: str
+    tool_results: list[JsonObject]
+    raw_model_outputs: list[str]
+    revision_suggestions: list[str]
+    draft: str
+    cited_paper_ids: list[str]
+    action_type: WritingAction
+    tool_name: str
+    tool_arguments: JsonObject
+    tool_call_count: int
+    revision_count: int
+    review: JsonObject
+    completed: bool
+    warnings: list[str]
+
+
+class WritingAgent(BaseAgent):
+    """负责把大纲中的一个小节写成正文的 Agent。
+
+    中文说明：
+    这个 Agent 的核心不是“一次性让模型写完”，而是一个小循环：
+    1. 模型先判断手头证据够不够；
+    2. 不够就调用工具补充论文摘要或原文片段；
+    3. 证据够了再写正文；
+    4. 写完交给审查提示词检查逻辑和语言；
+    5. 审查不通过就带着整改建议继续改。
+    """
+
+    spec = AgentSpec(
+        name="writing_agent",
+        role="write",
+        description="根据写作大纲、论文证据和前置小节生成综述正文。",
+        llm_profile="default_agent",
+        tools=("get_extraction", "search_section", "get_chunk_by_embed"),
+        skills=(),
+        input_keys=("request", "writing_outline"),
+    )
+
+    def __init__(self, context: AgentContext):
+        """初始化 WritingAgent，并保存当前 Agent 的固定配置。"""
+
+        context.spec = self.spec
+        super().__init__(context)
+        self.max_tool_calls = 5
+        self.max_revision_rounds = 2
+
+    def _run(self, state: JsonObject) -> JsonObject:
+        """BaseAgent 要求同步入口，但当前写作节点只使用异步入口。"""
+
+        raise NotImplementedError("WritingAgent 请使用 async_write_section")
+
+    async def async_write_section(
+        self,
+        *,
+        section_id: str,
+        task: str,
+        evidence_map: list[Any],
+        previous_sections: list[JsonObject],
+        word_count: int,
+        read_results: list[JsonObject],
+        cache_dir: str,
+    ) -> JsonObject:
+        """写作单个小节，并返回正文、引用和审查结果。
+
+        中文注释：
+        外层写作节点会按大纲顺序逐节调用这个方法。这样“写完上一节再写下一节”
+        的顺序很清楚，也方便当前小节读取已经完成的前置小节。
+        """
+
+        graph = _build_section_loop_graph(self)
+        initial_state: SectionLoopState = {
+            "section_id": section_id,
+            "task": task,
+            "evidence_map": list(evidence_map),
+            "previous_sections": list(previous_sections),
+            "word_count": max(100, int(word_count or 800)),
+            "read_results": list(read_results),
+            "cache_dir": cache_dir,
+            "tool_results": [],
+            "raw_model_outputs": [],
+            "revision_suggestions": [],
+            "draft": "",
+            "cited_paper_ids": [],
+            "action_type": "draft",
+            "tool_name": "",
+            "tool_arguments": {},
+            "tool_call_count": 0,
+            "revision_count": 0,
+            "review": {},
+            "completed": False,
+            "warnings": [],
+        }
+        final_state = await graph.ainvoke(initial_state)
+        return {
+            "section_id": section_id,
+            "task": task,
+            "word_count": word_count,
+            "content": str(final_state.get("draft") or "").strip(),
+            "cited_paper_ids": _deduplicate_strings(list(final_state.get("cited_paper_ids") or [])),
+            "tool_results": list(final_state.get("tool_results") or []),
+            "review": dict(final_state.get("review") or {}),
+            "revision_count": int(final_state.get("revision_count") or 0),
+            "completed": bool(final_state.get("completed")),
+            "warnings": list(final_state.get("warnings") or []),
+        }
+
+    async def plan_or_write(self, state: SectionLoopState) -> SectionLoopState:
+        """让模型决定当前是补资料还是直接写正文。"""
+
+        if self.context.llm is None:
+            draft = _fallback_draft(state)
+            return {
+                **state,
+                "action_type": "draft",
+                "draft": draft,
+                "cited_paper_ids": _paper_ids_from_any([state.get("evidence_map"), draft]),
+                "completed": True,
+                "warnings": [*list(state.get("warnings") or []), "未配置可用的写作模型，已生成保守正文草稿。"],
+            }
+
+        response = await self.context.llm.provider.chat(
+            _write_messages(state),
+            temperature=0.2,
+            max_tokens=5000,
+            reasoning_effort="medium",
+        )
+        raw_output = str(getattr(response, "content", "") or "")
+        raw_outputs = [*list(state.get("raw_model_outputs") or []), raw_output]
+        if not response.ok:
+            draft = _fallback_draft(state)
+            return {
+                **state,
+                "action_type": "draft",
+                "draft": draft,
+                "cited_paper_ids": _paper_ids_from_any([state.get("evidence_map"), draft]),
+                "raw_model_outputs": raw_outputs,
+                "warnings": [*list(state.get("warnings") or []), f"写作模型调用失败，已生成保守正文草稿：{raw_output}"],
+            }
+
+        parsed = _extract_json_object(raw_output)
+        if parsed is None:
+            draft = raw_output.strip() or _fallback_draft(state)
+            return {
+                **state,
+                "action_type": "draft",
+                "draft": draft,
+                "cited_paper_ids": _paper_ids_from_any([state.get("evidence_map"), draft]),
+                "raw_model_outputs": raw_outputs,
+                "warnings": [*list(state.get("warnings") or []), "写作模型没有返回 JSON，已把模型文本当作草稿使用。"],
+            }
+
+        action = str(parsed.get("action") or "draft").strip().lower()
+        if action == "tool" and int(state.get("tool_call_count") or 0) < self.max_tool_calls:
+            return {
+                **state,
+                "action_type": "tool",
+                "tool_name": str(parsed.get("tool_name") or "").strip(),
+                "tool_arguments": dict(parsed.get("arguments") or {}) if isinstance(parsed.get("arguments"), dict) else {},
+                "raw_model_outputs": raw_outputs,
+            }
+
+        draft = str(parsed.get("content") or "").strip()
+        if not draft:
+            draft = _fallback_draft(state)
+        paper_ids = _deduplicate_strings(
+            [
+                *_string_list(parsed.get("paperIds")),
+                *_string_list(parsed.get("paper_ids")),
+                *_paper_ids_from_any([state.get("evidence_map"), state.get("tool_results"), draft]),
+            ]
+        )
+        warnings = list(state.get("warnings") or [])
+        if action == "tool":
+            warnings.append("工具调用次数已达到上限，已要求 Agent 根据现有资料完成写作。")
+        return {
+            **state,
+            "action_type": "draft",
+            "draft": draft,
+            "cited_paper_ids": paper_ids,
+            "raw_model_outputs": raw_outputs,
+            "warnings": warnings,
+        }
+
+    async def run_tool(self, state: SectionLoopState) -> SectionLoopState:
+        """执行模型请求的工具，并把结果放回循环状态。"""
+
+        result = execute_writing_tool(
+            tool_name=str(state.get("tool_name") or ""),
+            arguments=dict(state.get("tool_arguments") or {}),
+            read_results=list(state.get("read_results") or []),
+            cache_dir=Path(str(state.get("cache_dir") or "data/paper_cache")),
+        )
+        return {
+            **state,
+            "tool_results": [*list(state.get("tool_results") or []), result],
+            "tool_call_count": int(state.get("tool_call_count") or 0) + 1,
+            "tool_name": "",
+            "tool_arguments": {},
+        }
+
+    async def review_draft(self, state: SectionLoopState) -> SectionLoopState:
+        """审查正文是否逻辑通顺、语言是否足够学术化。"""
+
+        draft = str(state.get("draft") or "").strip()
+        if self.context.llm is None:
+            return {
+                **state,
+                "review": {"passed": True, "suggestions": [], "message": "未配置审查模型，已跳过模型审查。"},
+                "completed": True,
+            }
+        if not draft:
+            return {
+                **state,
+                "review": {"passed": False, "suggestions": ["正文为空，需要先生成小节正文。"]},
+                "completed": False,
+            }
+
+        response = await self.context.llm.provider.chat(
+            _review_messages(state),
+            temperature=0,
+            max_tokens=1200,
+            reasoning_effort="medium",
+        )
+        raw_output = str(getattr(response, "content", "") or "")
+        raw_outputs = [*list(state.get("raw_model_outputs") or []), raw_output]
+        if not response.ok:
+            return {
+                **state,
+                "raw_model_outputs": raw_outputs,
+                "review": {"passed": True, "suggestions": [], "message": "审查模型调用失败，保留当前正文。"},
+                "completed": True,
+                "warnings": [*list(state.get("warnings") or []), f"审查模型调用失败：{raw_output}"],
+            }
+
+        parsed = _extract_json_object(raw_output) or {}
+        passed = bool(parsed.get("passed"))
+        suggestions = _string_list(parsed.get("suggestions"))
+        if passed or int(state.get("revision_count") or 0) >= self.max_revision_rounds:
+            message = str(parsed.get("message") or ("审查通过" if passed else "修改次数已达到上限，保留当前正文")).strip()
+            return {
+                **state,
+                "raw_model_outputs": raw_outputs,
+                "review": {"passed": passed, "suggestions": suggestions, "message": message},
+                "completed": True,
+            }
+        return {
+            **state,
+            "raw_model_outputs": raw_outputs,
+            "review": {"passed": False, "suggestions": suggestions, "message": str(parsed.get("message") or "")},
+            "revision_suggestions": suggestions,
+            "revision_count": int(state.get("revision_count") or 0) + 1,
+            "completed": False,
+        }
+
+
+def _build_section_loop_graph(agent: WritingAgent):
+    """构建单个小节内部的 LangGraph 循环。"""
+
+    workflow = StateGraph(SectionLoopState)
+    workflow.add_node("plan_or_write", agent.plan_or_write)
+    workflow.add_node("run_tool", agent.run_tool)
+    workflow.add_node("review_draft", agent.review_draft)
+    workflow.add_edge(START, "plan_or_write")
+    workflow.add_conditional_edges(
+        "plan_or_write",
+        _route_after_write_step,
+        {"run_tool": "run_tool", "review_draft": "review_draft"},
+    )
+    workflow.add_edge("run_tool", "plan_or_write")
+    workflow.add_conditional_edges(
+        "review_draft",
+        _route_after_review_step,
+        {"plan_or_write": "plan_or_write", "end": END},
+    )
+    return workflow.compile(name="writing_section_loop")
+
+
+def _route_after_write_step(state: SectionLoopState) -> str:
+    """根据模型动作决定下一步是调用工具还是进入审查。"""
+
+    return "run_tool" if state.get("action_type") == "tool" else "review_draft"
+
+
+def _route_after_review_step(state: SectionLoopState) -> str:
+    """审查通过就结束；不通过就回到写作节点继续修改。"""
+
+    return "end" if state.get("completed") else "plan_or_write"
+
+
+def get_extraction(
+    paper_ids: list[str],
+    *,
+    read_results: list[JsonObject] | None = None,
+    cache_dir: str | Path = "data/paper_cache",
+) -> list[JsonObject]:
+    """根据 paperId 获取论文结构化摘要。
+
+    中文注释：
+    阅读节点如果已经把 extraction 放在 State 里，就优先读 State，因为这是本轮
+    工作流最新的数据。State 里没有时，再去 data/paper_cache 里的 extraction.json
+    找，保证用户单独从缓存恢复写作时也能拿到资料。
+    """
+
+    results: list[JsonObject] = []
+    for paper_id in _deduplicate_strings(paper_ids):
+        extraction = _find_extraction_in_read_results(paper_id, list(read_results or []))
+        source = "read_results"
+        if extraction is None:
+            extraction = _find_extraction_in_cache(paper_id, Path(cache_dir))
+            source = "paper_cache"
+        if extraction is None:
+            results.append({"paperId": paper_id, "status": "missing", "extraction": {}, "source": ""})
+        else:
+            results.append({"paperId": paper_id, "status": "ok", "extraction": extraction, "source": source})
+    return results
+
+
+def search_section(
+    requests: list[JsonObject],
+    *,
+    cache_dir: str | Path = "data/paper_cache",
+) -> list[JsonObject]:
+    """根据 paperId 和 chunkId 获取论文原文片段。
+
+    中文注释：
+    这个工具不做复杂搜索，只做“按编号取原文”。模型如果已经知道需要哪几个
+    chunkId，就可以用它把 chunks.json 里的原文片段取出来。
+    """
+
+    found: list[JsonObject] = []
+    for item in requests:
+        if not isinstance(item, dict):
+            continue
+        paper_id = str(item.get("paperId") or item.get("paper_id") or "").strip()
+        chunk_ids = _string_list(item.get("chunkIds") or item.get("chunk_ids") or item.get("chunkId") or item.get("chunk_id"))
+        if not paper_id or not chunk_ids:
+            found.append({"paperId": paper_id, "status": "invalid_arguments", "chunks": []})
+            continue
+        chunks_path = _find_chunks_path(paper_id, Path(cache_dir))
+        if chunks_path is None:
+            found.append({"paperId": paper_id, "status": "missing_chunks", "chunks": []})
+            continue
+        chunks_by_id = {chunk.chunk_id: chunk for chunk in load_chunks_file(chunks_path)}
+        selected = [_chunk_to_markdown(chunks_by_id[chunk_id]) for chunk_id in chunk_ids if chunk_id in chunks_by_id]
+        found.append({"paperId": paper_id, "status": "ok" if selected else "missing_chunk_ids", "chunks": selected})
+    return found
+
+
+def get_chunk_by_embed(query: str):
+    """通过向量检索全知识库中的相关 chunk。
+
+    中文注释：
+    需求明确说这个工具先提供给 Agent，但暂时不实现，所以这里保留 pass。
+    后续接入向量库时，只需要替换这个函数内部逻辑即可。
+    """
+
+    pass
+
+
+def execute_writing_tool(
+    *,
+    tool_name: str,
+    arguments: JsonObject,
+    read_results: list[JsonObject],
+    cache_dir: Path,
+) -> JsonObject:
+    """执行写作 Agent 可以使用的工具。"""
+
+    if tool_name == "get_extraction":
+        paper_ids = _string_list(arguments.get("paperIds") or arguments.get("paper_ids") or arguments.get("paperId"))
+        return {"tool": tool_name, "arguments": {"paperIds": paper_ids}, "result": get_extraction(paper_ids, read_results=read_results, cache_dir=cache_dir)}
+    if tool_name == "search_section":
+        requests = arguments.get("requests") or arguments.get("sections") or arguments.get("items") or []
+        if not isinstance(requests, list):
+            requests = []
+        return {"tool": tool_name, "arguments": {"requests": requests}, "result": search_section(requests, cache_dir=cache_dir)}
+    if tool_name == "get_chunk_by_embed":
+        query = str(arguments.get("query") or "").strip()
+        result = get_chunk_by_embed(query)
+        return {"tool": tool_name, "arguments": {"query": query}, "result": result, "message": "get_chunk_by_embed 暂未实现"}
+    return {"tool": tool_name, "arguments": arguments, "result": None, "message": "未知工具，未执行"}
+
+
+def load_writing_agent_llm(
+    agent_name: str | None = None,
+    model_config_path: str | Path = "config/model.json",
+    system_config_path: str | Path = "config/system.yaml",
+    *,
+    client: Any | None = None,
+) -> ProviderSnapshot | None:
+    """从本地模型配置里装配正文写作 Agent 使用的模型。"""
+
+    model_path = Path(model_config_path)
+    if not model_path.exists():
+        return None
+    try:
+        data = json.loads(model_path.read_text(encoding="utf-8"))
+        system = SystemConfig.load(system_config_path)
+        config = ModelConfig.from_dict(data, system)
+        resolved_agent_name = agent_name or WritingAgent.spec.llm_profile
+        if resolved_agent_name not in config.agents:
+            return None
+        return make_provider(config, resolved_agent_name, client=client)
+    except Exception:
+        # 中文注释：配置读取失败时返回 None，让写作节点可以生成保守草稿，不让流程直接崩掉。
+        return None
+
+
+def build_writing_agent(llm: ProviderSnapshot | None | str = "auto") -> WritingAgent:
+    """构建一个可直接使用的 WritingAgent。"""
+
+    resolved_llm = load_writing_agent_llm() if llm == "auto" else llm
+    context = AgentContext(spec=WritingAgent.spec, llm=resolved_llm)
+    return WritingAgent(context)
+
+
+def _write_messages(state: SectionLoopState) -> list[JsonObject]:
+    """构造写作提示词，让模型用 JSON 表达下一步动作。"""
+
+    system_prompt = """
+你是一个论文综述写作 Agent。你需要根据小节任务、证据、前置小节和工具结果完成当前小节正文。
+
+你每次只能做两类动作之一：
+1. 如果资料不够，返回工具调用 JSON：
+{"action":"tool","tool_name":"get_extraction","arguments":{"paperIds":["论文 paperId"]},"reason":"为什么需要这个工具"}
+或：
+{"action":"tool","tool_name":"search_section","arguments":{"requests":[{"paperId":"论文 paperId","chunkIds":["chunkId"]}]},"reason":"为什么需要这些原文片段"}
+或：
+{"action":"tool","tool_name":"get_chunk_by_embed","arguments":{"query":"检索问题"},"reason":"为什么需要全库检索"}
+2. 如果资料足够，返回正文 JSON：
+{"action":"draft","content":"小节正文","paperIds":["正文里实际引用到的 paperId"]}
+
+写正文时必须遵守：
+- 语言要学术化、逻辑要连贯，不要写成项目汇报。
+- 只能使用输入证据和工具结果，不要编造论文结论。
+- 凡是用到某篇论文的观点，句末必须标注对应 paperId，例如 [abc123]。
+- 正文字数尽量接近用户给出的 word_count。
+- 只输出合法 JSON，不要输出 Markdown 代码块，也不要输出解释文字。
+"""
+    user_prompt = json.dumps(
+        {
+            "section_id": state.get("section_id"),
+            "小节任务": state.get("task"),
+            "计划字数": state.get("word_count"),
+            "大纲提供的证据": state.get("evidence_map") or [],
+            "已经写好的前置小节": state.get("previous_sections") or [],
+            "已调用工具得到的资料": state.get("tool_results") or [],
+            "当前草稿": state.get("draft") or "",
+            "审查整改建议": state.get("revision_suggestions") or [],
+            "可用工具": [
+                "get_extraction(List[paperId])：获取论文结构化摘要",
+                "search_section(List[{paperId, List[chunkId]}])：按 chunkId 获取论文原文片段",
+                "get_chunk_by_embed(query)：通过向量检索相关 chunk，当前暂未实现",
+            ],
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+    return [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
+
+
+def _review_messages(state: SectionLoopState) -> list[JsonObject]:
+    """构造审查提示词，只检查逻辑和语言。"""
+
+    system_prompt = """
+你是论文综述正文审查 Agent。只检查两件事：
+1. 逻辑是否通顺，前后是否衔接自然；
+2. 语言是否学术化，是否像正式综述正文。
+
+请严格返回 JSON：
+{"passed":true,"suggestions":[],"message":"审查说明"}
+或：
+{"passed":false,"suggestions":["具体整改建议1","具体整改建议2"],"message":"不通过原因"}
+
+不要检查参考文献格式，不要要求补充新功能，不要输出 Markdown。
+"""
+    user_prompt = json.dumps(
+        {
+            "section_id": state.get("section_id"),
+            "小节任务": state.get("task"),
+            "计划字数": state.get("word_count"),
+            "正文草稿": state.get("draft") or "",
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+    return [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
+
+
+def _fallback_draft(state: SectionLoopState) -> str:
+    """模型不可用时生成一段保守正文，保证流程有稳定产物。"""
+
+    evidence_text = _compact_text(state.get("evidence_map") or [])
+    previous_hint = _compact_text([item.get("section_id") for item in state.get("previous_sections") or [] if isinstance(item, dict)])
+    paper_ids = _paper_ids_from_any(state.get("evidence_map") or [])
+    citation = f" [{paper_ids[0]}]" if paper_ids else ""
+    parts = [
+        f"本节围绕“{state.get('task') or '当前小节任务'}”展开论述。",
+        f"从已有材料看，相关研究主要提供了如下支撑：{evidence_text or '当前大纲尚未提供足够的细化证据'}{citation}。",
+    ]
+    if previous_hint:
+        parts.append(f"在写作衔接上，本节需要承接 {previous_hint} 的论述，并进一步收束到本节关注的问题。")
+    parts.append("由于当前写作模型不可用，以上内容仅作为可继续修改的保守草稿，后续应结合更多论文证据补充细节。")
+    return "\n\n".join(parts)
+
+
+def _find_extraction_in_read_results(paper_id: str, read_results: list[JsonObject]) -> JsonObject | None:
+    """优先从阅读节点结果里查找结构化摘要。"""
+
+    for item in read_results:
+        if not isinstance(item, dict):
+            continue
+        paper = dict(item.get("paper") or {})
+        candidates = {str(paper.get("paperId") or ""), str(paper.get("id") or ""), str(item.get("paperId") or "")}
+        if paper_id not in candidates:
+            continue
+        extraction = item.get("extraction")
+        if isinstance(extraction, dict) and any(str(value).strip() for value in extraction.values()):
+            return dict(extraction)
+    return None
+
+
+def _find_extraction_in_cache(paper_id: str, cache_dir: Path) -> JsonObject | None:
+    """从论文缓存目录中的 extraction.json 查找结构化摘要。"""
+
+    for directory in _paper_cache_dirs(paper_id, cache_dir):
+        path = directory / "extraction.json"
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        extraction = payload.get("extraction") if isinstance(payload, dict) else None
+        if isinstance(extraction, dict):
+            return dict(extraction)
+    return None
+
+
+def _find_chunks_path(paper_id: str, cache_dir: Path) -> Path | None:
+    """定位某篇论文缓存目录下的 chunks.json。"""
+
+    for directory in _paper_cache_dirs(paper_id, cache_dir):
+        chunks_path = directory / "chunks.json"
+        if chunks_path.exists():
+            return chunks_path
+    return None
+
+
+def _paper_cache_dirs(paper_id: str, cache_dir: Path) -> list[Path]:
+    """根据 paperId 找可能的缓存目录。"""
+
+    directories: list[Path] = []
+    direct = cache_dir / safe_cache_name(paper_id)
+    if direct.exists():
+        directories.append(direct)
+    if not cache_dir.exists():
+        return directories
+    for candidate in cache_dir.iterdir():
+        if not candidate.is_dir() or candidate in directories:
+            continue
+        if _cache_dir_matches_paper_id(candidate, paper_id):
+            directories.append(candidate)
+    return directories
+
+
+def _cache_dir_matches_paper_id(directory: Path, paper_id: str) -> bool:
+    """通过 metadata.json 判断缓存目录是否属于目标论文。"""
+
+    metadata_path = directory / "metadata.json"
+    try:
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    paper = dict(payload.get("paper") or {})
+    candidates = {str(payload.get("paperId") or ""), str(paper.get("paperId") or ""), str(paper.get("id") or "")}
+    return paper_id in candidates
+
+
+def _chunk_to_markdown(chunk: TextChunk) -> JsonObject:
+    """把 chunk 整理成写作 Agent 容易阅读的 Markdown 片段。"""
+
+    header = f"### {chunk.paperId} / {chunk.chunk_id}"
+    if chunk.section:
+        header += f" / {chunk.section}"
+    return {
+        "paperId": chunk.paperId,
+        "chunkId": chunk.chunk_id,
+        "markdown": f"{header}\n\n{chunk.content.strip()}",
+        "page_start": chunk.page_start,
+        "page_end": chunk.page_end,
+    }
+
+
+def _extract_json_object(text: str) -> JsonObject | None:
+    """从模型输出中提取 JSON 对象。"""
+
+    stripped = text.strip()
+    if not stripped:
+        return None
+    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", stripped, flags=re.IGNORECASE | re.DOTALL)
+    candidates = [fenced.group(1)] if fenced else []
+    start = stripped.find("{")
+    end = stripped.rfind("}")
+    if start != -1 and end > start:
+        candidates.append(stripped[start : end + 1])
+    candidates.append(stripped)
+    for candidate in candidates:
+        try:
+            value = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            return value
+    return None
+
+
+def _string_list(value: Any) -> list[str]:
+    """把字符串或字符串数组整理成干净数组。"""
+
+    if value is None:
+        return []
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _deduplicate_strings(values: list[str]) -> list[str]:
+    """按原顺序给字符串去重。"""
+
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        key = text.lower()
+        if not text or key in seen:
+            continue
+        seen.add(key)
+        result.append(text)
+    return result
+
+
+def _paper_ids_from_any(value: Any) -> list[str]:
+    """从任意嵌套数据里尽量提取 paperId。"""
+
+    found: list[str] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if str(key) in {"paperId", "paper_id"} and str(item).strip():
+                found.append(_clean_paper_id_candidate(str(item)))
+            elif str(key) in {"paperIds", "paper_ids"}:
+                found.extend(_clean_paper_id_candidate(text) for text in _string_list(item))
+            else:
+                found.extend(_paper_ids_from_any(item))
+    elif isinstance(value, list):
+        for item in value:
+            found.extend(_paper_ids_from_any(item))
+    elif isinstance(value, str):
+        found.extend(_clean_paper_id_candidate(match) for match in re.findall(r"\[([^\[\]]+)\]", value) if match.strip())
+    return _deduplicate_strings(found)
+
+
+def _clean_paper_id_candidate(value: str) -> str:
+    """清理从正文或证据里提取到的 paperId 候选值。"""
+
+    return value.strip().strip('"').strip("'").strip()
+
+
+def _compact_text(value: Any, *, max_chars: int = 500) -> str:
+    """把证据或前置小节压成短文本，供兜底正文使用。"""
+
+    if isinstance(value, str):
+        text = value
+    else:
+        text = json.dumps(value, ensure_ascii=False)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:max_chars]

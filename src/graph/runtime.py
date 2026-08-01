@@ -85,7 +85,8 @@ class RuntimeStageDisplay:
     title: str
     show_content: str | None = None
     status: str | None = None
-    updates_parent: bool = False
+    # 决定某个阶段是“挂在节点下面的子步骤”，还是“直接更新节点本身”,updates_parent=True 的阶段会直接更新父节点，不会在前端多出一层重复卡片
+    updates_parent: bool = False  
 
 
 # 中文注释：这里不是做复杂配置系统，只是把“代码里的阶段名”翻译成“用户能看懂的事件名”。
@@ -138,7 +139,7 @@ _STAGE_DISPLAY: dict[tuple[str, str], RuntimeStageDisplay] = {
     ("read", "paper_artifact_ready"): RuntimeStageDisplay(
         "paper_artifact_ready",
         "保存单篇阅读结果",
-        show_content="单篇阅读结果已保存",
+        show_content="单篇阅读结果已保存",  
         status="completed",
     ),
     ("read", "read_artifact_ready"): RuntimeStageDisplay(
@@ -345,7 +346,12 @@ class WorkflowNodeReporter:
 
         stage = _normalize_stage(extra.get("stage")) or "step"
         stage_display = self._stage_display(stage)
-        resolved_status = stage_display.status or status
+        # 中文注释：阶段默认状态只适合成功场景。
+        # 如果当前已经明确失败或取消，就保留真实状态，避免前端误显示成已完成。
+        if status in {"failed", "cancelled", "skipped"}:
+            resolved_status = status
+        else:
+            resolved_status = stage_display.status or status
         resolved_show_content = stage_display.show_content or show_content
         custom_event_key = str(extra.get("event_key") or stage_display.event_key).strip() or stage_display.event_key
         custom_title = str(extra.get("stage_title") or stage_display.title).strip() or stage_display.title

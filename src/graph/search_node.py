@@ -326,6 +326,7 @@ async def _search_one_subtopic(
 def _merge_subtopic_search_responses(responses: list[tuple[SearchSubtopic, SearchResponse]]) -> SearchExecutionResult:
     """合并多个子主题的检索响应，同时记录来源统计和错误信息。"""
 
+    # papers_by_key 用于全局去重
     papers_by_key: dict[str, PaperDocument] = {}
     raw_candidate_count = 0
     sources_used: list[str] = []
@@ -345,6 +346,7 @@ def _merge_subtopic_search_responses(responses: list[tuple[SearchSubtopic, Searc
         for paper in response.papers:
             _attach_search_origin(paper, subtopic)
             key = _paper_dedupe_key(paper)
+            # 同一子主题下的论文进行去重
             if key in papers_by_key:
                 _merge_duplicate_paper(papers_by_key[key], paper)
                 continue
