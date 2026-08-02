@@ -11,6 +11,7 @@ import { SessionStreamAggregator } from "../lib/session-stream-aggregator";
 import { pushToast } from "../stores/notifications";
 import type {
   SessionRuntimeEvent,
+  SessionConstraints,
   SessionSummary,
   SessionThread,
   SessionTimelineSnapshot,
@@ -31,6 +32,7 @@ const selectedSessionKey = ref("");
 const selectedTitle = ref("新的研究主题");
 const selectedRunStartedAt = ref<string | null>(null);
 const draft = ref("");
+const constraints = ref<SessionConstraints>({});
 const threadLoading = ref(false);
 const sending = ref(false);
 const streamSource = ref<EventSource | null>(null);
@@ -111,6 +113,7 @@ async function selectSession(sessionKey: string) {
 
   closeStream(true);
   selectedSessionKey.value = sessionKey;
+  constraints.value = {};
   threadLoading.value = true;
   try {
     const thread = await fetchSessionThread(sessionKey);
@@ -145,6 +148,7 @@ function resetToBlankWorkspace() {
   closeStream(true);
   selectedSessionKey.value = "";
   selectedTitle.value = "新的研究主题";
+  constraints.value = {};
   selectedRunStartedAt.value = null;
   timelineSnapshot.value = null;
   sending.value = false;
@@ -170,6 +174,7 @@ async function submitTopic() {
     const accepted = await startSessionRun(sessionKey, {
       content: submittedContent,
       turn_id: turnId,
+      constraints: { ...constraints.value },
     });
     emit("refreshSessions");
     openStream(sessionKey, accepted.stream_url);
@@ -408,6 +413,7 @@ function handleError(error: unknown, title: string) {
             :running="isRunning"
             :sending="sending || props.creatingSession"
             :status-text="statusText"
+            v-model:constraints="constraints"
             @submit="submitTopic"
           />
 
@@ -431,6 +437,7 @@ function handleError(error: unknown, title: string) {
           :running="isRunning"
           :sending="sending || props.creatingSession"
           :status-text="statusText"
+          v-model:constraints="constraints"
           @submit="submitTopic"
         />
       </div>

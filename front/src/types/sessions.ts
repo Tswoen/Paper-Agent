@@ -70,10 +70,21 @@ export interface SessionRunAccepted {
   stream_url: string;
 }
 
+/** 用户可以在提交主题时附带的检索和阅读限制。空字段不会写入请求。 */
+export interface SessionConstraints {
+  year_from?: number;
+  year_to?: number;
+  max_results?: number;
+  deep_read_limit?: number;
+  excluded_terms?: string[];
+  sources?: string[];
+}
+
 export interface SessionRunStartPayload {
   content?: string;
   turn_id?: string;
   resume_from_last_checkpoint?: boolean;
+  constraints?: SessionConstraints;
 }
 
 export type RuntimeDetailContent = string | Record<string, unknown> | null;

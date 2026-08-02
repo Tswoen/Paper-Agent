@@ -56,7 +56,7 @@ class WritingOutlineAgent(BaseAgent):
             response = await self.context.llm.provider.chat(
                 _outline_messages(state),
                 temperature=0.2,
-                max_tokens=4000,
+                # max_tokens=4000,
                 reasoning_effort="medium",
             )
         except Exception as exc:
@@ -112,6 +112,7 @@ def _outline_messages(state: JsonObject) -> list[JsonObject]:
     request = state["request"]
     analysis_report = dict(state.get("analysis_report") or {})
     overall_framework = str(analysis_report.get("overall_framework") or "").strip()
+    overall_analysis = _compact_overall_analysis(dict(analysis_report.get("overall_analysis") or {}))
     subtopic_analyses = _compact_subtopic_analyses(list(analysis_report.get("subtopic_analyses") or []))
 
     system_prompt = """
@@ -119,31 +120,39 @@ def _outline_messages(state: JsonObject) -> list[JsonObject]:
 
 输出要求：
 1. 只输出合法 JSON，不要输出 Markdown、解释文字或代码块。
-2. 最外层必须是对象，章节键名使用 Chapter1、Chapter2、Chapter3 这种格式。
-3. 每章必须包含：
+2. 只生成论文正文大纲：不要生成摘要、引言、绪论、参考文献或 bibliography 等部分，直接从正文的第一个研究主题开始安排章节。
+3. 最外层必须是对象，章节键名使用 Chapter1、Chapter2、Chapter3 这种格式。
+4. 每章必须包含：
+   - title：本章标题，简短明确，不能省略。
    - description：本章总体写作描述，用来锁定本章只写什么、不写什么。
    - Sections：对象，小节键名使用 section1、section2、section3 这种格式。
-4. 每个小节必须包含：
+5. 每个小节必须包含：
+   - title：本小节标题，简短明确，不能省略。
    - task：本小节写作策略，要说明本节该怎么展开。
-   - evidence-map：数组，写明本节可以使用哪些证据、观点或 paperId。
+   - evidence-map：数组，只能从输入的“综合分析节点输出”对象中选择本节要使用的原始证据、观点或 paperId。
    - ref-sections：数组，写明写本节前需要参考的前置小节；没有就用空数组。
    - word-count：整数，表示本节建议字数。
-5. 章节和小节数量要适中，不要为了显得复杂而拆太碎。
-6. 只能依据输入里的 overall_framework 和子主题分析来设计大纲，不要凭空扩展成另一个题目。
+6. 章节和小节数量要适中，不要为了显得复杂而拆太碎。
+7. 输入中的“综合分析节点输出”是 evidence-map 的唯一来源。它包含八个 JSON 字段；请先判断本节对应哪些字段，再从这些字段的值中原样复制相关证据句、观点句或明确出现的 paperId。
+8. evidence-map 中的内容不得由你重新编造、扩展或改写，也不能引用“综合分析节点输出”之外的信息；如果没有直接相关内容，必须使用空数组。
+9. 章节和小节的主题可以参考 overall_framework，但所有证据都必须能在“综合分析节点输出”的字段值中找到。
 """
     user_prompt = json.dumps(
         {
             "用户综述主题": getattr(request, "topic", ""),
             "任务": "根据 overall_framework 生成章节和小节级别的写作大纲",
             "overall_framework": overall_framework,
+            "综合分析节点输出": overall_analysis,
             "可使用的子主题分析": subtopic_analyses,
             "输出示例": {
                 "Chapter1": {
-                    "description": "本章只交代研究背景、核心问题和综述范围，不展开具体论文细节。",
+                    "title": "相关研究现状",
+                    "description": "本章梳理主题下已有研究的主要方向和代表性发现，直接进入正文论述。",
                     "Sections": {
                         "section1": {
-                            "task": "说明研究背景，并把读者引到本文关注的问题上。",
-                            "evidence-map": ["可使用的证据或 paperId"],
+                            "title": "主要研究方向",
+                            "task": "按研究方向归纳已有工作，说明每个方向解决的主要问题。",
+                            "evidence-map": [],
                             "ref-sections": [],
                             "word-count": 600,
                         }
@@ -158,6 +167,27 @@ def _outline_messages(state: JsonObject) -> list[JsonObject]:
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
     ]
+
+
+def _compact_overall_analysis(overall_analysis: JsonObject) -> JsonObject:
+    """只保留综合分析节点规定的八个字段，作为大纲的证据来源。"""
+
+    # 中文说明：综合分析节点的结果固定为这八个字段。
+    # 这里明确列出字段名，避免把执行信息或其他无关内容误当成写作证据。
+    fields = (
+        "领域整体研究概况",
+        "领域全域共性研究共识",
+        "领域核心研究争议与矛盾体系",
+        "领域系统性研究空白与局限",
+        "领域研究时序演化脉络",
+        "领域技术与研究方法迭代脉络",
+        "各子主题横向差异对比分析",
+        "领域整体总结与研究展望",
+    )
+    return {
+        field: str(overall_analysis.get(field) or "").strip()
+        for field in fields
+    }
 
 
 def _compact_subtopic_analyses(subtopic_analyses: list[Any]) -> list[JsonObject]:
@@ -222,8 +252,15 @@ def _normalize_outline(value: JsonObject) -> JsonObject:
         chapter_key = str(key or "").strip() or f"Chapter{chapter_index}"
         if not chapter_key.lower().startswith("chapter"):
             chapter_key = f"Chapter{chapter_index}"
+        chapter_title = str(chapter.get("title") or chapter.get("name") or "").strip() or chapter_key
+        chapter_description = str(chapter.get("description") or "").strip()
+        # 中文说明：即使模型误生成了这些部分，也在进入写作节点前删掉，保证结果只包含正文。
+        # 这里只检查标题，避免章节说明中出现“不包含摘要”这类否定句时被误删。
+        if _is_non_body_part(chapter_title, ""):
+            continue
         outline[chapter_key] = {
-            "description": str(chapter.get("description") or "").strip(),
+            "title": chapter_title,
+            "description": chapter_description,
             "Sections": _normalize_sections(chapter.get("Sections") or chapter.get("sections")),
         }
         chapter_index += 1
@@ -247,13 +284,35 @@ def _normalize_sections(value: Any) -> JsonObject:
         section_key = str(key or "").strip() or f"section{index}"
         if not section_key.lower().startswith("section"):
             section_key = f"section{index}"
+        section_title = str(section.get("title") or section.get("name") or "").strip() or section_key
+        section_task = str(section.get("task") or "").strip()
+        if _is_non_body_part(section_title, ""):
+            continue
         sections[section_key] = {
-            "task": str(section.get("task") or "").strip(),
+            "title": section_title,
+            "task": section_task,
             "evidence-map": _list_value(section.get("evidence-map")),
             "ref-sections": _list_value(section.get("ref-sections")),
             "word-count": _positive_int(section.get("word-count"), default=800),
         }
     return sections
+
+
+def _is_non_body_part(title: str, description: str) -> bool:
+    """判断标题或说明是否误指向摘要、引言或参考文献等非正文部分。"""
+
+    text = f"{title} {description}".lower()
+    excluded_markers = (
+        "摘要",
+        "abstract",
+        "引言",
+        "绪论",
+        "introduction",
+        "参考文献",
+        "references",
+        "bibliography",
+    )
+    return any(marker in text for marker in excluded_markers)
 
 
 def _list_value(value: Any) -> list[Any]:

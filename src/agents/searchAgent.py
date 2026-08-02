@@ -269,7 +269,7 @@ JSON 示例：
             excluded_terms=self._normalize_string_list(constraints.get("excluded_terms")),
             year_from=self._coerce_optional_int(constraints.get("year_from")),
             year_to=self._coerce_optional_int(constraints.get("year_to")),
-            max_results=self._coerce_positive_int(constraints.get("max_results"), default=10),
+            max_results=self._coerce_positive_int(constraints.get("max_results"), default=60),
             sources=self._normalize_string_list(constraints.get("sources")),
         )
 

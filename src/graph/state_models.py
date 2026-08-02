@@ -34,6 +34,7 @@ class State(TypedDict, total=False):
     writing_sections: list[JsonObject]
     writing_report: JsonObject
     writing_artifact_refs: list[JsonObject]
+    final_artifact_refs: list[JsonObject]
     diagnostics: JsonObject
     current_step: str
     assistant_message: str

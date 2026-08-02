@@ -33,6 +33,7 @@ class SectionLoopState(TypedDict, total=False):
     previous_sections: list[JsonObject]
     word_count: int
     read_results: list[JsonObject]
+    session_read_results: list[JsonObject]
     cache_dir: str
     tool_results: list[JsonObject]
     raw_model_outputs: list[str]
@@ -47,6 +48,9 @@ class SectionLoopState(TypedDict, total=False):
     review: JsonObject
     completed: bool
     warnings: list[str]
+    # 中文说明：这是一个可选的界面通知函数，只把当前小节正在做什么告诉外层，
+    # 不参与正文生成，也不会改变循环里的数据。
+    progress_callback: Any
 
 
 class WritingAgent(BaseAgent):
@@ -94,6 +98,8 @@ class WritingAgent(BaseAgent):
         word_count: int,
         read_results: list[JsonObject],
         cache_dir: str,
+        session_read_results: list[JsonObject] | None = None,
+        progress_callback: Any | None = None,
     ) -> JsonObject:
         """写作单个小节，并返回正文、引用和审查结果。
 
@@ -110,6 +116,8 @@ class WritingAgent(BaseAgent):
             "previous_sections": list(previous_sections),
             "word_count": max(100, int(word_count or 800)),
             "read_results": list(read_results),
+            # 当前 State 只保存本轮结果，会话历史资料由写作节点单独传进来。
+            "session_read_results": list(session_read_results or []),
             "cache_dir": cache_dir,
             "tool_results": [],
             "raw_model_outputs": [],
@@ -124,6 +132,7 @@ class WritingAgent(BaseAgent):
             "review": {},
             "completed": False,
             "warnings": [],
+            "progress_callback": progress_callback,
         }
         final_state = await graph.ainvoke(initial_state)
         return {
@@ -139,9 +148,49 @@ class WritingAgent(BaseAgent):
             "warnings": list(final_state.get("warnings") or []),
         }
 
+    async def async_write_abstract(
+        self,
+        *,
+        topic: str,
+        sections: list[JsonObject],
+        word_count: int = 300,
+    ) -> tuple[str, str]:
+        """根据已经完成的正文生成摘要。
+
+        中文说明：摘要必须建立在最终正文之上，所以这个方法只在所有小节写完后调用。
+        返回摘要文本和状态说明；模型不可用时仍返回一段根据正文拼出的保守摘要，保证
+        写作产物结构完整。
+        """
+
+        if self.context.llm is None:
+            return _fallback_abstract(topic, sections), "未配置摘要写作模型，已使用保守摘要"
+
+        try:
+            response = await self.context.llm.provider.chat(
+                _abstract_messages(topic=topic, sections=sections, word_count=word_count),
+                temperature=0.2,
+                max_tokens=1800,
+                reasoning_effort="medium",
+            )
+        except Exception as exc:
+            return _fallback_abstract(topic, sections), f"摘要模型调用失败，已使用保守摘要：{exc}"
+
+        raw_output = str(getattr(response, "content", "") or "")
+        if not getattr(response, "ok", False):
+            return _fallback_abstract(topic, sections), f"摘要模型返回失败，已使用保守摘要：{raw_output}"
+
+        parsed = _extract_json_object(raw_output)
+        abstract = str(parsed.get("content") or parsed.get("abstract") or "").strip() if parsed else ""
+        if not abstract:
+            abstract = raw_output.strip()
+        if not abstract:
+            return _fallback_abstract(topic, sections), "摘要模型没有返回正文，已使用保守摘要"
+        return abstract, "ok"
+
     async def plan_or_write(self, state: SectionLoopState) -> SectionLoopState:
         """让模型决定当前是补资料还是直接写正文。"""
 
+        _notify_section_progress(state, "正在撰写小节正文")
         if self.context.llm is None:
             draft = _fallback_draft(state)
             return {
@@ -223,6 +272,7 @@ class WritingAgent(BaseAgent):
             tool_name=str(state.get("tool_name") or ""),
             arguments=dict(state.get("tool_arguments") or {}),
             read_results=list(state.get("read_results") or []),
+            session_read_results=list(state.get("session_read_results") or []),
             cache_dir=Path(str(state.get("cache_dir") or "data/paper_cache")),
         )
         return {
@@ -236,6 +286,7 @@ class WritingAgent(BaseAgent):
     async def review_draft(self, state: SectionLoopState) -> SectionLoopState:
         """审查正文是否逻辑通顺、语言是否足够学术化。"""
 
+        _notify_section_progress(state, "正在审查写作内容")
         draft = str(state.get("draft") or "").strip()
         if self.context.llm is None:
             return {
@@ -322,24 +373,36 @@ def _route_after_review_step(state: SectionLoopState) -> str:
     return "end" if state.get("completed") else "plan_or_write"
 
 
+def _notify_section_progress(state: SectionLoopState, message: str) -> None:
+    """把小节当前阶段交给外层；没有回调时保持原来的静默行为。"""
+
+    callback = state.get("progress_callback")
+    if callable(callback):
+        callback(message)
+
+
 def get_extraction(
     paper_ids: list[str],
     *,
     read_results: list[JsonObject] | None = None,
+    session_read_results: list[JsonObject] | None = None,
     cache_dir: str | Path = "data/paper_cache",
 ) -> list[JsonObject]:
     """根据 paperId 获取论文结构化摘要。
 
     中文注释：
     阅读节点如果已经把 extraction 放在 State 里，就优先读 State，因为这是本轮
-    工作流最新的数据。State 里没有时，再去 data/paper_cache 里的 extraction.json
-    找，保证用户单独从缓存恢复写作时也能拿到资料。
+    工作流最新的数据。State 里没有时，再读当前会话所有轮次的阅读产物；最后才
+    去 data/paper_cache 里的 extraction.json 找，保证单独从缓存恢复写作时也能拿到资料。
     """
 
     results: list[JsonObject] = []
     for paper_id in _deduplicate_strings(paper_ids):
         extraction = _find_extraction_in_read_results(paper_id, list(read_results or []))
-        source = "read_results"
+        source = "state"
+        if extraction is None:
+            extraction = _find_extraction_in_session_read(paper_id, list(session_read_results or []))
+            source = "session_artifacts_read"
         if extraction is None:
             extraction = _find_extraction_in_cache(paper_id, Path(cache_dir))
             source = "paper_cache"
@@ -397,13 +460,23 @@ def execute_writing_tool(
     tool_name: str,
     arguments: JsonObject,
     read_results: list[JsonObject],
+    session_read_results: list[JsonObject],
     cache_dir: Path,
 ) -> JsonObject:
     """执行写作 Agent 可以使用的工具。"""
 
     if tool_name == "get_extraction":
         paper_ids = _string_list(arguments.get("paperIds") or arguments.get("paper_ids") or arguments.get("paperId"))
-        return {"tool": tool_name, "arguments": {"paperIds": paper_ids}, "result": get_extraction(paper_ids, read_results=read_results, cache_dir=cache_dir)}
+        return {
+            "tool": tool_name,
+            "arguments": {"paperIds": paper_ids},
+            "result": get_extraction(
+                paper_ids,
+                read_results=read_results,
+                session_read_results=session_read_results,
+                cache_dir=cache_dir,
+            ),
+        }
     if tool_name == "search_section":
         requests = arguments.get("requests") or arguments.get("sections") or arguments.get("items") or []
         if not isinstance(requests, list):
@@ -494,6 +567,52 @@ def _write_messages(state: SectionLoopState) -> list[JsonObject]:
     return [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
 
 
+def _abstract_messages(*, topic: str, sections: list[JsonObject], word_count: int) -> list[JsonObject]:
+    """构造摘要提示词，只把已经完成的小节正文交给模型。"""
+
+    system_prompt = """
+你是一名论文综述摘要写作助手。请根据已经完成的正文生成摘要，不要补充正文中没有出现的事实。
+
+要求：
+1. 只输出合法 JSON，不要输出 Markdown、解释文字或代码块。
+2. JSON 格式必须是 {"content":"摘要正文"}。
+3. 摘要应概括研究主题、正文梳理的主要方向、核心发现、主要不足和研究展望。
+4. 摘要中不要添加 [paperId] 引用，不要编造正文没有提到的论文、数据或结论。
+5. 摘要语言要简洁、连贯，接近给定字数。
+"""
+    body = [
+        {
+            "小节标题": str(section.get("section_title") or section.get("section_id") or ""),
+            "正文": str(section.get("content") or "").strip(),
+        }
+        for section in sections
+        if isinstance(section, dict) and str(section.get("content") or "").strip()
+    ]
+    user_prompt = json.dumps(
+        {"用户主题": topic, "摘要建议字数": max(100, int(word_count or 300)), "已完成正文": body},
+        ensure_ascii=False,
+        indent=2,
+    )
+    return [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
+
+
+def _fallback_abstract(topic: str, sections: list[JsonObject]) -> str:
+    """模型不可用时从各小节开头拼出一段保守摘要。"""
+
+    summaries: list[str] = []
+    for section in sections:
+        content = re.sub(r"\s+", " ", str(section.get("content") or "")).strip()
+        if not content:
+            continue
+        first_sentence = re.split(r"(?<=[。！？.!?])\s*", content, maxsplit=1)[0].strip()
+        summaries.append(first_sentence or content[:180])
+        if len(summaries) >= 4:
+            break
+    if not summaries:
+        return f"本文围绕“{topic}”梳理相关研究，并总结现有工作的主要进展、研究不足与后续方向。"
+    return f"本文围绕“{topic}”梳理相关研究。" + "".join(summaries)
+
+
 def _review_messages(state: SectionLoopState) -> list[JsonObject]:
     """构造审查提示词，只检查逻辑和语言。"""
 
@@ -552,6 +671,37 @@ def _find_extraction_in_read_results(paper_id: str, read_results: list[JsonObjec
         extraction = item.get("extraction")
         if isinstance(extraction, dict) and any(str(value).strip() for value in extraction.values()):
             return dict(extraction)
+    return None
+
+
+def _find_extraction_in_session_read(paper_id: str, read_results: list[JsonObject]) -> JsonObject | None:
+    """从当前会话所有轮次的阅读产物中查找论文资料。
+
+    中文说明：同一篇论文可能在多个轮次被重新阅读，所以从后往前查找，优先使用
+    最近一次保存的结果。如果阅读产物没有全文提取结果，就把论文信息和阅读笔记
+    一起返回，写作 Agent 仍然可以使用摘要阅读阶段已经整理好的内容。
+    """
+
+    for item in reversed(read_results):
+        if not isinstance(item, dict):
+            continue
+        paper = dict(item.get("paper") or {})
+        candidates = {
+            str(paper.get("paperId") or ""),
+            str(paper.get("id") or ""),
+            str(item.get("paperId") or ""),
+        }
+        if paper_id not in candidates:
+            continue
+
+        extraction = item.get("extraction")
+        if isinstance(extraction, dict) and any(str(value).strip() for value in extraction.values()):
+            return dict(extraction)
+
+        note = item.get("note")
+        if isinstance(note, dict) and any(str(value).strip() for value in note.values()):
+            # 保留论文摘要和标题，避免只把笔记交给模型后失去原始论文上下文。
+            return {"paper": paper, "note": dict(note)}
     return None
 
 

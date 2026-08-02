@@ -1022,6 +1022,114 @@ a {
   gap: 10px;
 }
 
+.session-composer-constraints {
+  display: grid;
+  gap: 10px;
+  padding: 0 4px;
+}
+
+.session-composer-constraints-toggle {
+  display: inline-flex;
+  align-items: center;
+  align-self: start;
+  gap: 7px;
+  width: fit-content;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-soft);
+  font-size: 0.84rem;
+}
+
+.session-composer-constraints-toggle:hover {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.session-composer-constraints-toggle .rotated {
+  transform: rotate(180deg);
+}
+
+.session-composer-constraints-badge {
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 0.72rem;
+}
+
+.session-composer-constraints-panel {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--surface-muted);
+}
+
+.session-composer-constraint-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.session-composer-constraint-field {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.session-composer-constraint-field > span,
+.session-composer-source-field legend {
+  color: var(--text-soft);
+  font-size: 0.78rem;
+}
+
+.session-composer-constraint-field .field {
+  min-height: 38px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  font-size: 0.84rem;
+}
+
+.session-composer-constraint-wide {
+  grid-column: 1 / -1;
+}
+
+.session-composer-source-field {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.session-composer-source-field legend {
+  width: 100%;
+  padding: 0;
+}
+
+.session-composer-source-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text);
+  font-size: 0.84rem;
+}
+
+.session-composer-source-option input {
+  accent-color: var(--accent);
+}
+
+.session-composer-source-field small {
+  color: var(--text-faint);
+  font-size: 0.76rem;
+}
+
 .session-workspace-shell[data-timeline-visible="true"] .session-composer-card {
   width: min(100%, 760px);
   justify-self: center;
@@ -1598,6 +1706,10 @@ a {
     border-radius: 28px;
   }
 
+  .session-composer-constraint-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .session-timeline-card {
     max-height: none;
   }
@@ -1716,6 +1828,10 @@ a {
   .session-composer-send {
     width: 44px;
     flex: 0 0 44px;
+  }
+
+  .session-composer-constraint-grid {
+    grid-template-columns: 1fr;
   }
 
   .field-inline {

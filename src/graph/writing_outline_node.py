@@ -12,7 +12,8 @@ from src.models.sessions import utc_now
 from src.repositories.sessions.base import SessionRepository
 
 
-WRITING_OUTLINE_VERSION = "1.0"
+# 中文说明：标题字段和正文范围发生了变化，使用新版本号便于识别旧产物。
+WRITING_OUTLINE_VERSION = "1.1"
 
 
 def run_writing_outline_node():
@@ -114,6 +115,8 @@ def _outline_is_complete(outline: JsonObject | None) -> bool:
     for chapter in outline.values():
         if not isinstance(chapter, dict):
             return False
+        if not str(chapter.get("title") or "").strip():
+            return False
         if not str(chapter.get("description") or "").strip():
             return False
         sections = chapter.get("Sections")
@@ -122,7 +125,9 @@ def _outline_is_complete(outline: JsonObject | None) -> bool:
         for section in sections.values():
             if not isinstance(section, dict):
                 return False
-            for key in ("task", "evidence-map", "ref-sections", "word-count"):
+            if not str(section.get("title") or "").strip():
+                return False
+            for key in ("title", "task", "evidence-map", "ref-sections", "word-count"):
                 if key not in section:
                     return False
     return True
@@ -136,63 +141,54 @@ def _fallback_outline(*, topic: str, analysis_report: JsonObject) -> JsonObject:
     后续用户可以拿到一个字段完整的对象，前端和下一步节点也不会因为空值出错。
     """
 
-    overall_framework = str(analysis_report.get("overall_framework") or "暂无可用的总体分析。").strip()
     subtopic_analyses = [item for item in list(analysis_report.get("subtopic_analyses") or []) if isinstance(item, dict)]
     topic_text = topic or str(analysis_report.get("topic") or "当前主题")
 
+    # 中文说明：兜底结构从正文第一章开始，不再放摘要、引言和参考文献。
+    # 每个章节和小节都写出独立标题，前端展示和后续正文写作都可以直接使用。
     outline: JsonObject = {
         "Chapter1": {
-            "description": f"本章只说明《{topic_text}》的研究背景、问题来源和综述范围，不提前展开具体论文比较。",
+            "title": "相关研究现状",
+            "description": f"围绕《{topic_text}》梳理已有研究的主要方向、代表性发现及其适用范围。",
+            "Sections": _research_status_sections(subtopic_analyses),
+        },
+        "Chapter2": {
+            "title": "研究方法与技术演进",
+            "description": "比较不同研究采用的方法、技术路线和演进趋势，说明方法差异如何影响研究结果。",
             "Sections": {
                 "section1": {
-                    "task": "交代研究背景，并说明为什么这个主题值得做综述。",
-                    "evidence-map": [overall_framework],
-                    "ref-sections": [],
-                    "word-count": 600,
+                    "title": "方法与技术路线",
+                    "task": "归纳各研究使用的方法和技术路线，说明它们分别解决了哪些问题。",
+                    "evidence-map": _evidence_from_field(subtopic_analyses, "技术方法栈演变"),
+                    "ref-sections": ["Chapter1"],
+                    "word-count": 900,
                 },
                 "section2": {
-                    "task": "界定本文综述边界，说明本文会围绕哪些问题展开，哪些内容暂不展开。",
-                    "evidence-map": _subtopic_names(subtopic_analyses),
-                    "ref-sections": ["Chapter1.section1"],
-                    "word-count": 500,
+                    "title": "研究时序演化",
+                    "task": "按照研究发展顺序梳理关键变化，说明研究重点如何从早期问题逐步转向当前问题。",
+                    "evidence-map": _evidence_from_field(subtopic_analyses, "时间线演化"),
+                    "ref-sections": ["Chapter1"],
+                    "word-count": 800,
                 },
             },
         },
-        "Chapter2": {
-            "description": "本章只梳理已有研究的主要方向和代表性证据，重点写清楚各方向已经解决了什么。",
-            "Sections": _research_status_sections(subtopic_analyses),
-        },
         "Chapter3": {
-            "description": "本章只讨论已有研究之间的分歧、不足和仍未解决的问题，不重复铺陈第二章的研究现状。",
+            "title": "研究争议、空白与发展方向",
+            "description": "在前文研究现状和方法比较的基础上，归纳主要争议、研究不足及可继续推进的方向。",
             "Sections": {
                 "section1": {
-                    "task": "归纳不同研究之间的一致点和分歧点，写清楚争议来自方法、数据还是研究对象差异。",
+                    "title": "研究共识与核心争议",
+                    "task": "归纳不同研究之间的一致点和分歧点，说明争议来自方法、数据还是研究对象差异。",
                     "evidence-map": _evidence_from_field(subtopic_analyses, "矛盾点"),
                     "ref-sections": ["Chapter2"],
                     "word-count": 900,
                 },
                 "section2": {
-                    "task": "总结仍然缺少研究的问题，并说明这些空白为什么会影响后续研究。",
+                    "title": "研究空白与后续方向",
+                    "task": "总结仍然缺少研究的问题，并提出与这些空白对应的后续研究方向。",
                     "evidence-map": _evidence_from_field(subtopic_analyses, "研究空白"),
                     "ref-sections": ["Chapter3.section1"],
                     "word-count": 800,
-                },
-            },
-        },
-        "Chapter4": {
-            "description": "本章只做收束和展望，把前文的发现整理成后续研究方向，不再引入新的大块材料。",
-            "Sections": {
-                "section1": {
-                    "task": "概括全文主线，说明各章节共同支持了什么判断。",
-                    "evidence-map": [overall_framework],
-                    "ref-sections": ["Chapter1", "Chapter2", "Chapter3"],
-                    "word-count": 600,
-                },
-                "section2": {
-                    "task": "提出后续研究可以继续推进的方向，保持和第三章的研究空白对应。",
-                    "evidence-map": _evidence_from_field(subtopic_analyses, "研究空白"),
-                    "ref-sections": ["Chapter3.section2", "Chapter4.section1"],
-                    "word-count": 500,
                 },
             },
         },
@@ -201,14 +197,15 @@ def _fallback_outline(*, topic: str, analysis_report: JsonObject) -> JsonObject:
 
 
 def _research_status_sections(subtopic_analyses: list[JsonObject]) -> JsonObject:
-    """把每个子主题变成第二章的一个小节。"""
+    """把每个子主题变成正文第一章的一个小节。"""
 
     if not subtopic_analyses:
         return {
             "section1": {
+                "title": "总体研究现状",
                 "task": "根据总体分析梳理已有研究现状，并保留后续补充论文证据的位置。",
                 "evidence-map": [],
-                "ref-sections": ["Chapter1.section2"],
+                "ref-sections": [],
                 "word-count": 1000,
             }
         }
@@ -217,9 +214,10 @@ def _research_status_sections(subtopic_analyses: list[JsonObject]) -> JsonObject
     for index, item in enumerate(subtopic_analyses, start=1):
         subtopic = str(item.get("subtopic") or f"子主题{index}").strip()
         sections[f"section{index}"] = {
+            "title": subtopic,
             "task": f"围绕“{subtopic}”梳理已有研究现状，先写主要结论，再写支撑这些结论的论文证据。",
             "evidence-map": _section_evidence(item),
-            "ref-sections": ["Chapter1.section2"],
+            "ref-sections": [],
             "word-count": 800,
         }
     return sections
@@ -236,17 +234,6 @@ def _section_evidence(item: JsonObject) -> list[Any]:
     if isinstance(paper_ids, list) and paper_ids:
         evidence.append({"paperIds": paper_ids})
     return evidence
-
-
-def _subtopic_names(subtopic_analyses: list[JsonObject]) -> list[str]:
-    """提取子主题名称，作为综述范围的依据。"""
-
-    names: list[str] = []
-    for item in subtopic_analyses:
-        name = str(item.get("subtopic") or "").strip()
-        if name:
-            names.append(name)
-    return names
 
 
 def _evidence_from_field(subtopic_analyses: list[JsonObject], field: str) -> list[Any]:

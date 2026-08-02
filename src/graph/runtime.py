@@ -187,8 +187,45 @@ _STAGE_DISPLAY: dict[tuple[str, str], RuntimeStageDisplay] = {
         status="completed",
         updates_parent=True,
     ),
+    # 中文说明：写作大纲开始和结束时都直接更新“写作大纲”这一张主卡片，
+    # 这样开始事件不会单独留下一个一直显示“处理中”的旧步骤。
+    ("write_outline", "writing_outline_start"): RuntimeStageDisplay(
+        "write_outline",
+        "写作大纲",
+        updates_parent=True,
+    ),
+    # 中文说明：保存出来的 JSON 产物仍然单独显示，用户可以知道文件已经保存成功。
+    ("write_outline", "writing_outline_artifact_ready"): RuntimeStageDisplay(
+        "writing_outline_artifact_ready",
+        "保存写作大纲",
+        show_content="写作大纲产物已保存",
+        status="completed",
+    ),
+    # 中文说明：结束事件继续更新同一张主卡片，并把它的状态改成已完成。
+    ("write_outline", "writing_outline_done"): RuntimeStageDisplay(
+        "write_outline",
+        "写作大纲",
+        show_content="写作大纲已完成",
+        status="completed",
+        updates_parent=True,
+    ),
+    # 中文说明：正文开始时只更新“正文写作”主卡，不再额外显示 writing start 子卡。
+    ("write", "writing_start"): RuntimeStageDisplay(
+        "write",
+        "正文写作",
+        updates_parent=True,
+    ),
+    # 中文说明：摘要和参考文献各自只保留一张卡，后续用同一个事件键更新处理状态。
+    ("write", "writing_abstract"): RuntimeStageDisplay("writing_abstract", "摘要写作"),
+    ("write", "writing_references"): RuntimeStageDisplay("writing_references", "参考文献生成"),
     ("compose_reply", "compose_start"): RuntimeStageDisplay("compose_reply", "回复整理", updates_parent=True),
     ("compose_reply", "compose_reply"): RuntimeStageDisplay("compose_reply_step", "生成最终回复"),
+    ("compose_reply", "final_artifact_ready"): RuntimeStageDisplay(
+        "final_artifact_ready",
+        "保存最终 Markdown 论文",
+        show_content="最终 Markdown 论文文件已保存",
+        status="completed",
+    ),
     ("compose_reply", "compose_done"): RuntimeStageDisplay(
         "compose_reply_step",
         "生成最终回复",
@@ -417,11 +454,14 @@ class WorkflowNodeReporter:
     def _runtime_metadata(self, extra: JsonObject, stage_display: RuntimeStageDisplay | None) -> JsonObject:
         """把节点、阶段和业务字段整理成前端可展开查看的普通字典。"""
 
+        # 中文说明：小节会在上报时传入带 section_id 的事件键，详情里的 event_key 也要保持一致，
+        # 这样排查历史事件时能准确知道它对应哪一个小节。
+        event_key = str(extra.get("event_key") or (stage_display.event_key if stage_display is not None else self.node_key)).strip()
         metadata = {
             "node_key": self.node_key,
             "node_title": self.node_title,
             "stage": _normalize_stage(extra.get("stage")),
-            "event_key": stage_display.event_key if stage_display is not None else self.node_key,
+            "event_key": event_key or self.node_key,
         }
         for key, value in extra.items():
             # 中文注释：stage 已经单独放过；其他字段原样放进 metadata，方便前端展示详情或恢复按钮使用。

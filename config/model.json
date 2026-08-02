@@ -9,7 +9,7 @@
     },
     "emb_openai": {
       "backend": "openai_compat",
-      "api_key": "sk-mvjhwoypajnggqoasejoqumfaabvifdrvztgvmxdpdyukggy",
+      "api_key": "sk-bvhpotgjrbejxdoejmfnfunpsqbozeyuxukayjryuzftxdlt",
       "extra_headers": {},
       "extra_body": {},
       "api_base": "https://api.siliconflow.cn/v1"

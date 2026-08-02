@@ -140,6 +140,7 @@ def _build_initial_state(
         writing_sections=[],
         writing_report={},
         writing_artifact_refs=[],
+        final_artifact_refs=[],
         diagnostics={},
         current_step="init",
         assistant_message="",

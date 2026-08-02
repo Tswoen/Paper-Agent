@@ -38,7 +38,12 @@ def build_paper_workflow_message_handler(repo: SessionRepository):
             )
 
         checkpoint = frame.get("read_resume_checkpoint")
-        request = _request_from_checkpoint(checkpoint) or ReviewRequest(topic=content)
+        # 中文注释：新请求的约束由前端放在请求体的 constraints 字段中，
+        # 这里把它装进 ReviewRequest，后续图状态就会通过 state["request"].constraints 使用。
+        request = _request_from_checkpoint(checkpoint) or ReviewRequest(
+            topic=content,
+            constraints=_constraints_from_frame(frame),
+        )
         state_overrides = {"read_resume_checkpoint": checkpoint} if isinstance(checkpoint, dict) else None
         await run_graph(
             request,
@@ -50,6 +55,13 @@ def build_paper_workflow_message_handler(repo: SessionRepository):
         )
 
     return _handler
+
+
+def _constraints_from_frame(frame: JsonObject) -> JsonObject:
+    """从一次会话请求中取出约束；没有传约束时返回空字典。"""
+
+    value = frame.get("constraints")
+    return dict(value) if isinstance(value, dict) else {}
 
 
 def _request_from_checkpoint(checkpoint: Any) -> ReviewRequest | None:
