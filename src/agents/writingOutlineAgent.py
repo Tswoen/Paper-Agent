@@ -171,11 +171,12 @@ def _compact_subtopic_analyses(subtopic_analyses: list[Any]) -> list[JsonObject]
             {
                 "subtopic": item.get("subtopic") or "",
                 "paperIds": item.get("paperIds") or [],
-                "summary": item.get("subtopic_summary") or item.get("研究现状") or "",
+                "研究现状": item.get("研究现状") or "",
                 "consensus": item.get("一致点") or [],
-                "conflicts": item.get("矛盾点") or [],
-                "gaps": item.get("研究空白") or [],
-                "relationships": item.get("relationships") or [],
+                "矛盾点": item.get("矛盾点") or "",
+                "研究空白": item.get("研究空白") or "",
+                "时间线演化": item.get("时间线演化") or "",
+                "技术方法栈演变": item.get("技术方法栈演变") or "",
             }
         )
     return compact

@@ -229,7 +229,7 @@ def _section_evidence(item: JsonObject) -> list[Any]:
     """整理单个子主题能用的证据。"""
 
     evidence: list[Any] = []
-    summary = str(item.get("subtopic_summary") or item.get("研究现状") or "").strip()
+    summary = str(item.get("研究现状") or "").strip()
     if summary:
         evidence.append(summary)
     paper_ids = item.get("paperIds")

@@ -13,7 +13,7 @@ from src.models.sessions import utc_now
 from src.repositories.sessions.base import SessionRepository
 
 
-ANALYSIS_VERSION = "1.0"
+ANALYSIS_VERSION = "2.0"
 
 
 def run_analyse_node():
@@ -65,6 +65,19 @@ def run_analyse_node():
                     agent=agent,
                 )
                 subtopic_analyses.append(analysis)
+
+                # 中文说明：上面的 progress 事件表示“正在处理当前子主题”，所以第三个子主题开始时显示的是 2/3。
+                # 子主题真正处理完成后，需要再发一个完成状态，前端才能显示 3/3，并明确知道综合分析可以开始了。
+                # 这里使用 progress 配合 completed 状态，只更新“分析子主题”这一步，不会提前结束整个分析节点。
+                if reporter is not None:
+                    reporter.progress(
+                        f"子主题分析完成：{group['subtopic']}",
+                        stage="analyse_subtopic",
+                        runtime_status="completed",
+                        completed=index,
+                        total=len(groups),
+                        subtopic=group["subtopic"],
+                    )
 
             if reporter is not None:
                 reporter.progress("正在综合所有子主题的分析结果", stage="analyse_overall")
@@ -131,6 +144,7 @@ async def _analyse_overall(topic: str, subtopic_analyses: list[JsonObject], agen
         "subtopic": "全局综合分析",
         "search_keyword": "",
         "paper_count": sum(int(item.get("paper_count") or 0) for item in subtopic_analyses),
+        "paperIds": _paper_ids_from_analyses(subtopic_analyses),
         "papers": [],
     }
     return _normalize_subtopic_analysis(result.parsed, group)
@@ -214,26 +228,25 @@ def _paper_analysis_input(item: JsonObject) -> JsonObject:
 
 
 def _normalize_subtopic_analysis(parsed: JsonObject, group: JsonObject) -> JsonObject:
-    """整理模型返回的 JSON，补齐后续代码依赖的固定字段。"""
+    """整理模型返回的 JSON，并由服务端补齐流程需要的论文信息。"""
 
     paper_ids = [str(paper.get("paperId") or "").strip() for paper in group.get("papers", []) if str(paper.get("paperId") or "").strip()]
+    if not paper_ids:
+        paper_ids = _string_list(group.get("paperIds"))
     fallback = _fallback_subtopic_analysis(group, reason="")
-    result = {**fallback, **dict(parsed)}
-    result["subtopic"] = str(result.get("subtopic") or group.get("subtopic") or "综合分析")
-    result["search_keyword"] = str(result.get("search_keyword") or group.get("search_keyword") or "")
-    result["paper_count"] = int(group.get("paper_count") or result.get("paper_count") or 0)
-    result["paperIds"] = paper_ids if paper_ids else _list_value(result.get("paperIds"))
-    result["subtopic_summary"] = _text_with_citation(result.get("subtopic_summary") or result.get("研究现状"), paper_ids)
-    result["研究现状"] = _text_with_citation(result.get("研究现状") or result["subtopic_summary"], paper_ids)
-    result["一致点"] = _list_value(result.get("一致点"))
-    result["矛盾点"] = _list_value(result.get("矛盾点"))
-    result["研究空白"] = _list_value(result.get("研究空白"))
-    result["时间线演化"] = _list_value(result.get("时间线演化"))
-    result["relationships"] = _list_value(result.get("relationships"))
-    result["技术方法栈演变"] = _text_with_citation(result.get("技术方法栈演变"), paper_ids)
-    result["研究方法趋势"] = _text_with_citation(result.get("研究方法趋势"), paper_ids)
-    result["研究热度趋势"] = _text_with_citation(result.get("研究热度趋势"), paper_ids)
-    return result
+    return {
+        # 这些字段由程序根据分析输入生成，模型不需要重复输出，避免格式出错。
+        "subtopic": str(group.get("subtopic") or "综合分析"),
+        "search_keyword": str(group.get("search_keyword") or ""),
+        "paper_count": int(group.get("paper_count") or len(paper_ids)),
+        "paperIds": paper_ids,
+        "研究现状": _text_with_citation(parsed.get("研究现状") or fallback["研究现状"], paper_ids),
+        "一致点": _text_list_with_citation(parsed.get("一致点"), paper_ids),
+        "矛盾点": _text_with_citation(parsed.get("矛盾点") or fallback["矛盾点"], paper_ids),
+        "研究空白": _text_with_citation(parsed.get("研究空白") or fallback["研究空白"], paper_ids),
+        "时间线演化": _text_with_citation(parsed.get("时间线演化") or fallback["时间线演化"], paper_ids),
+        "技术方法栈演变": _text_with_citation(parsed.get("技术方法栈演变") or fallback["技术方法栈演变"], paper_ids),
+    }
 
 
 def _fallback_subtopic_analysis(group: JsonObject, *, reason: str) -> JsonObject:
@@ -245,6 +258,8 @@ def _fallback_subtopic_analysis(group: JsonObject, *, reason: str) -> JsonObject
     """
 
     paper_ids = [str(paper.get("paperId") or "").strip() for paper in group.get("papers", []) if str(paper.get("paperId") or "").strip()]
+    if not paper_ids:
+        paper_ids = _string_list(group.get("paperIds"))
     citation = _citation_tail(paper_ids)
     summary = f"当前子主题共有 {len(paper_ids)} 篇论文可用于分析，建议结合这些论文的结构化摘要继续判断。{citation}"
     if reason:
@@ -254,16 +269,12 @@ def _fallback_subtopic_analysis(group: JsonObject, *, reason: str) -> JsonObject
         "search_keyword": str(group.get("search_keyword") or ""),
         "paper_count": int(group.get("paper_count") or len(paper_ids)),
         "paperIds": paper_ids,
-        "subtopic_summary": summary,
         "研究现状": summary,
         "一致点": [],
-        "矛盾点": [],
-        "研究空白": [],
+        "矛盾点": f"暂未能稳定归纳论文之间的矛盾点，需要模型进一步分析。{citation}",
+        "研究空白": f"暂未能稳定归纳研究空白，需要模型进一步分析。{citation}",
         "时间线演化": _fallback_timeline(group),
         "技术方法栈演变": f"暂未能稳定归纳方法栈演变，需要模型进一步分析。{citation}",
-        "研究方法趋势": f"暂未能稳定归纳研究方法趋势，需要模型进一步分析。{citation}",
-        "研究热度趋势": f"暂未能稳定判断近 2-3 年热度趋势，需要模型进一步分析。{citation}",
-        "relationships": [],
     }
 
 
@@ -280,16 +291,12 @@ def _fallback_overall_analysis(topic: str, subtopic_analyses: list[JsonObject], 
         "search_keyword": "",
         "paper_count": sum(int(item.get("paper_count") or 0) for item in subtopic_analyses),
         "paperIds": all_ids,
-        "subtopic_summary": summary,
         "研究现状": summary,
         "一致点": [],
-        "矛盾点": [],
-        "研究空白": [],
-        "时间线演化": [],
+        "矛盾点": f"暂未能稳定归纳全局矛盾点，需要模型进一步分析。{citation}",
+        "研究空白": f"暂未能稳定归纳全局研究空白，需要模型进一步分析。{citation}",
+        "时间线演化": f"暂未能稳定归纳全局时间线演化，需要模型进一步分析。{citation}",
         "技术方法栈演变": f"暂未能稳定归纳全局方法栈演变。{citation}",
-        "研究方法趋势": f"暂未能稳定归纳全局研究方法趋势。{citation}",
-        "研究热度趋势": f"暂未能稳定判断全局近 2-3 年热度趋势。{citation}",
-        "relationships": [],
     }
 
 
@@ -306,7 +313,7 @@ def _build_final_report(
     return {
         "analysis_version": ANALYSIS_VERSION,
         "topic": topic,
-        "overall_framework": overall_analysis.get("subtopic_summary") or overall_analysis.get("研究现状") or "",
+        "overall_framework": overall_analysis.get("研究现状") or "",
         "overall_analysis": overall_analysis,
         "subtopic_analyses": subtopic_analyses,
         "execution_metadata": {
@@ -435,22 +442,15 @@ def _deduplicate_paper_inputs(papers: list[JsonObject]) -> list[JsonObject]:
     return deduplicated
 
 
-def _fallback_timeline(group: JsonObject) -> list[JsonObject]:
+def _fallback_timeline(group: JsonObject) -> str:
     """根据年份生成一个很保守的兜底时间线。"""
 
     papers = list(group.get("papers") or [])
     years = [int(paper["year"]) for paper in papers if str(paper.get("year") or "").isdigit()]
     paper_ids = [str(paper.get("paperId") or "").strip() for paper in papers if str(paper.get("paperId") or "").strip()]
     if not years:
-        return []
-    return [
-        {
-            "stage": "已有论文阶段",
-            "years": f"{min(years)}-{max(years)}",
-            "feature": f"该阶段已有论文提供了初步材料，但仍需要模型进一步归纳研究关注点。{_citation_tail(paper_ids)}",
-            "paperIds": paper_ids,
-        }
-    ]
+        return f"暂无足够的年份信息来归纳时间线演化。{_citation_tail(paper_ids)}"
+    return f"现有论文的发表年份覆盖 {min(years)} 至 {max(years)} 年，具体演化过程仍需要模型进一步归纳。{_citation_tail(paper_ids)}"
 
 
 def _paper_ids_from_analyses(analyses: list[JsonObject]) -> list[str]:
@@ -499,6 +499,18 @@ def _list_value(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
 
 
+def _string_list(value: Any) -> list[str]:
+    """只保留列表中的非空文本，避免把错误的复杂结构写入结果。"""
+
+    return [str(item).strip() for item in _list_value(value) if str(item).strip()]
+
+
+def _text_list_with_citation(value: Any, paper_ids: list[str]) -> list[str]:
+    """整理一致点数组，并保证每一条都至少带一个论文引用。"""
+
+    return [_text_with_citation(item, paper_ids) for item in _string_list(value)]
+
+
 def _optional_text(value: Any) -> str | None:
     """把可选值整理成非空字符串。"""
 
@@ -534,4 +546,3 @@ def _shorten_json(value: JsonObject, limit: int) -> JsonObject:
     except json.JSONDecodeError:
         return {"summary": text}
     return parsed if isinstance(parsed, dict) else {"summary": text}
-

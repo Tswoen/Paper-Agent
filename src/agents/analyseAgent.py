@@ -147,6 +147,7 @@ def _subtopic_messages(*, topic: str, group: JsonObject) -> list[JsonObject]:
             "content": (
                 "你是论文综述分析助手。请先认真思考不同论文之间的关系，但最终只输出 JSON，"
                 "不要输出 Markdown、解释文字或代码块。所有判断都必须带论文引用，引用格式使用 [paperId]。"
+                "输出只能包含“输出要求”中的字段，不要添加其他字段。"
             ),
         },
         {
@@ -175,12 +176,13 @@ def _overall_messages(*, topic: str, subtopic_analyses: list[JsonObject]) -> lis
         {
             "subtopic": item.get("subtopic"),
             "paper_count": item.get("paper_count"),
-            "subtopic_summary": item.get("subtopic_summary") or item.get("研究现状"),
+            "paperIds": item.get("paperIds", []),
+            "研究现状": item.get("研究现状", ""),
             "一致点": item.get("一致点", []),
-            "矛盾点": item.get("矛盾点", []),
-            "研究空白": item.get("研究空白", []),
-            "时间线演化": item.get("时间线演化", []),
-            "研究热度趋势": item.get("研究热度趋势", ""),
+            "矛盾点": item.get("矛盾点", ""),
+            "研究空白": item.get("研究空白", ""),
+            "时间线演化": item.get("时间线演化", ""),
+            "技术方法栈演变": item.get("技术方法栈演变", ""),
         }
         for item in subtopic_analyses
     ]
@@ -190,6 +192,7 @@ def _overall_messages(*, topic: str, subtopic_analyses: list[JsonObject]) -> lis
             "content": (
                 "你是论文综述分析助手。请先认真比较各子主题之间的联系和差异，最终只输出 JSON。"
                 "所有结论都尽量保留来自子主题分析中的 [paperId] 引用。"
+                "输出只能包含“输出要求”中的字段，不要添加其他字段。"
             ),
         },
         {
@@ -212,26 +215,12 @@ def _analysis_schema_hint() -> JsonObject:
     """给模型看的输出格式说明。"""
 
     return {
-        "subtopic": "子主题名称，全局综合分析时填“全局综合分析”",
-        "search_keyword": "检索关键词，没有就填空字符串",
-        "paper_count": "本次分析覆盖的论文数量",
-        "paperIds": ["本次分析实际使用的 paperId 列表"],
-        "subtopic_summary": "一段话概括研究现状，必须出现 [paperId]",
-        "研究现状": "和 subtopic_summary 含义相同，可以写得稍详细，必须出现 [paperId]",
-        "一致点": [{"point": "共识点", "paperIds": ["paperId1"], "evidence": "一句话说明，必须出现 [paperId]"}],
-        "矛盾点": [
-            {
-                "title": "矛盾点标题",
-                "positions": [{"claim": "某一方观点", "paperIds": ["paperId1"], "evidence": "必须出现 [paperId]"}],
-                "explanation": "这个矛盾目前怎么解释，必须出现 [paperId]",
-            }
-        ],
-        "研究空白": [{"type": "地区/时间/视角/方法/其他", "gap": "空白说明，必须出现 [paperId]", "paperIds": ["paperId1"]}],
-        "时间线演化": [{"stage": "阶段名称", "years": "年份范围", "feature": "阶段特征，必须出现 [paperId]", "paperIds": ["paperId1"]}],
+        "研究现状": "详细说明当前研究进展、主要发现和代表性工作；相关句子必须使用 [paperId] 引用",
+        "一致点": ["一个一致点用一整段文字说明，并使用 [paperId] 引用"],
+        "矛盾点": "用一整段文字说明不同论文的观点、结果或适用条件为何不同；没有明确矛盾时如实说明；必须使用 [paperId] 引用",
+        "研究空白": "用一整段文字说明尚未解决的问题、数据或方法不足；必须使用 [paperId] 引用",
+        "时间线演化": "用一整段文字按时间说明研究如何演变；必须使用 [paperId] 引用",
         "技术方法栈演变": "方法从早期到近期怎么变化，必须出现 [paperId]",
-        "研究方法趋势": "主流研究方法怎么变化，必须出现 [paperId]",
-        "研究热度趋势": "近2-3年论文数量变化趋势和原因，必须出现 [paperId]",
-        "relationships": [{"relation": "与其他主题或变量的关系", "paperIds": ["paperId1"], "evidence": "必须出现 [paperId]"}],
     }
 
 

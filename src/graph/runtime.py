@@ -222,9 +222,12 @@ class WorkflowNodeReporter:
         """告诉前端这个节点执行到了哪一步。"""
 
         stage = _normalize_stage(extra.get("stage"))
+        # 中文注释：大多数进度都是 running，但单篇论文的某个阶段失败时，
+        # 也需要更新同一张论文卡片为 failed，而不是另外新建一张失败卡片。
+        runtime_status = _normalize_stage(extra.get("runtime_status")) or "running"
         if stage and self._stage_updates_parent(stage):
-            return self._emit_node_runtime_event("running", message, extra)
-        return self._emit_stage_runtime_event("running", message, extra)
+            return self._emit_node_runtime_event(runtime_status, message, extra)
+        return self._emit_stage_runtime_event(runtime_status, message, extra)
 
     def completed(self, message: str | None = None, **extra: Any) -> JsonObject:
         """告诉前端这个节点已经顺利执行完。"""
@@ -308,15 +311,18 @@ class WorkflowNodeReporter:
         )
 
     def artifact(self, artifact: JsonObject, **extra: Any) -> JsonObject:
-        """发送产物事件，同时把“产物已保存”同步到执行过程里。"""
+        """发送产物事件，并按需把“产物已保存”同步到执行过程里。"""
 
         # 中文注释：产物本身仍然走 artifact 事件，方便右侧产物列表复用原来的展示逻辑。
-        # 但执行过程里也需要看到“保存产物”这个步骤，所以这里先发一条 runtime_event。
-        self._emit_stage_runtime_event(
-            "completed",
-            "产物已保存",
-            {**extra, "artifact": copy.deepcopy(artifact)},
-        )
+        # 有些产物保存状态会由业务卡片自己更新，比如“某篇论文的阅读结果已保存”；
+        # 这时可以传 emit_runtime_event=False，避免前端多出一张重复的保存卡片。
+        emit_runtime_event = bool(extra.pop("emit_runtime_event", True))
+        if emit_runtime_event:
+            self._emit_stage_runtime_event(
+                "completed",
+                "产物已保存",
+                {**extra, "artifact": copy.deepcopy(artifact)},
+            )
         return self.sync_port.emit(
             {
                 "event": "artifact",
@@ -352,7 +358,10 @@ class WorkflowNodeReporter:
             resolved_status = status
         else:
             resolved_status = stage_display.status or status
-        resolved_show_content = stage_display.show_content or show_content
+        # 中文注释：有些阶段有默认文案，但单篇论文卡片会传入更具体的说明，
+        # 例如“全文下载失败，已保留摘要阅读结果”。这种具体说明要优先展示。
+        custom_show_content = str(extra.get("show_content") or "").strip()
+        resolved_show_content = custom_show_content or stage_display.show_content or show_content
         custom_event_key = str(extra.get("event_key") or stage_display.event_key).strip() or stage_display.event_key
         custom_title = str(extra.get("stage_title") or stage_display.title).strip() or stage_display.title
         event_id = self._node_event_id() if stage_display.updates_parent else self._step_event_id(custom_event_key)

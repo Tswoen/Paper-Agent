@@ -678,7 +678,6 @@ def _read_result_from_payload(value: Any, papers: list[PaperDocument]) -> PaperR
     )
 
 
-# <question>已经用async的方法代替了，这里没必要保留了吧
 def _persist_completed_paper(
     result: PaperReadResult,
     *,
@@ -695,7 +694,7 @@ def _persist_completed_paper(
         artifact_refs.extend(persisted.artifacts)
         if reporter is not None:
             for artifact in persisted.artifacts:
-                reporter.artifact(artifact, stage="paper_artifact_ready")
+                reporter.artifact(artifact, stage="paper_artifact_ready", emit_runtime_event=False)
     except Exception as exc:
         # 中文注释：写单篇结果失败不应该让整次阅读中断；把原因放进 warnings，
         # 后续汇总或回复时仍能看到这篇论文处理过但保存失败。
@@ -1105,28 +1104,6 @@ def _resolve_reporter(state: State):
     return runtime.sync_port.for_node("read", "论文阅读")
 
 
-def _report_progress(reporter: Any, paper: PaperDocument, stage: str, completed: int, total: int, **extra: Any) -> None:
-    """统一上报当前论文和处理数量，避免不同阶段缺少前端需要的关键信息。"""
-
-    if reporter is None:
-        return
-    messages = {
-        "reading_abstract": "正在阅读论文摘要",
-        "downloading_full_text": "正在下载论文全文",
-        "converting_markdown": "正在将论文转换为 Markdown",
-        "saving_chunks": "正在建立全文检索索引",
-        "paper_completed": "论文阅读完成",
-    }
-    reporter.progress(
-        messages.get(stage, "正在处理论文"),
-        stage=stage,
-        current_title=paper.title,
-        completed=completed,
-        total=total,
-        **extra,
-    )
-
-
 def _build_summary(results: list[PaperReadResult], deep_read_count: int) -> JsonObject:
     """汇总每篇论文的处理结果，让后续节点不必重新遍历全部阅读详情。"""
 
@@ -1198,6 +1175,50 @@ def _summary_paper_item(result: PaperReadResult) -> JsonObject:
         "extraction": dict(result.extraction or empty_extraction()),
         "processing_status": "completed" if result.full_text.status == "indexed" else result.full_text.status,
     }
+
+
+def _paper_completion_runtime_status(result: PaperReadResult) -> str:
+    """根据单篇论文结果判断卡片最终显示完成还是失败。"""
+
+    # 中文注释：下载、转换、索引失败不再让整批阅读中断，
+    # 但对这篇论文来说确实有阶段失败，所以卡片用 failed 更醒目。
+    if result.full_text.status in {"download_failed", "no_url", "parse_failed"}:
+        return "failed"
+    if result.full_text.reason and result.full_text.status not in {"indexed", "not_requested"}:
+        return "failed"
+    if any("失败" in warning or "无法" in warning for warning in result.warnings):
+        return "failed"
+    return "completed"
+
+
+def _paper_completion_message(result: PaperReadResult) -> str:
+    """把单篇论文最终结果整理成用户能看懂的一句话。"""
+
+    status = result.full_text.status
+    if status in {"download_failed", "no_url"}:
+        return "全文下载失败，已保留摘要阅读结果"
+    if status == "parse_failed":
+        return "Markdown 转换失败，已保留摘要阅读结果"
+    if result.full_text.reason and status not in {"indexed", "not_requested"}:
+        return "全文索引失败，已保留阅读结果"
+    if any("全文结构化提取失败" in warning for warning in result.warnings):
+        return "全文结构化信息提取失败，已保存基础阅读结果"
+    if status == "not_requested":
+        return result.full_text.reason or "摘要阅读完成，当前论文不需要全文精读"
+    return "论文阅读完成"
+
+
+def _paper_completion_error_message(result: PaperReadResult) -> str:
+    """提取单篇论文最终失败原因，没有失败时返回空字符串。"""
+
+    if result.full_text.status in {"download_failed", "no_url", "parse_failed"}:
+        return result.full_text.reason or result.full_text.status
+    if result.full_text.reason and result.full_text.status not in {"indexed", "not_requested"}:
+        return result.full_text.reason
+    for warning in result.warnings:
+        if "失败" in warning or "无法" in warning:
+            return warning
+    return ""
 
 
 def _read_errors(results: list[PaperReadResult]) -> list[JsonObject]:
@@ -1302,14 +1323,16 @@ async def _process_papers_concurrently(
                     resource_error = exc
             else:
                 results_by_paper_id[item.paper.id] = result
-                await _persist_completed_paper_async(result, sink=sink, artifact_refs=artifact_refs, reporter=reporter)
+                completion_status = _paper_completion_runtime_status(result)
+                completion_message = _paper_completion_message(result)
+                completion_error = _paper_completion_error_message(result)
                 _set_paper_runtime_status(
                     paper_runtime_statuses,
                     item.paper,
-                    status="completed",
+                    status=completion_status,
                     current_stage="paper_completed",
                     result=result,
-                    error_message="",
+                    error_message=completion_error,
                 )
                 completed = completed_counter.increment()
                 _report_progress(
@@ -1318,8 +1341,28 @@ async def _process_papers_concurrently(
                     "paper_completed",
                     completed,
                     len(papers),
+                    runtime_status=completion_status,
+                    message=completion_message,
                     current_status=result.full_text.status,
                     paper_position=item.position,
+                    error_message=completion_error,
+                )
+                _, save_error = await _persist_completed_paper_async(
+                    result,
+                    sink=sink,
+                    artifact_refs=artifact_refs,
+                    reporter=reporter,
+                    completed=completed,
+                    total=len(papers),
+                    paper_position=item.position,
+                )
+                _set_paper_runtime_status(
+                    paper_runtime_statuses,
+                    item.paper,
+                    status="failed" if save_error or completion_status == "failed" else "completed",
+                    current_stage="paper_artifact_ready",
+                    result=result,
+                    error_message=save_error or completion_error,
                 )
         if resource_error is not None:
             for task in pending:
@@ -1368,15 +1411,51 @@ async def _run_one_paper_task(
             )
         except ReadResourceUnavailableError as exc:
             _mark_paper_waiting_resource(paper_runtime_statuses, item.paper, exc)
+            # 中文注释：资源不可用会让整个阅读节点暂停。这里先更新当前论文卡片，
+            # 让用户一眼看到具体是哪篇论文卡在模型或向量服务上。
+            _report_progress(
+                reporter,
+                item.paper,
+                _paper_stage_from_status(paper_runtime_statuses.get(item.paper.id)),
+                completed_counter.current(),
+                total_paper_count,
+                runtime_status="failed",
+                message=str(exc),
+                paper_position=item.position,
+                error_message=str(exc),
+                recovery_status=exc.recovery_status,
+            )
             raise
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            return PaperReadResult(
+            message = f"当前论文处理失败：{exc}"
+            result = PaperReadResult(
                 paper=item.paper,
                 full_text=FullTextStatus(status="not_requested", reason="当前论文处理发生异常"),
-                warnings=[f"当前论文处理失败：{exc}"],
+                warnings=[message],
             )
+            _set_paper_runtime_status(
+                paper_runtime_statuses,
+                item.paper,
+                status="failed",
+                current_stage=_paper_stage_from_status(paper_runtime_statuses.get(item.paper.id)),
+                result=result,
+                error_message=message,
+            )
+            _report_progress(
+                reporter,
+                item.paper,
+                _paper_stage_from_status(paper_runtime_statuses.get(item.paper.id)),
+                completed_counter.current(),
+                total_paper_count,
+                runtime_status="failed",
+                message="当前论文处理失败",
+                current_status=result.full_text.status,
+                paper_position=item.position,
+                error_message=message,
+            )
+            return result
 
 
 async def _read_one_paper(
@@ -1400,11 +1479,24 @@ async def _read_one_paper(
     paper = item.paper
     title = paper.title.strip()
     if not title:
-        return PaperReadResult(
+        result = PaperReadResult(
             paper=paper,
             full_text=FullTextStatus(status="not_requested", reason="论文没有标题，无法可靠阅读"),
             warnings=["论文缺少标题，未交给模型判断"],
         )
+        _report_progress(
+            reporter,
+            paper,
+            "paper_completed",
+            completed_counter.current(),
+            total_paper_count,
+            runtime_status="failed",
+            message="论文缺少标题，无法阅读",
+            current_status=result.full_text.status,
+            paper_position=item.position,
+            error_message="论文缺少标题，未交给模型判断",
+        )
+        return result
 
     restored_stage = str(item.restored_status.get("current_stage") or "").strip()
     result = item.restored_result
@@ -1446,11 +1538,33 @@ async def _read_one_paper(
     should_deep_read = result.relevance.decision == "deep_read" and result.relevance.score >= config.deep_score_threshold
     if not should_deep_read:
         result.full_text = FullTextStatus(status="not_requested", reason="当前论文只保留摘要笔记")
+        _report_progress(
+            reporter,
+            paper,
+            "paper_completed",
+            completed_counter.current(),
+            total_paper_count,
+            runtime_status="completed",
+            message="摘要阅读完成，当前论文不需要全文精读",
+            current_status=result.full_text.status,
+            paper_position=item.position,
+        )
         return result
 
     if not _paper_has_reserved_deep_read(paper_runtime_statuses, paper):
         if not await deep_read_quota.try_acquire():
             result.full_text = FullTextStatus(status="not_requested", reason="已达到本次全文精读数量上限")
+            _report_progress(
+                reporter,
+                paper,
+                "paper_completed",
+                completed_counter.current(),
+                total_paper_count,
+                runtime_status="completed",
+                message="摘要阅读完成，已达到全文精读数量上限",
+                current_status=result.full_text.status,
+                paper_position=item.position,
+            )
             return result
         _set_paper_runtime_status(
             paper_runtime_statuses,
@@ -1492,6 +1606,18 @@ async def _read_one_paper(
         full_text = FullTextStatus(status=downloaded.status, reason=downloaded.reason, source_url=downloaded.source_url)
         if downloaded.file_path is None:
             result.full_text = full_text
+            _report_progress(
+                reporter,
+                paper,
+                "paper_completed",
+                completed_counter.current(),
+                total_paper_count,
+                runtime_status="failed",
+                message="全文下载失败，已保留摘要阅读结果",
+                current_status=result.full_text.status,
+                paper_position=item.position,
+                error_message=full_text.reason or "全文下载失败",
+            )
             return result
         source_path = downloaded.file_path
         full_text.source_path = str(source_path)
@@ -1528,6 +1654,18 @@ async def _read_one_paper(
                 source_url=full_text.source_url,
                 source_path=str(source_path),
             )
+            _report_progress(
+                reporter,
+                paper,
+                "paper_completed",
+                completed_counter.current(),
+                total_paper_count,
+                runtime_status="failed",
+                message="Markdown 转换失败，已保留摘要阅读结果",
+                current_status=result.full_text.status,
+                paper_position=item.position,
+                error_message=result.full_text.reason or "无法将全文转换为 Markdown",
+            )
             return result
         full_text.status = "markdown_ready"
         full_text.markdown_path = str(converted.markdown_path)
@@ -1548,6 +1686,14 @@ async def _read_one_paper(
         result=result,
         error_message="",
     )
+    _report_progress(
+        reporter,
+        paper,
+        "chunking_full_text",
+        completed_counter.current(),
+        total_paper_count,
+        paper_position=item.position,
+    )
     chunk_build = await async_build_chunks_file(paper, markdown_path=markdown_path)
     full_text.chunk_count = len(chunk_build.chunks)
     result.full_text = full_text
@@ -1559,6 +1705,14 @@ async def _read_one_paper(
         current_stage="extracting_full_text",
         result=result,
         error_message="",
+    )
+    _report_progress(
+        reporter,
+        paper,
+        "extracting_full_text",
+        completed_counter.current(),
+        total_paper_count,
+        paper_position=item.position,
     )
     if llm is None:
         raise ReadModelUnavailableError("未配置可用的阅读模型，无法从全文 chunks 提取论文结构化信息")
@@ -1574,7 +1728,20 @@ async def _read_one_paper(
         raise ReadModelUnavailableError(f"全文提取模型调用失败，请验证阅读模型可用后继续执行：{exc}") from exc
     except (OSError, ValueError) as exc:
         result.extraction = empty_extraction()
-        result.warnings.append(f"全文结构化提取失败：{exc}")
+        warning = f"全文结构化提取失败：{exc}"
+        result.warnings.append(warning)
+        _report_progress(
+            reporter,
+            paper,
+            "extracting_full_text",
+            completed_counter.current(),
+            total_paper_count,
+            runtime_status="failed",
+            message="全文结构化信息提取失败，将继续保存基础阅读结果",
+            current_status=result.full_text.status,
+            paper_position=item.position,
+            error_message=warning,
+        )
         await async_write_failed_extraction(paper, chunks_path=chunk_build.chunks_path, reason=str(exc))
 
     _set_paper_runtime_status(
@@ -1622,6 +1789,18 @@ async def _read_one_paper(
     except (OSError, ValueError) as exc:
         full_text.reason = f"全文已转成 Markdown，但建立索引失败：{exc}"
         result.full_text = full_text
+        _report_progress(
+            reporter,
+            paper,
+            "paper_completed",
+            completed_counter.current(),
+            total_paper_count,
+            runtime_status="failed",
+            message="全文索引失败，已保留阅读结果",
+            current_status=result.full_text.status,
+            paper_position=item.position,
+            error_message=full_text.reason,
+        )
         return result
     full_text.status = "indexed"
     full_text.reason = ""
@@ -1659,19 +1838,53 @@ async def _persist_completed_paper_async(
     sink: ReadPersistenceSink | None,
     artifact_refs: list[JsonObject],
     reporter: Any,
-) -> None:
-    """在 async 阅读流程里把单篇结果落盘，但文件写入本身仍放到线程里。"""
+    completed: int,
+    total: int,
+    paper_position: int,
+) -> tuple[bool, str]:
+    """在 async 阅读流程里把单篇结果落盘，并更新这篇论文自己的卡片。"""
 
     if sink is None:
-        return
+        return True, ""
     try:
         persisted = await asyncio.to_thread(sink.persist_paper, result)
         artifact_refs.extend(persisted.artifacts)
         if reporter is not None:
+            # 中文注释：产物列表仍然需要 artifact 事件，但这里关闭自动生成保存步骤卡片。
+            # 保存成功这件事由下面的 _report_progress 更新当前论文卡片，避免前端多出一张卡片。
             for artifact in persisted.artifacts:
-                    .artifact(artifact, stage="paper_artifact_ready")
+                reporter.artifact(artifact, stage="paper_artifact_ready", emit_runtime_event=False)
+        completion_status = _paper_completion_runtime_status(result)
+        _report_progress(
+            reporter,
+            result.paper,
+            "paper_artifact_ready",
+            completed,
+            total,
+            runtime_status=completion_status,
+            message="单篇阅读结果已保存" if completion_status == "completed" else "单篇阅读结果已保存，但阅读过程中有阶段失败",
+            current_status=result.full_text.status,
+            paper_position=paper_position,
+            artifact_count=len(persisted.artifacts),
+            error_message=_paper_completion_error_message(result),
+        )
+        return True, ""
     except Exception as exc:
-        result.warnings.append(f"阅读结果无法保存到会话目录：{exc}")
+        message = f"阅读结果无法保存到会话目录：{exc}"
+        result.warnings.append(message)
+        _report_progress(
+            reporter,
+            result.paper,
+            "paper_artifact_ready",
+            completed,
+            total,
+            runtime_status="failed",
+            message="单篇阅读结果保存失败",
+            current_status=result.full_text.status,
+            paper_position=paper_position,
+            error_message=message,
+        )
+        return False, message
 
 
 def _restore_paper_runtime_statuses(
@@ -1848,6 +2061,15 @@ def _set_paper_runtime_status(
     paper_runtime_statuses[paper.id] = current
 
 
+def _paper_stage_from_status(status: JsonObject | None) -> str:
+    """从论文状态里取当前阶段，缺失时给前端一个稳定的默认阶段。"""
+
+    # 中文注释：异常处理可能发生在任意位置。这里不猜测复杂流程，
+    # 只读取已经记录过的 current_stage；如果还没记录，就默认算作摘要阅读阶段。
+    stage = str((status or {}).get("current_stage") or "").strip()
+    return stage or "reading_abstract"
+
+
 def _mark_paper_waiting_resource(
     paper_runtime_statuses: dict[str, JsonObject],
     paper: PaperDocument,
@@ -1888,32 +2110,6 @@ def _infer_deep_read_reserved(result: PaperReadResult | None) -> bool:
         return False
     full_text = result.full_text
     return bool(full_text.source_path or full_text.markdown_path or full_text.status in {"downloaded", "markdown_ready", "indexed", "download_failed", "parse_failed"})
-
-
-def _legacy_report_progress(reporter: Any, paper: PaperDocument, stage: str, completed: int, total: int, **extra: Any) -> None:
-    """按论文维度上报实时进度，避免并发后多个论文互相覆盖同一个阶段事件。"""
-
-    if reporter is None:
-        return
-    messages = {
-        "reading_abstract": "正在阅读论文摘要",
-        "downloading_full_text": "正在下载论文全文",
-        "converting_markdown": "正在将论文转换为 Markdown",
-        "saving_chunks": "正在建立全文检索索引",
-        "paper_completed": "论文阅读完成",
-    }
-    reporter.progress(
-        messages.get(stage, "正在处理论文"),
-        stage=stage,
-        event_key=f"paper:{paper.id}",
-        stage_title=paper.title,
-        paper_id=paper.id,
-        paper_title=paper.title,
-        current_title=paper.title,
-        completed=completed,
-        total=total,
-        **extra,
-    )
 
 
 def _build_resume_checkpoint(
@@ -1958,24 +2154,32 @@ def _build_resume_checkpoint(
         checkpoint["resume_hint"] = "embedding 服务验证可用后，把此 checkpoint 作为 read_resume_checkpoint 注入即可继续未完成的论文。"
     return checkpoint
 
-# <question>为什么会有两个一样的_report_progress方法
 def _report_progress(reporter: Any, paper: PaperDocument, stage: str, completed: int, total: int, **extra: Any) -> None:
-    """按论文维度上报实时进度，避免并发后多个论文互相覆盖同一个阶段事件。"""
+    """按论文维度上报实时进度，让同一篇论文始终更新同一张卡片。"""
 
     if reporter is None:
         return
+    # 中文注释：这里的 key 一定要稳定。同一篇论文的摘要、下载、转换、保存等阶段
+    # 都使用同一个 event_key，前端收到后就会更新旧卡片，而不是新增一堆零散卡片。
     messages = {
         "reading_abstract": "正在阅读论文摘要",
         "downloading_full_text": "正在下载论文全文",
-        "converting_markdown": "正在将论文转换为 Markdown",
-        "saving_chunks": "正在建立全文检索索引",
+        "converting_markdown": "正在转换 Markdown",
+        "chunking_full_text": "正在切分全文内容",
+        "extracting_full_text": "正在提取论文结构化信息",
+        "saving_chunks": "正在写入全文索引",
         "paper_completed": "论文阅读完成",
+        "paper_artifact_ready": "单篇阅读结果已保存",
     }
+    runtime_status = str(extra.pop("runtime_status", "running") or "running")
+    message = str(extra.pop("message", messages.get(stage, "正在处理论文")))
     reporter.progress(
-        messages.get(stage, "正在处理论文"),
+        message,
         stage=stage,
         event_key=f"paper:{paper.id}",
         stage_title=paper.title,
+        runtime_status=runtime_status,
+        show_content=message,
         paper_id=paper.id,
         paper_title=paper.title,
         current_title=paper.title,

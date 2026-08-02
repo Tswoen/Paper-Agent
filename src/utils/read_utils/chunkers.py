@@ -77,6 +77,7 @@ class PageChunker(BaseChunker):
     """按 PDF 页码切分 Markdown 的最简单策略。"""
 
     name = "page"
+    max_chunk_characters = 1200
 
     def chunk(self, paper: PaperDocument, markdown: str) -> list[TextChunk]:
         """按 `<!-- page: N -->` 标记切分正文。
@@ -96,6 +97,22 @@ class PageChunker(BaseChunker):
                 continue
             page = part.get("page")
             page_number = int(page) if isinstance(page, int) else None
+            if len(content) > self.max_chunk_characters:
+                for segment_index, page_chunk in enumerate(_split_long_content(content, self.max_chunk_characters), start=1):
+                    page_prefix = f"{paper_id}:p{page_number:04d}" if page_number is not None else f"{paper_id}:c{index:04d}"
+                    chunks.append(
+                        TextChunk(
+                            chunk_id=f"{page_prefix}:s{segment_index:04d}",
+                            paperId=paper_id,
+                            chunk_index=len(chunks),
+                            content=page_chunk,
+                            page_start=page_number,
+                            page_end=page_number,
+                            section=f"page_{page_number}" if page_number is not None else "姝ｆ枃",
+                            metadata={"chunker": self.name},
+                        )
+                    )
+                continue
             chunk_id = f"{paper_id}:p{page_number:04d}" if page_number is not None else f"{paper_id}:c{index:04d}"
             chunks.append(
                 TextChunk(
@@ -128,7 +145,7 @@ def build_chunks_file(
 
     output_path = chunks_path or markdown_path.parent / "chunks.json"
     cached = load_chunks_file(output_path)
-    if cached:
+    if cached and all(len(chunk.content) <= PageChunker.max_chunk_characters for chunk in cached):
         return ChunkBuildResult(chunks_path=output_path, chunks=cached)
     markdown = markdown_path.read_text(encoding="utf-8")
     resolved_chunker = chunker or PageChunker()
@@ -140,6 +157,16 @@ def build_chunks_file(
     }
     output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return ChunkBuildResult(chunks_path=output_path, chunks=chunks)
+
+
+def _split_long_content(content: str, max_characters: int) -> list[str]:
+    """把过长的一页正文切成较小片段，避免一次请求超过服务限制。"""
+
+    return [
+        content[start : start + max_characters].strip()
+        for start in range(0, len(content), max_characters)
+        if content[start : start + max_characters].strip()
+    ]
 
 
 async def async_build_chunks_file(

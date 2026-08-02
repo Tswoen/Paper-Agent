@@ -107,7 +107,8 @@ def run_search_agent_node():
                 stage="intent_ready",
                 search_halted=search_halted,
                 keywords=list(intent.keywords),
-                sources=list(intent.sources),
+                # <question> 如果intent默认应该是全源检索，但intent这里却没有值
+                检索来源=list(intent.sources),
                 max_results=intent.max_results,
             )
             if intent.keywords:

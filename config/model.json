@@ -9,10 +9,10 @@
     },
     "emb_openai": {
       "backend": "openai_compat",
-      "api_key": "sk-8CZRYjDJpr4zIdp89Po0kB0yR4Ro4MUb8RDWBHtZxIqboAuS",
+      "api_key": "sk-mvjhwoypajnggqoasejoqumfaabvifdrvztgvmxdpdyukggy",
       "extra_headers": {},
       "extra_body": {},
-      "api_base": "https://cli.999554.xyz/v1"
+      "api_base": "https://api.siliconflow.cn/v1"
     }
   },
   "agents": {
@@ -39,8 +39,8 @@
     "default_embedding": {
       "label": "Default Embedding",
       "provider": "emb_openai",
-      "model_name": "gemini-embedding-2",
-      "dimensions": 1024,
+      "model_name": "BAAI/bge-m3",
+      "dimensions": null,
       "batch_size": 32
     }
   }
