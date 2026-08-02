@@ -63,7 +63,7 @@ class AnalyseAgent(BaseAgent):
             response = await self.context.llm.provider.chat(
                 _subtopic_messages(topic=topic, group=group),
                 temperature=0.2,
-                max_tokens=4000,
+                # max_tokens=4000,
                 reasoning_effort="medium",
             )
         except Exception as exc:
@@ -79,7 +79,6 @@ class AnalyseAgent(BaseAgent):
             response = await self.context.llm.provider.chat(
                 _overall_messages(topic=topic, subtopic_analyses=subtopic_analyses),
                 temperature=0.2,
-                max_tokens=4000,
                 reasoning_effort="medium",
             )
         except Exception as exc:
@@ -157,8 +156,8 @@ def _subtopic_messages(*, topic: str, group: JsonObject) -> list[JsonObject]:
                     "任务": "按子主题分析阅读节点产出的论文结构化摘要",
                     "用户综述主题": topic,
                     "子主题": group["subtopic"],
-                    "检索关键词": group["search_keyword"],
-                    "允许引用的paperId": paper_ids,
+                    # "检索关键词": group["search_keyword"],
+                    # "允许引用的paperId": paper_ids,
                     "输出要求": _analysis_schema_hint(),
                     "论文结构化摘要": group["papers"],
                 },
@@ -190,9 +189,11 @@ def _overall_messages(*, topic: str, subtopic_analyses: list[JsonObject]) -> lis
         {
             "role": "system",
             "content": (
-                "你是论文综述分析助手。请先认真比较各子主题之间的联系和差异，最终只输出 JSON。"
-                "所有结论都尽量保留来自子主题分析中的 [paperId] 引用。"
-                "输出只能包含“输出要求”中的字段，不要添加其他字段。"
+                "你是论文综述的全域综合分析助手。你的任务是跨子主题升维整合、去重凝练和全局归纳，"
+                "不能把各子主题原文简单拼接，也不能只重复某一个子主题的结论。"
+                "请比较不同子主题的联系、差异、共同规律和适用边界，最终只输出合法 JSON。"
+                "每一个重要判断都必须在句子中保留来自输入分析的 [paperId] 引用；允许使用 Markdown 段落、列表和小标题，"
+                "但 JSON 字符串必须合法转义。输出只能包含“输出要求”中的八个字段，不要添加其他字段。"
             ),
         },
         {
@@ -201,7 +202,7 @@ def _overall_messages(*, topic: str, subtopic_analyses: list[JsonObject]) -> lis
                 {
                     "任务": "根据各子主题分析摘要做全局综合分析",
                     "用户综述主题": topic,
-                    "输出要求": _analysis_schema_hint(),
+                    "输出要求": _overall_analysis_schema_hint(),
                     "各子主题分析摘要": summaries,
                 },
                 ensure_ascii=False,
@@ -221,6 +222,22 @@ def _analysis_schema_hint() -> JsonObject:
         "研究空白": "用一整段文字说明尚未解决的问题、数据或方法不足；必须使用 [paperId] 引用",
         "时间线演化": "用一整段文字按时间说明研究如何演变；必须使用 [paperId] 引用",
         "技术方法栈演变": "方法从早期到近期怎么变化，必须出现 [paperId]",
+    }
+
+
+def _overall_analysis_schema_hint() -> JsonObject:
+    """给综合分析模型的八部分独立输出格式说明。"""
+
+    citation_rule = "使用 Markdown 文本详细作答；每个关键结论都要在句子中引用输入中的 [paperId]，没有证据时明确说明证据不足"
+    return {
+        "领域整体研究概况": f"{citation_rule}；概括整体研究热度、覆盖范围、核心方向、成熟度、核心命题和争议总览",
+        "领域全域共性研究共识": f"{citation_rule}；只保留跨多个子主题或全场景通用的共识，并按研究价值、应用特征、运行规律、基础认知等维度归纳",
+        "领域核心研究争议与矛盾体系": f"{citation_rule}；说明对立观点、支撑文献、争议底层逻辑，以及场景、约束、视角或方法差异造成的适用边界",
+        "领域系统性研究空白与局限": f"{citation_rule}；必须从研究地域、研究视角、研究时长、研究方法、研究内容、研究场景六个维度整理全域缺口",
+        "领域研究时序演化脉络": f"{citation_rule}；依据论文发表时间划分阶段，说明每阶段的整体特征、关注重点、突破和不足",
+        "领域技术与研究方法迭代脉络": f"{citation_rule}；梳理主流技术和方法的更替路径、适配场景、迭代动因、优势与局限",
+        "各子主题横向差异对比分析": f"{citation_rule}；比较各子主题的成熟度、共识统一度、争议集中度、研究缺口体量、技术应用深度和研究丰富度，区分强弱板块",
+        "领域整体总结与研究展望": f"{citation_rule}；总结核心结论、整体价值和约束边界，给出通用实践启示及与研究空白对应的可落地未来方向",
     }
 
 

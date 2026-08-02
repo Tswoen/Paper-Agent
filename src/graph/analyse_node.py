@@ -13,7 +13,8 @@ from src.models.sessions import utc_now
 from src.repositories.sessions.base import SessionRepository
 
 
-ANALYSIS_VERSION = "2.0"
+# 综合分析采用独立的全域八部分结构，因此提升报告版本号。
+ANALYSIS_VERSION = "3.0"
 
 
 def run_analyse_node():
@@ -49,35 +50,53 @@ def run_analyse_node():
         if not groups:
             report = _empty_report(topic=request.topic, model_used=model_used)
         else:
-            subtopic_analyses: list[JsonObject] = []
-            for index, group in enumerate(groups, start=1):
+            completed_subtopic_count = 0
+
+            async def analyse_group(index: int, group: JsonObject) -> JsonObject:
+                """分析一个子主题，并把它自己的进度实时交给前端。"""
+
+                nonlocal completed_subtopic_count
+                subtopic = str(group["subtopic"])
+                # 中文说明：event_key 按子主题序号固定。同一个子主题开始和完成时都会更新
+                # 同一张卡片；多个子主题同时执行时，前端就能分别显示它们的状态。
                 if reporter is not None:
                     reporter.progress(
-                        f"正在分析子主题：{group['subtopic']}",
+                        f"正在分析子主题：{subtopic}",
                         stage="analyse_subtopic",
-                        completed=index - 1,
+                        event_key=f"subtopic:{index}",
+                        stage_title=subtopic,
+                        completed=completed_subtopic_count,
                         total=len(groups),
-                        subtopic=group["subtopic"],
+                        subtopic=subtopic,
                     )
+
                 analysis = await _analyse_one_subtopic(
                     group,
                     topic=request.topic,
                     agent=agent,
                 )
-                subtopic_analyses.append(analysis)
 
-                # 中文说明：上面的 progress 事件表示“正在处理当前子主题”，所以第三个子主题开始时显示的是 2/3。
-                # 子主题真正处理完成后，需要再发一个完成状态，前端才能显示 3/3，并明确知道综合分析可以开始了。
-                # 这里使用 progress 配合 completed 状态，只更新“分析子主题”这一步，不会提前结束整个分析节点。
+                # 中文说明：协程每次从模型调用返回后，会先完整执行这段没有 await 的代码。
+                # 所以计数会按真实完成顺序递增，前端看到的是当前已经完成的子主题总数。
+                completed_subtopic_count += 1
                 if reporter is not None:
                     reporter.progress(
-                        f"子主题分析完成：{group['subtopic']}",
+                        f"子主题分析完成：{subtopic}",
                         stage="analyse_subtopic",
+                        event_key=f"subtopic:{index}",
+                        stage_title=subtopic,
                         runtime_status="completed",
-                        completed=index,
+                        completed=completed_subtopic_count,
                         total=len(groups),
-                        subtopic=group["subtopic"],
+                        subtopic=subtopic,
                     )
+                return analysis
+
+            # 中文说明：先把全部子主题任务都创建出来，再用 gather 一起等待。
+            # gather 会按 groups 的原始顺序返回结果，即使模型完成先后不同，最终报告顺序也不会变化。
+            subtopic_analyses = await asyncio.gather(
+                *(analyse_group(index, group) for index, group in enumerate(groups, start=1))
+            )
 
             if reporter is not None:
                 reporter.progress("正在综合所有子主题的分析结果", stage="analyse_overall")
@@ -135,19 +154,12 @@ async def _analyse_one_subtopic(group: JsonObject, *, topic: str, agent: Analyse
 
 
 async def _analyse_overall(topic: str, subtopic_analyses: list[JsonObject], agent: AnalyseAgent) -> JsonObject:
-    """综合所有子主题的分析摘要，得到全局分析。"""
+    """综合所有子主题的分析摘要，得到独立的八部分全域分析。"""
 
     result = await agent.async_analyse_overall(topic=topic, subtopic_analyses=subtopic_analyses)
     if result.parsed is None:
         return _fallback_overall_analysis(topic, subtopic_analyses, reason=result.reason)
-    group = {
-        "subtopic": "全局综合分析",
-        "search_keyword": "",
-        "paper_count": sum(int(item.get("paper_count") or 0) for item in subtopic_analyses),
-        "paperIds": _paper_ids_from_analyses(subtopic_analyses),
-        "papers": [],
-    }
-    return _normalize_subtopic_analysis(result.parsed, group)
+    return _normalize_overall_analysis(result.parsed, subtopic_analyses)
 
 
 def _build_subtopic_groups(read_results: list[JsonObject], read_summary: JsonObject, search_summary: JsonObject) -> list[JsonObject]:
@@ -279,25 +291,47 @@ def _fallback_subtopic_analysis(group: JsonObject, *, reason: str) -> JsonObject
 
 
 def _fallback_overall_analysis(topic: str, subtopic_analyses: list[JsonObject], *, reason: str) -> JsonObject:
-    """生成兜底全局分析。"""
+    """生成全域八部分综合分析的兜底结果。"""
 
     all_ids = _paper_ids_from_analyses(subtopic_analyses)
     citation = _citation_tail(all_ids)
-    summary = f"《{topic}》目前已完成 {len(subtopic_analyses)} 个子主题的初步分析，后续可继续比较子主题之间的共识、矛盾和空白。{citation}"
+    summary = f"《{topic}》目前已完成 {len(subtopic_analyses)} 个子主题的分析，综合结果将从全域概况、共识、争议、空白、演化、方法、横向差异和展望八个方面归纳。{citation}"
     if reason:
         summary = f"{summary} 说明：{reason}。"
     return {
-        "subtopic": "全局综合分析",
-        "search_keyword": "",
-        "paper_count": sum(int(item.get("paper_count") or 0) for item in subtopic_analyses),
-        "paperIds": all_ids,
-        "研究现状": summary,
-        "一致点": [],
-        "矛盾点": f"暂未能稳定归纳全局矛盾点，需要模型进一步分析。{citation}",
-        "研究空白": f"暂未能稳定归纳全局研究空白，需要模型进一步分析。{citation}",
-        "时间线演化": f"暂未能稳定归纳全局时间线演化，需要模型进一步分析。{citation}",
-        "技术方法栈演变": f"暂未能稳定归纳全局方法栈演变。{citation}",
+        "领域整体研究概况": summary,
+        "领域全域共性研究共识": f"当前暂未能稳定提炼跨子主题的共同结论，建议结合各子主题分析继续归纳。{citation}",
+        "领域核心研究争议与矛盾体系": f"当前暂未能稳定归纳贯穿全领域的争议及其适用边界，建议结合各子主题的分歧证据继续分析。{citation}",
+        "领域系统性研究空白与局限": f"当前暂未能稳定整合全域研究空白，建议从地域、视角、时长、方法、内容和场景六个维度继续核查。{citation}",
+        "领域研究时序演化脉络": f"当前暂未能稳定整理全领域的阶段性演化轨迹，建议依据论文发表时间继续归纳研究重心变化。{citation}",
+        "领域技术与研究方法迭代脉络": f"当前暂未能稳定归纳全领域技术和研究方法的迭代路径，建议结合各阶段论文方法继续分析。{citation}",
+        "各子主题横向差异对比分析": f"当前暂未能稳定比较各子主题的成熟度、共识度、争议度、空白体量和技术应用深度。{citation}",
+        "领域整体总结与研究展望": f"《{topic}》的整体价值、实践启示和后续研究方向仍需在完成上述全域归纳后进一步凝练。{citation}",
     }
+
+
+def _normalize_overall_analysis(parsed: JsonObject, subtopic_analyses: list[JsonObject]) -> JsonObject:
+    """整理模型返回的八部分综合结果，并保证每段文字带有论文引用。"""
+
+    paper_ids = _paper_ids_from_analyses(subtopic_analyses)
+    fallback = _fallback_overall_analysis("当前研究领域", subtopic_analyses, reason="")
+    fields = (
+        "领域整体研究概况",
+        "领域全域共性研究共识",
+        "领域核心研究争议与矛盾体系",
+        "领域系统性研究空白与局限",
+        "领域研究时序演化脉络",
+        "领域技术与研究方法迭代脉络",
+        "各子主题横向差异对比分析",
+        "领域整体总结与研究展望",
+    )
+    normalized: JsonObject = {
+        # 中文说明：这八个字段是综合分析专用结构，不再复用子主题的六个分析字段。
+        # 每个字段都是可以直接渲染 Markdown 的文字，并补上可追溯的 [paperId] 引用。
+        field: _text_with_citation(parsed.get(field) or fallback[field], paper_ids)
+        for field in fields
+    }
+    return normalized
 
 
 def _build_final_report(
@@ -313,7 +347,7 @@ def _build_final_report(
     return {
         "analysis_version": ANALYSIS_VERSION,
         "topic": topic,
-        "overall_framework": overall_analysis.get("研究现状") or "",
+        "overall_framework": overall_analysis.get("领域整体研究概况") or "",
         "overall_analysis": overall_analysis,
         "subtopic_analyses": subtopic_analyses,
         "execution_metadata": {
