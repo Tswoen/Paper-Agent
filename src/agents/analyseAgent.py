@@ -54,7 +54,7 @@ class AnalyseAgent(BaseAgent):
 
         raise NotImplementedError("AnalyseAgent 请使用 async_analyse_subtopic 或 async_analyse_overall")
 
-    async def async_analyse_subtopic(self, *, topic: str, group: JsonObject) -> AnalyseModelResult:
+    async def async_analyse_subtopic(self, *, topic: str, group: JsonObject, usage_callback: Any | None = None) -> AnalyseModelResult:
         """分析一个子主题，并返回解析后的 JSON。"""
 
         if self.context.llm is None:
@@ -68,9 +68,10 @@ class AnalyseAgent(BaseAgent):
             )
         except Exception as exc:
             return AnalyseModelResult(reason=f"分析模型调用失败：{exc}")
+        self.report_usage(response, usage_callback)
         return _parse_response(response)
 
-    async def async_analyse_overall(self, *, topic: str, subtopic_analyses: list[JsonObject]) -> AnalyseModelResult:
+    async def async_analyse_overall(self, *, topic: str, subtopic_analyses: list[JsonObject], usage_callback: Any | None = None) -> AnalyseModelResult:
         """综合所有子主题分析，并返回解析后的 JSON。"""
 
         if self.context.llm is None:
@@ -83,6 +84,7 @@ class AnalyseAgent(BaseAgent):
             )
         except Exception as exc:
             return AnalyseModelResult(reason=f"分析模型调用失败：{exc}")
+        self.report_usage(response, usage_callback)
         return _parse_response(response)
 
 
@@ -113,11 +115,11 @@ def load_analyse_agent_llm(
         return None
 
 
-def build_analyse_agent(llm: ProviderSnapshot | None | str = "auto") -> AnalyseAgent:
+def build_analyse_agent(llm: ProviderSnapshot | None | str = "auto", usage_callback: Any | None = None) -> AnalyseAgent:
     """构建一个最小可用的 AnalyseAgent。"""
 
     resolved_llm = load_analyse_agent_llm() if llm == "auto" else llm
-    context = AgentContext(spec=AnalyseAgent.spec, llm=resolved_llm)
+    context = AgentContext(spec=AnalyseAgent.spec, llm=resolved_llm, usage_callback=usage_callback)
     return AnalyseAgent(context)
 
 

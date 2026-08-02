@@ -70,10 +70,24 @@ def run_analyse_node():
                         subtopic=subtopic,
                     )
 
+                def report_subtopic_usage(usage: JsonObject) -> None:
+                    """把当前子主题模型的真实 token 用量更新到对应子卡片。"""
+
+                    if reporter is not None:
+                        reporter.progress(
+                            "子主题模型调用完成",
+                            stage="analyse_subtopic",
+                            event_key=f"subtopic:{index}",
+                            stage_title=subtopic,
+                            subtopic=subtopic,
+                            **usage,
+                        )
+
                 analysis = await _analyse_one_subtopic(
                     group,
                     topic=request.topic,
                     agent=agent,
+                    usage_callback=report_subtopic_usage,
                 )
 
                 # 中文说明：协程每次从模型调用返回后，会先完整执行这段没有 await 的代码。
@@ -101,10 +115,17 @@ def run_analyse_node():
             if reporter is not None:
                 reporter.progress("正在综合所有子主题的分析结果", stage="analyse_overall")
 
+            def report_overall_usage(usage: JsonObject) -> None:
+                """把综合分析模型的真实 token 用量更新到综合分析卡片。"""
+
+                if reporter is not None:
+                    reporter.progress("综合分析模型调用完成", stage="analyse_overall", **usage)
+
             overall_analysis = await _analyse_overall(
                 topic=request.topic,
                 subtopic_analyses=subtopic_analyses,
                 agent=agent,
+                usage_callback=report_overall_usage,
             )
             report = _build_final_report(
                 topic=request.topic,
@@ -139,7 +160,7 @@ def run_analyse_node():
     return _node
 
 
-async def _analyse_one_subtopic(group: JsonObject, *, topic: str, agent: AnalyseAgent) -> JsonObject:
+async def _analyse_one_subtopic(group: JsonObject, *, topic: str, agent: AnalyseAgent, usage_callback: Any | None = None) -> JsonObject:
     """分析一个子主题。
 
     中文说明：
@@ -147,16 +168,16 @@ async def _analyse_one_subtopic(group: JsonObject, *, topic: str, agent: Analyse
     这样逻辑简单，用户想排查结果时也能直接回到 read_results 找来源。
     """
 
-    result = await agent.async_analyse_subtopic(topic=topic, group=group)
+    result = await agent.async_analyse_subtopic(topic=topic, group=group, usage_callback=usage_callback)
     if result.parsed is None:
         return _fallback_subtopic_analysis(group, reason=result.reason)
     return _normalize_subtopic_analysis(result.parsed, group)
 
 
-async def _analyse_overall(topic: str, subtopic_analyses: list[JsonObject], agent: AnalyseAgent) -> JsonObject:
+async def _analyse_overall(topic: str, subtopic_analyses: list[JsonObject], agent: AnalyseAgent, usage_callback: Any | None = None) -> JsonObject:
     """综合所有子主题的分析摘要，得到独立的八部分全域分析。"""
 
-    result = await agent.async_analyse_overall(topic=topic, subtopic_analyses=subtopic_analyses)
+    result = await agent.async_analyse_overall(topic=topic, subtopic_analyses=subtopic_analyses, usage_callback=usage_callback)
     if result.parsed is None:
         return _fallback_overall_analysis(topic, subtopic_analyses, reason=result.reason)
     return _normalize_overall_analysis(result.parsed, subtopic_analyses)

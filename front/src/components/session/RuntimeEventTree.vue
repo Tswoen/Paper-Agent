@@ -149,7 +149,10 @@ function resumeHint(event: UIRuntimeTimelineEvent) {
             </span>
             <span class="runtime-event-show">{{ event.showContent }}</span>
           </span>
-          <time class="runtime-event-time">{{ formatTime(eventTime(event)) }}</time>
+          <span class="runtime-event-meta">
+            <time class="runtime-event-time">{{ formatTime(eventTime(event)) }}</time>
+            <span class="runtime-event-tokens">输入 {{ event.inputTokens }} · 输出 {{ event.outputTokens }}</span>
+          </span>
         </summary>
 
         <details v-if="hasDetail(event)" class="runtime-event-detail">
@@ -204,7 +207,10 @@ function resumeHint(event: UIRuntimeTimelineEvent) {
             继续执行
           </button>
         </span>
-        <time class="runtime-event-time">{{ formatTime(eventTime(event)) }}</time>
+        <span class="runtime-event-meta">
+          <time class="runtime-event-time">{{ formatTime(eventTime(event)) }}</time>
+          <span class="runtime-event-tokens">输入 {{ event.inputTokens }} · 输出 {{ event.outputTokens }}</span>
+        </span>
       </div>
     </li>
   </ol>

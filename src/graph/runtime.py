@@ -449,6 +449,11 @@ class WorkflowNodeReporter:
             "completed_at": now if status in _DONE_STATUSES else None,
             "content": show_content,
         }
+        # 只有模型回调明确提供用量时才覆盖卡片数字，普通进度更新不会把已有用量清零。
+        if "input_tokens" in extra:
+            payload["input_tokens"] = _token_count(extra.get("input_tokens"))
+        if "output_tokens" in extra:
+            payload["output_tokens"] = _token_count(extra.get("output_tokens"))
         return self.sync_port.emit(payload)
 
     def _runtime_metadata(self, extra: JsonObject, stage_display: RuntimeStageDisplay | None) -> JsonObject:
@@ -502,6 +507,15 @@ def _normalize_stage(value: Any) -> str | None:
 
     text = str(value or "").strip()
     return text or None
+
+
+def _token_count(value: Any) -> int:
+    """把 token 数整理成非负整数，避免异常返回值影响运行事件。"""
+
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _humanize_stage(stage: str) -> str:

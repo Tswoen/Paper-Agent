@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from typing import Any
 
 from src.llm import ProviderSnapshot
 
 from .contracts import AgentRole, JsonObject
+from src.llm.base import normalize_token_usage
 from .environment import AgentEnvironment
 from .skills import SkillRegistry
 from .tools import ToolRegistry
@@ -42,6 +44,8 @@ class AgentContext:
     skills: SkillRegistry = field(default_factory=SkillRegistry)
     environment: AgentEnvironment = field(default_factory=AgentEnvironment)
     trace: JsonObject = field(default_factory=dict)
+    # 模型调用完成后由节点提供回调，把真实用量写入对应的运行卡片。
+    usage_callback: Any | None = None
 
 
 class BaseAgent(ABC):
@@ -75,6 +79,14 @@ class BaseAgent(ABC):
         missing = [key for key in self.spec.input_keys if key not in state]
         if missing:
             raise ValueError(f"{self.spec.name} missing required state keys: {missing}")
+
+    def report_usage(self, response: object, callback: Any | None = None) -> None:
+        """把模型返回的 usage 交给当前阶段，绝不根据文本长度估算 token。"""
+
+        usage = normalize_token_usage(getattr(response, "usage", None))
+        target = callback or self.context.usage_callback
+        if callable(target):
+            target(usage)
 
     @abstractmethod
     def _run(self, state: JsonObject) -> JsonObject:

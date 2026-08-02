@@ -111,7 +111,7 @@ class SearchAgent(BaseAgent):
             },
         }
 
-    def _generate_keywords_with_llm(self, state: JsonObject) -> tuple[SearchPlan | None, str | None, JsonObject]:
+    def _generate_keywords_with_llm(self, state: JsonObject, usage_callback: Any | None = None) -> tuple[SearchPlan | None, str | None, JsonObject]:
         """调用大模型生成检索计划。
 
         返回值包含：
@@ -124,6 +124,7 @@ class SearchAgent(BaseAgent):
             return None, None, {"used_llm": False, "status": "no_llm", "message": "未注入可用 LLM，搜索阶段已终止。"}
         messages = self._build_llm_messages(state)
         response = self.context.llm.provider.chat_with_retry(messages, max_tokens=800)
+        self.report_usage(response, usage_callback)
         raw_model_output = response.content or ""
         if not response.ok:
             return (
@@ -148,13 +149,14 @@ class SearchAgent(BaseAgent):
             )
         return plan, raw_model_output, {"used_llm": True, "status": "ok", "message": "已使用大模型生成检索关键词。"}
 
-    async def _generate_keywords_with_llm_async(self, state: JsonObject) -> tuple[SearchPlan | None, str | None, JsonObject]:
+    async def _generate_keywords_with_llm_async(self, state: JsonObject, usage_callback: Any | None = None) -> tuple[SearchPlan | None, str | None, JsonObject]:
         """异步调用大模型生成检索计划。"""
 
         if self.context.llm is None:
             return None, None, {"used_llm": False, "status": "no_llm", "message": "未注入可用 LLM，搜索阶段已终止。"}
         messages = self._build_llm_messages(state)
         response = await self._call_provider_chat_async(messages)
+        self.report_usage(response, usage_callback)
         raw_model_output = response.content or ""
         if not response.ok:
             return (

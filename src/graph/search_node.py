@@ -88,7 +88,13 @@ def run_search_agent_node():
             reporter.started("正在生成检索条件", stage="plan_search")
             reporter.reasoning_delta("正在根据主题生成检索关键词、来源范围和筛选条件。", stage="plan_search")
 
-        agent = SearchAgent(AgentContext(llm=resolved_llm))
+        def report_search_usage(usage: JsonObject) -> None:
+            """把检索条件模型的真实 token 用量更新到检索子卡片。"""
+
+            if reporter is not None:
+                reporter.progress("检索条件模型调用完成", stage="plan_search", **usage)
+
+        agent = SearchAgent(AgentContext(llm=resolved_llm, usage_callback=report_search_usage))
         agent_update = await agent.async_run(state)
         intent = agent_update["search_intent"]
         search_halted = bool(agent_update.get("search_halted"))
@@ -635,4 +641,3 @@ def _score_threshold(tokens: list[str]) -> float:
     if token_count >= 3:
         return 2.5
     return 1.5
-

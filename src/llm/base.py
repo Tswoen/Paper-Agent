@@ -103,6 +103,49 @@ class LLMResponse:
         return self.finish_reason != "error"
 
 
+def normalize_token_usage(usage: Mapping[str, Any] | None) -> JsonObject:
+    """把不同模型服务商返回的用量字段整理成统一的输入和输出数量。"""
+
+    if not isinstance(usage, MappingABC):
+        return {"input_tokens": 0, "output_tokens": 0}
+
+    # OpenAI 常用 prompt/completion，Anthropic 常用 input/output，其他兼容服务还会使用带 count 的写法。
+    input_keys = (
+        "input_tokens",
+        "prompt_tokens",
+        "input_token_count",
+        "prompt_token_count",
+        "inputTokenCount",
+        "promptTokenCount",
+    )
+    output_keys = (
+        "output_tokens",
+        "completion_tokens",
+        "output_token_count",
+        "completion_token_count",
+        "outputTokenCount",
+        "candidatesTokenCount",
+        "completionTokenCount",
+    )
+
+    def read_count(keys: tuple[str, ...]) -> int:
+        for key in keys:
+            value = usage.get(key)
+            if isinstance(value, MappingABC):
+                value = value.get("count")
+            try:
+                if value is not None:
+                    return max(0, int(value))
+            except (TypeError, ValueError):
+                continue
+        return 0
+
+    return {
+        "input_tokens": read_count(input_keys),
+        "output_tokens": read_count(output_keys),
+    }
+
+
 @dataclass(slots=True)
 class EmbeddingResponse:
     # embedding 的主结果是向量列表，所以单独定义响应对象，不和文本回复混在一起。

@@ -154,6 +154,7 @@ class WritingAgent(BaseAgent):
         topic: str,
         sections: list[JsonObject],
         word_count: int = 300,
+        usage_callback: Any | None = None,
     ) -> tuple[str, str]:
         """根据已经完成的正文生成摘要。
 
@@ -174,6 +175,8 @@ class WritingAgent(BaseAgent):
             )
         except Exception as exc:
             return _fallback_abstract(topic, sections), f"摘要模型调用失败，已使用保守摘要：{exc}"
+
+        self.report_usage(response, usage_callback)
 
         raw_output = str(getattr(response, "content", "") or "")
         if not getattr(response, "ok", False):
@@ -208,6 +211,7 @@ class WritingAgent(BaseAgent):
             max_tokens=5000,
             reasoning_effort="medium",
         )
+        self._notify_section_usage(state, response)
         raw_output = str(getattr(response, "content", "") or "")
         raw_outputs = [*list(state.get("raw_model_outputs") or []), raw_output]
         if not response.ok:
@@ -307,6 +311,7 @@ class WritingAgent(BaseAgent):
             max_tokens=1200,
             reasoning_effort="medium",
         )
+        self._notify_section_usage(state, response)
         raw_output = str(getattr(response, "content", "") or "")
         raw_outputs = [*list(state.get("raw_model_outputs") or []), raw_output]
         if not response.ok:
@@ -379,6 +384,16 @@ def _notify_section_progress(state: SectionLoopState, message: str) -> None:
     callback = state.get("progress_callback")
     if callable(callback):
         callback(message)
+
+
+def _notify_section_usage(state: SectionLoopState, response: object) -> None:
+    """把小节内部每一次模型调用的真实用量交给外层小节卡片。"""
+
+    callback = state.get("progress_callback")
+    if callable(callback):
+        from src.llm.base import normalize_token_usage
+
+        callback("模型调用完成", normalize_token_usage(getattr(response, "usage", None)))
 
 
 def get_extraction(

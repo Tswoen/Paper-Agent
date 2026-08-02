@@ -40,7 +40,7 @@ class WritingOutlineAgent(BaseAgent):
 
         raise NotImplementedError("WritingOutlineAgent 请使用 async_generate_outline")
 
-    async def async_generate_outline(self, state: JsonObject) -> tuple[JsonObject | None, str, str]:
+    async def async_generate_outline(self, state: JsonObject, usage_callback: Any | None = None) -> tuple[JsonObject | None, str, str]:
         """调用大模型生成大纲。
 
         返回值说明：
@@ -61,6 +61,7 @@ class WritingOutlineAgent(BaseAgent):
             )
         except Exception as exc:
             return None, "", f"写作大纲模型调用失败：{exc}"
+        self.report_usage(response, usage_callback)
 
         raw_model_output = str(getattr(response, "content", "") or "")
         if not getattr(response, "ok", False):
@@ -98,11 +99,11 @@ def load_writing_outline_agent_llm(
         return None
 
 
-def build_writing_outline_agent(llm: ProviderSnapshot | None | str = "auto") -> WritingOutlineAgent:
+def build_writing_outline_agent(llm: ProviderSnapshot | None | str = "auto", usage_callback: Any | None = None) -> WritingOutlineAgent:
     """构建一个可直接使用的 WritingOutlineAgent。"""
 
     resolved_llm = load_writing_outline_agent_llm() if llm == "auto" else llm
-    context = AgentContext(spec=WritingOutlineAgent.spec, llm=resolved_llm)
+    context = AgentContext(spec=WritingOutlineAgent.spec, llm=resolved_llm, usage_callback=usage_callback)
     return WritingOutlineAgent(context)
 
 

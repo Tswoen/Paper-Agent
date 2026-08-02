@@ -47,6 +47,8 @@ function createRuntimeEvent(partial: Partial<UIRuntimeTimelineEvent> & { id: str
     nextPosition: partial.nextPosition ?? null,
     completed: partial.completed ?? null,
     total: partial.total ?? null,
+    inputTokens: partial.inputTokens ?? 0,
+    outputTokens: partial.outputTokens ?? 0,
     raw: partial.raw ?? ({ event: "runtime_event", session_key: "" } as SessionRuntimeEvent),
   };
 }
@@ -290,6 +292,8 @@ export class SessionStreamAggregator {
     } else {
       this.attachRoot(item);
     }
+    // 每次子卡片变化后都重新汇总，父卡片始终等于所有子卡片之和。
+    this.recalculateTokenTotals();
 
     if (item.status === "failed" && this.hasRecoveryCheckpoint(item)) {
       this.markLatestResumeEvent(item);
@@ -350,7 +354,43 @@ export class SessionStreamAggregator {
     item.nextPosition = typeof metadata.next_position === "number" ? metadata.next_position : item.nextPosition;
     item.completed = typeof metadata.completed === "number" ? metadata.completed : item.completed;
     item.total = typeof metadata.total === "number" ? metadata.total : item.total;
+    if (typeof event.input_tokens === "number") {
+      item.inputTokens = Math.max(0, event.input_tokens);
+    } else if (typeof metadata.input_tokens === "number") {
+      item.inputTokens = Math.max(0, metadata.input_tokens);
+    }
+    if (typeof event.output_tokens === "number") {
+      item.outputTokens = Math.max(0, event.output_tokens);
+    } else if (typeof metadata.output_tokens === "number") {
+      item.outputTokens = Math.max(0, metadata.output_tokens);
+    }
     item.raw = event;
+  }
+
+  /** 叶子卡片使用模型返回值，父卡片只显示当前所有子卡片的合计。 */
+  private recalculateTokenTotals() {
+    const update = (event: UIRuntimeTimelineEvent): { input: number; output: number } => {
+      if (event.children.length === 0) {
+        return { input: event.inputTokens, output: event.outputTokens };
+      }
+      const total = event.children.reduce(
+        (sum, child) => {
+          const childTotal = update(child);
+          return {
+            input: sum.input + childTotal.input,
+            output: sum.output + childTotal.output,
+          };
+        },
+        { input: 0, output: 0 },
+      );
+      event.inputTokens = total.input;
+      event.outputTokens = total.output;
+      return total;
+    };
+
+    for (const event of this.runtimeEvents) {
+      update(event);
+    }
   }
 
   /** 把子事件挂到父事件下面；如果已经挂过，就只保持原位置，不重复插入。 */
@@ -464,6 +504,8 @@ export class SessionStreamAggregator {
     return {
       ...event,
       metadata: { ...event.metadata },
+      inputTokens: event.inputTokens,
+      outputTokens: event.outputTokens,
       children: event.children.map((child) => this.cloneRuntimeEvent(child)),
     };
   }

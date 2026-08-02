@@ -57,10 +57,15 @@ def run_writing_node():
             )
 
         for index, section_task in enumerate(section_tasks, start=1):
-            def report_section_phase(message: str, *, task=section_task) -> None:
+            section_usage = {"input_tokens": 0, "output_tokens": 0}
+
+            def report_section_phase(message: str, usage: JsonObject | None = None, *, task=section_task) -> None:
                 """把当前小节的内部阶段更新到它自己的卡片上。"""
 
                 if reporter is not None:
+                    if usage:
+                        section_usage["input_tokens"] += int(usage.get("input_tokens") or 0)
+                        section_usage["output_tokens"] += int(usage.get("output_tokens") or 0)
                     reporter.progress(
                         message,
                         stage="writing_section",
@@ -69,6 +74,7 @@ def run_writing_node():
                         section_id=task["section_id"],
                         event_key=f"writing_section:{task['section_id']}",
                         stage_title=str(task.get("section_title") or task["section_id"]),
+                        **(section_usage if usage else {}),
                     )
 
             if reporter is not None:
@@ -122,10 +128,17 @@ def run_writing_node():
 
         if reporter is not None:
             reporter.progress("正在根据正文生成摘要", stage="writing_abstract")
+        def report_abstract_usage(usage: JsonObject) -> None:
+            """把摘要模型的真实 token 用量更新到摘要卡片。"""
+
+            if reporter is not None:
+                reporter.progress("摘要模型调用完成", stage="writing_abstract", **usage)
+
         abstract, abstract_status = await agent.async_write_abstract(
             topic=request.topic,
             sections=written_sections,
             word_count=300,
+            usage_callback=report_abstract_usage,
         )
 
         # 中文说明：引用顺序以正文里 paperId 第一次出现的位置为准，

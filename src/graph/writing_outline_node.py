@@ -39,7 +39,17 @@ def run_writing_outline_node():
         if reporter is not None:
             reporter.started("正在根据分析结果生成写作大纲", stage="writing_outline_start")
 
-        outline, raw_model_output, reason = await _generate_outline(state, agent=agent)
+        def report_outline_usage(usage: JsonObject) -> None:
+            """把写作大纲模型返回的真实 token 用量更新到大纲卡片。"""
+
+            if reporter is not None:
+                reporter.progress("写作大纲模型调用完成", stage="writing_outline", **usage)
+
+        outline, raw_model_output, reason = await _generate_outline(
+            state,
+            agent=agent,
+            usage_callback=report_outline_usage,
+        )
         used_llm = outline is not None and reason == "ok"
         if outline is None:
             outline = _fallback_outline(topic=request.topic, analysis_report=analysis_report)
@@ -93,10 +103,10 @@ def run_writing_outline_node():
     return _node
 
 
-async def _generate_outline(state: State, *, agent: WritingOutlineAgent) -> tuple[JsonObject | None, str, str]:
+async def _generate_outline(state: State, *, agent: WritingOutlineAgent, usage_callback: Any | None = None) -> tuple[JsonObject | None, str, str]:
     """调用 Agent 生成大纲，并把空结果当作失败处理。"""
 
-    outline, raw_model_output, reason = await agent.async_generate_outline(dict(state))
+    outline, raw_model_output, reason = await agent.async_generate_outline(dict(state), usage_callback=usage_callback)
     if not _outline_is_complete(outline):
         return None, raw_model_output, reason if reason != "ok" else "模型返回的大纲为空"
     return outline, raw_model_output, reason

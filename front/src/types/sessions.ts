@@ -133,6 +133,8 @@ export interface SessionRuntimeEvent {
   next_position?: number;
   completed?: number;
   total?: number;
+  input_tokens?: number;
+  output_tokens?: number;
 }
 
 export interface UISessionMessage {
@@ -169,6 +171,8 @@ export interface UIRuntimeTimelineEvent {
   nextPosition: number | null;
   completed: number | null;
   total: number | null;
+  inputTokens: number;
+  outputTokens: number;
   raw: SessionRuntimeEvent;
 }
 

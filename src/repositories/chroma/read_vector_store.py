@@ -4,9 +4,10 @@ import asyncio
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from src.llm import LLMProvider
+from src.llm.base import normalize_token_usage
 from src.paper_retrieval.models import PaperDocument
 from src.repositories.chroma.vector_store import VectorUpsertItem, make_chroma_store, normalize_chroma_metadata
 from src.utils.read_utils.chunkers import PageChunker, TextChunk, load_chunks_file
@@ -91,6 +92,7 @@ async def async_index_markdown_chunks(
     chunk_overlap: int,
     embedding_connection: EmbeddingConnection,
     runtime_resources: WorkflowRuntimeResources | None = None,
+    usage_callback: Callable[[dict[str, int]], None] | None = None,
 ) -> ChunkIndexResult:
     """异步兼容入口，把 Markdown 临时按页切分后写入向量库。
 
@@ -110,6 +112,7 @@ async def async_index_markdown_chunks(
         collection_name=collection_name,
         embedding_connection=embedding_connection,
         runtime_resources=runtime_resources,
+        usage_callback=usage_callback,
     )
 
 
@@ -122,6 +125,7 @@ async def async_index_chunk_file(
     collection_name: str,
     embedding_connection: EmbeddingConnection,
     runtime_resources: WorkflowRuntimeResources | None = None,
+    usage_callback: Callable[[dict[str, int]], None] | None = None,
 ) -> ChunkIndexResult:
     """把 chunks.json 写入向量库。
 
@@ -141,6 +145,7 @@ async def async_index_chunk_file(
         collection_name=collection_name,
         embedding_connection=embedding_connection,
         runtime_resources=runtime_resources,
+        usage_callback=usage_callback,
     )
 
 
@@ -154,6 +159,7 @@ async def _index_chunks(
     collection_name: str,
     embedding_connection: EmbeddingConnection,
     runtime_resources: WorkflowRuntimeResources | None,
+    usage_callback: Callable[[dict[str, int]], None] | None = None,
 ) -> ChunkIndexResult:
     """给一组正文片段生成向量并写入 Chroma。"""
 
@@ -162,6 +168,7 @@ async def _index_chunks(
         [chunk.content for chunk in chunks],
         embedding_connection,
         runtime_resources=runtime_resources,
+        usage_callback=usage_callback,
     )
     if len(embeddings) != len(chunks):
         raise RuntimeError("embedding 返回数量和正文片段数量不一致")
@@ -177,6 +184,7 @@ async def _create_embeddings_async(
     connection: EmbeddingConnection,
     *,
     runtime_resources: WorkflowRuntimeResources | None = None,
+    usage_callback: Callable[[dict[str, int]], None] | None = None,
 ) -> list[list[float]]:
     """分批调用 embedding 服务。
 
@@ -197,6 +205,9 @@ async def _create_embeddings_async(
             raise RuntimeError(f"embedding provider 不支持当前模型向量化：{exc}") from exc
         except Exception as exc:
             raise RuntimeError(f"embedding 服务调用失败：{exc}") from exc
+        if callable(usage_callback):
+            # embedding 供应商也会在响应里返回 usage，这里直接使用，不根据文本长度估算。
+            usage_callback(normalize_token_usage(getattr(response, "usage", None)))
         if not response.ok:
             detail = response.content.strip() or response.error_code or response.error_type or response.error_kind or "未知错误"
             raise RuntimeError(f"embedding 服务调用失败：{detail}")

@@ -81,7 +81,7 @@ class ReadAgent(BaseAgent):
             "warnings": result.warnings,
         }
 
-    def read_abstract(self, paper: PaperDocument, *, topic: str, constraints: JsonObject) -> AbstractReadResult:
+    def read_abstract(self, paper: PaperDocument, *, topic: str, constraints: JsonObject, usage_callback: Any | None = None) -> AbstractReadResult:
         """同步阅读摘要，返回结构化笔记和相关性判断。"""
 
         if not (paper.abstract or "").strip():
@@ -95,6 +95,7 @@ class ReadAgent(BaseAgent):
             )
         except Exception as exc:
             raise ReadAgentModelUnavailableError(f"阅读模型调用失败，请验证当前模型可用后继续执行：{exc}") from exc
+        self.report_usage(response, usage_callback)
         return self._result_from_response(paper, response)
 
     async def async_read_abstract(
@@ -104,6 +105,7 @@ class ReadAgent(BaseAgent):
         topic: str,
         constraints: JsonObject,
         semaphore: asyncio.Semaphore | None = None,
+        usage_callback: Any | None = None,
     ) -> AbstractReadResult:
         """异步阅读摘要，供新版并发阅读节点直接调用。"""
 
@@ -118,6 +120,7 @@ class ReadAgent(BaseAgent):
             )
         except Exception as exc:
             raise ReadAgentModelUnavailableError(f"阅读模型调用失败，请验证当前模型可用后继续执行：{exc}") from exc
+        self.report_usage(response, usage_callback)
         return self._result_from_response(paper, response)
 
     async def _call_provider_chat_async(
@@ -310,9 +313,9 @@ def load_read_agent_llm(
         return None
 
 
-def build_read_agent(llm: ProviderSnapshot | None | str = "auto") -> ReadAgent:
+def build_read_agent(llm: ProviderSnapshot | None | str = "auto", usage_callback: Any | None = None) -> ReadAgent:
     """构建一个最小可用的 ReadAgent。"""
 
     resolved_llm = load_read_agent_llm() if llm == "auto" else llm
-    context = AgentContext(spec=ReadAgent.spec, llm=resolved_llm)
+    context = AgentContext(spec=ReadAgent.spec, llm=resolved_llm, usage_callback=usage_callback)
     return ReadAgent(context)

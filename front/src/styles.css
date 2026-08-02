@@ -1490,6 +1490,20 @@ a {
   white-space: nowrap;
 }
 
+.runtime-event-meta {
+  display: grid;
+  justify-items: end;
+  gap: 3px;
+  min-width: 132px;
+}
+
+.runtime-event-tokens {
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  white-space: nowrap;
+}
+
 .runtime-event-children {
   position: relative;
   margin-left: 40px;
@@ -1775,6 +1789,11 @@ a {
 
   .runtime-event-time {
     grid-column: 3;
+  }
+
+  .runtime-event-meta {
+    grid-column: 3;
+    justify-items: start;
   }
 
   .runtime-event-children {

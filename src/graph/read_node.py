@@ -973,10 +973,10 @@ def _legacy_read_one_paper(
     return result, True
 
 
-def _read_agent_from_llm(llm: ProviderSnapshot | None):
+def _read_agent_from_llm(llm: ProviderSnapshot | None, usage_callback: Any | None = None):
     """根据节点已经解析出的模型快照创建阅读 Agent。"""
 
-    return build_read_agent(llm)
+    return build_read_agent(llm, usage_callback=usage_callback)
 
 
 def _legacy_build_abstract_note(
@@ -1478,6 +1478,7 @@ async def _read_one_paper(
 
     paper = item.paper
     title = paper.title.strip()
+    paper_usage = {"input_tokens": 0, "output_tokens": 0}
     if not title:
         result = PaperReadResult(
             paper=paper,
@@ -1517,12 +1518,27 @@ async def _read_one_paper(
             total_paper_count,
             paper_position=item.position,
         )
+        def report_abstract_usage(usage: JsonObject) -> None:
+            """把单篇论文摘要模型的真实 token 用量写入该论文卡片。"""
+
+            paper_usage["input_tokens"] += int(usage.get("input_tokens") or 0)
+            paper_usage["output_tokens"] += int(usage.get("output_tokens") or 0)
+            _report_progress(
+                reporter,
+                paper,
+                "reading_abstract",
+                completed_counter.current(),
+                total_paper_count,
+                **paper_usage,
+            )
+
         note, relevance, warnings = await _build_abstract_note(
             paper,
             topic=topic,
             constraints=constraints,
             llm=llm,
             runtime_resources=runtime_resources,
+            usage_callback=report_abstract_usage,
         )
         result = PaperReadResult(paper=paper, note=note, relevance=relevance, warnings=warnings)
     else:
@@ -1769,6 +1785,20 @@ async def _read_one_paper(
             details=_embedding_error_details(result, stage="embedding_config", message=full_text.reason),
         )
     try:
+        def report_embedding_usage(usage: JsonObject) -> None:
+            """把全文向量化模型返回的真实 token 用量写入当前论文卡片。"""
+
+            paper_usage["input_tokens"] += int(usage.get("input_tokens") or 0)
+            paper_usage["output_tokens"] += int(usage.get("output_tokens") or 0)
+            _report_progress(
+                reporter,
+                paper,
+                "saving_chunks",
+                completed_counter.current(),
+                total_paper_count,
+                **paper_usage,
+            )
+
         index_result = await async_index_chunk_file(
             paper,
             chunks_path=chunk_build.chunks_path,
@@ -1777,6 +1807,7 @@ async def _read_one_paper(
             collection_name=config.vector_store_collection,
             embedding_connection=embedding_connection,
             runtime_resources=runtime_resources,
+            usage_callback=report_embedding_usage,
         )
     except RuntimeError as exc:
         full_text.reason = f"全文已转成 Markdown，但 embedding 服务不可用：{exc}"
@@ -1816,16 +1847,18 @@ async def _build_abstract_note(
     constraints: JsonObject,
     llm: ProviderSnapshot | None,
     runtime_resources: WorkflowRuntimeResources | None,
+    usage_callback: Any | None = None,
 ) -> tuple[ReadNote, ReadRelevance, list[str]]:
     """通过 ReadAgent 完成异步摘要阅读，节点只保留流程控制和暂停恢复逻辑。"""
 
     semaphore = runtime_resources.read_model_semaphore if runtime_resources is not None else _FALLBACK_READ_MODEL_SEMAPHORE
     try:
-        result = await _read_agent_from_llm(llm).async_read_abstract(
+        result = await _read_agent_from_llm(llm, usage_callback=usage_callback).async_read_abstract(
             paper,
             topic=topic,
             constraints=constraints,
             semaphore=semaphore,
+            usage_callback=usage_callback,
         )
         return result.as_tuple()
     except ReadAgentModelUnavailableError as exc:
