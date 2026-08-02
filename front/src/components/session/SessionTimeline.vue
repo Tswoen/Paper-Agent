@@ -40,7 +40,8 @@ function hasTimelineContent(snapshot: SessionTimelineSnapshot | null) {
     <div class="session-timeline-head">
       <div>
         <span class="eyebrow">Execution Flow</span>
-        <h2>{{ title || "执行过程" }}</h2>
+        <h2>执行流程</h2>
+        <p class="session-timeline-subtitle">任务已顺利完成，以下是各步骤的执行详情</p>
       </div>
       <StatusPill
         :tone="statusTone(snapshot?.status ?? 'created')"

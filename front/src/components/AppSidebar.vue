@@ -7,6 +7,7 @@ import {
   PanelsTopLeft,
   Plus,
   Trash2,
+  UserRound,
   Workflow,
 } from "lucide-vue-next";
 import { computed } from "vue";
@@ -240,5 +241,12 @@ function statusLabel(status: SessionStatus) {
         </div>
       </template>
     </section>
+
+    <!-- 底部固定用户信息，给工作台保留一个稳定的个人入口。 -->
+    <div v-if="!collapsed" class="sidebar-user">
+      <span class="sidebar-user-avatar"><UserRound :size="16" /></span>
+      <span class="sidebar-user-copy"><strong>User Name</strong><small>user@example.com</small></span>
+      <ChevronLeft class="sidebar-user-chevron" :size="14" />
+    </div>
   </aside>
 </template>

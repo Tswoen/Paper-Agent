@@ -1,6 +1,16 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
-import { Clock3, LoaderCircle } from "lucide-vue-next";
+import {
+  CalendarDays,
+  CheckCircle2,
+  FileDown,
+  FileSearch,
+  Gauge,
+  LoaderCircle,
+  PackageOpen,
+  Timer,
+  Upload,
+} from "lucide-vue-next";
 
 import { ApiRequestError, createSession, fetchSessionThread, startSessionRun, subscribeSessionRun } from "../api/sessions";
 import SessionComposer from "../components/session/SessionComposer.vue";
@@ -88,6 +98,76 @@ const compactUpdatedAt = computed(() => {
     minute: "2-digit",
   }).format(new Date(value));
 });
+
+/**
+ * 右侧统计栏直接从当前时间线计算数据，避免再增加一套后端统计接口。
+ * 事件数量、完成数量和 token 总数都能从已经加载的会话快照中得到。
+ */
+const timelineStats = computed(() => {
+  const rootEvents = timelineSnapshot.value?.runtimeEvents ?? [];
+  const events = flattenRuntimeEvents(rootEvents);
+  // 右侧的“步骤”对应时间线最外层的节点，内部工具调用不单独算一步。
+  const completed = rootEvents.filter((event) => event.status === "completed").length;
+  // 父节点的 token 是子节点汇总值，统计时只取叶子节点，避免重复相加。
+  const tokenEvents = events.filter((event) => event.children.length === 0);
+  const inputTokens = tokenEvents.reduce((total, event) => total + event.inputTokens, 0);
+  const outputTokens = tokenEvents.reduce((total, event) => total + event.outputTokens, 0);
+  const startedAt = selectedRunStartedAt.value ?? selectedSummary.value?.run_started_at;
+  const endAt = currentStatus.value === "running" ? undefined : selectedSummary.value?.updated_at;
+
+  return {
+    total: rootEvents.length,
+    completed,
+    inputTokens,
+    outputTokens,
+    duration: formatDuration(startedAt, endAt),
+  };
+});
+
+const taskStatusLabel = computed(() => {
+  if (currentStatus.value === "completed") return "已完成";
+  if (currentStatus.value === "running") return "执行中";
+  if (currentStatus.value === "failed") return "执行失败";
+  return "等待开始";
+});
+
+/**
+ * 右侧只展示工作流最后生成的论文，检索结果和阅读笔记等中间文件不放在这里。
+ * 后端用 final_review 标记最终论文，这样会话里保存再多其他产物，页面也不会把它们混在一起。
+ */
+const finalArtifacts = computed(() => {
+  const artifacts = timelineSnapshot.value?.artifacts ?? [];
+  return artifacts.filter((artifact) => artifact.artifact_type === "final_review");
+});
+
+/** 将树形事件展开成一维数组，只用于统计，不会改变时间线的显示结构。 */
+function flattenRuntimeEvents(
+  events: SessionTimelineSnapshot["runtimeEvents"],
+): SessionTimelineSnapshot["runtimeEvents"] {
+  return events.flatMap((event) => [event, ...flattenRuntimeEvents(event.children)]);
+}
+
+function formatDuration(start: string | null | undefined, end: string | null | undefined) {
+  if (!start) return "--";
+  const startTime = new Date(start).getTime();
+  const endTime = end ? new Date(end).getTime() : Date.now();
+  if (!Number.isFinite(startTime) || !Number.isFinite(endTime) || endTime < startTime) return "--";
+  const seconds = Math.max(1, Math.round((endTime - startTime) / 1000));
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  return minutes > 0 ? `${minutes}分${remainingSeconds}秒` : `${remainingSeconds}秒`;
+}
+
+function formatNumber(value: number) {
+  return value.toLocaleString("zh-CN");
+}
+
+function formatArtifactSize(size: number) {
+  if (!size) return "文件大小未知";
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / 1024 / 1024).toFixed(1)} MB`;
+}
 
 watch(
   () => props.selectedKey,
@@ -382,6 +462,9 @@ function handleError(error: unknown, title: string) {
     :data-welcome-visible="shouldShowWelcomeComposer"
   >
     <header v-if="!shouldShowWelcomeComposer" class="hero-card session-hero-card session-compact-header">
+      <div class="session-hero-icon" aria-hidden="true">
+        <FileSearch :size="24" />
+      </div>
       <div class="hero-copy session-compact-copy">
         <span class="eyebrow">Workflow Session</span>
         <h1>{{ selectedTitle }}</h1>
@@ -391,11 +474,8 @@ function handleError(error: unknown, title: string) {
       </div>
 
       <div class="session-compact-meta">
-        <StatusPill :tone="statusTone(currentStatus)" :label="statusLabel(currentStatus)" />
-        <span class="session-compact-time">
-          <Clock3 :size="14" />
-          {{ compactUpdatedAt }}
-        </span>
+        <StatusPill :tone="statusTone(currentStatus)" :label="taskStatusLabel" />
+        <span class="session-compact-date"><CalendarDays :size="14" />{{ compactUpdatedAt }}</span>
       </div>
     </header>
 
@@ -441,6 +521,48 @@ function handleError(error: unknown, title: string) {
           @submit="submitTopic"
         />
       </div>
+
+      <aside v-if="shouldShowTimeline" class="session-insights" aria-label="任务概览">
+        <section class="insight-card insight-status-card">
+          <div class="insight-card-heading"><h2>任务状态</h2><Gauge :size="16" /></div>
+          <div class="insight-status-value">
+            <span class="insight-status-icon"><CheckCircle2 :size="24" /></span>
+            <strong>{{ taskStatusLabel }}</strong>
+          </div>
+          <p>{{ currentStatus === "completed" ? "任务已成功完成所有步骤" : "任务正在按照流程执行" }}</p>
+        </section>
+
+        <section class="insight-card">
+          <div class="insight-card-heading"><h2>用时统计</h2><Timer :size="16" /></div>
+          <div class="insight-metric-grid">
+            <div><strong>{{ timelineStats.duration }}</strong><span>总耗时</span></div>
+            <div><strong>{{ timelineStats.completed }}</strong><span>完成步骤</span></div>
+            <div><strong>{{ timelineStats.total ? Math.round((timelineStats.completed / timelineStats.total) * 100) : 0 }}%</strong><span>完成度</span></div>
+            <div><strong>{{ timelineStats.total }}</strong><span>执行步骤</span></div>
+          </div>
+        </section>
+
+        <section class="insight-card">
+          <div class="insight-card-heading"><h2>资源使用</h2><Upload :size="16" /></div>
+          <div class="insight-token-total">{{ formatNumber(timelineStats.inputTokens + timelineStats.outputTokens) }} <span>Token 使用量</span></div>
+          <div class="insight-progress"><span :style="{ width: `${Math.min(100, timelineStats.total ? 45 + timelineStats.completed / timelineStats.total * 55 : 0)}%` }"></span></div>
+          <div class="insight-token-breakdown">
+            <div><span>输入 Token</span><strong>{{ formatNumber(timelineStats.inputTokens) }}</strong></div>
+            <div><span>输出 Token</span><strong>{{ formatNumber(timelineStats.outputTokens) }}</strong></div>
+          </div>
+        </section>
+
+        <section class="insight-card insight-output-card">
+          <div class="insight-card-heading"><h2>输出结果</h2><PackageOpen :size="16" /></div>
+          <template v-if="finalArtifacts.length">
+            <div v-for="artifact in finalArtifacts" :key="artifact.id" class="insight-artifact">
+              <span class="insight-artifact-icon"><FileDown :size="16" /></span>
+              <span><strong>{{ artifact.name }}</strong><small>{{ formatArtifactSize(artifact.size) }}</small></span>
+            </div>
+          </template>
+          <div v-else class="insight-no-output"><PackageOpen :size="18" /><span>任务完成后会显示最终论文</span></div>
+        </section>
+      </aside>
     </section>
   </section>
 </template>
