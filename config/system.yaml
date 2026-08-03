@@ -1,9 +1,9 @@
 defaults:
   llm:
-    temperature: 0.7
-    max_tokens: 4000
-    reasoning_effort: none
-    context_window_tokens: 64000
+    temperature: null
+    max_tokens: null
+    reasoning_effort: null
+    context_window_tokens: null
   embedding:
     dimensions: 1024
     batch_size: 32
