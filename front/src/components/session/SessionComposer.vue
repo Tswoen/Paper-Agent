@@ -50,10 +50,10 @@ const constraintsExpanded = ref(false);
 const textareaElement = ref<HTMLTextAreaElement | null>(null);
 
 const quickTopics: TopicSuggestion[] = [
-  { label: "多模态大模型的最新进展", prompt: "调研多模态大模型的最新进展、代表性工作与未来趋势" },
-  { label: "检索增强生成(RAG)应用研究", prompt: "调研检索增强生成(RAG)在实际应用中的研究进展与关键挑战" },
-  { label: "智能体协作机制综述", prompt: "梳理多智能体协作机制的研究现状、常见架构与评估方法" },
-  { label: "推荐系统冷启动问题分析", prompt: "分析推荐系统冷启动问题的主流解决方案、适用条件与研究机会" },
+  { label: "检索增强大模型智能体技术综述", prompt: "综述检索增强范式下大语言模型智能体的架构设计、工具调用、知识更新与评估方法，总结现存挑战" },
+  { label: "大模型赋能推荐系统研究综述", prompt: "综述大语言/多模态大模型在推荐系统中的应用，重点分析冷启动、序列建模、知识增强推荐方案与挑战" },
+  { label: "多模态检索增强智能体研究综述", prompt: "系统梳理多模态检索增强智能体的技术脉络、主流架构、关键瓶颈、评测方案与未来研究方向" },
+  { label: "大模型智能体外部知识获取机制综述", prompt: "系统调研检索增强作为智能体知识供给方案的各类技术路线、局限性与未来研究机遇" },
 ];
 const hasConstraints = computed(() => {
   const value = props.constraints;
