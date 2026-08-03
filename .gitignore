@@ -89,5 +89,5 @@ paper-search-mcp/
 data/*
 .claude/*
 .impeccable/*
-log/*
+logs/*
 
