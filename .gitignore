@@ -80,6 +80,8 @@ vite.svg
 tmp/
 temp/
 
+# config
+model.json
 
 # other
 doc/*
@@ -87,3 +89,5 @@ paper-search-mcp/
 data/*
 .claude/*
 .impeccable/*
+log/*
+
