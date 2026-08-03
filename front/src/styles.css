@@ -2641,3 +2641,927 @@ body {
     justify-items: start;
   }
 }
+
+/* 设置页使用更紧凑的工作台排版，避免影响会话工作区的视觉样式。 */
+.settings-page {
+  --settings-blue: #2563eb;
+  --settings-text: #17233d;
+  --settings-muted: #71809a;
+  --settings-border: #e5eaf2;
+  max-width: 1320px;
+  margin: 0 auto;
+  padding: 4px 0 20px;
+}
+
+.settings-page .hero-card,
+.settings-page .panel-section,
+.settings-page .state-card,
+.settings-page .metric-card,
+.settings-page .table-card,
+.settings-page .editor-card,
+.settings-page .provider-editor-card,
+.settings-page .provider-create-card {
+  border-color: var(--settings-border);
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 2px 10px rgba(27, 48, 86, 0.045);
+}
+
+.settings-page .hero-card {
+  align-items: center;
+  padding: 22px 24px;
+}
+
+.settings-page .hero-card::before,
+.settings-page .panel-section::before {
+  left: 20px;
+  right: 20px;
+  background: linear-gradient(90deg, transparent, rgba(37, 99, 235, 0.28), transparent);
+}
+
+.settings-page .hero-copy {
+  gap: 7px;
+}
+
+.settings-page .hero-copy h1 {
+  color: var(--settings-text);
+  font-size: 1.75rem;
+  line-height: 1.25;
+  letter-spacing: 0;
+}
+
+.settings-page .hero-copy p {
+  max-width: 780px;
+  font-size: 0.82rem;
+  line-height: 1.6;
+  color: var(--settings-muted);
+}
+
+.settings-page .eyebrow {
+  color: var(--settings-blue);
+  font-size: 0.67rem;
+  letter-spacing: 0.08em;
+}
+
+.settings-page .button {
+  min-height: 34px;
+  border-radius: 8px;
+  border-color: var(--settings-border);
+  padding: 0 12px;
+  font-size: 0.78rem;
+  box-shadow: none;
+}
+
+.settings-page .button.primary {
+  border-color: #2563eb;
+  background: #2563eb;
+}
+
+.settings-page .button.secondary,
+.settings-page .button.ghost-link {
+  background: #fff;
+  color: #34425e;
+}
+
+.settings-page .button:hover {
+  border-color: rgba(37, 99, 235, 0.38);
+  background: #f8faff;
+}
+
+.settings-page .metrics-grid {
+  gap: 14px;
+  margin-top: 14px;
+}
+
+.settings-page .metric-card {
+  display: grid;
+  grid-template-columns: 46px minmax(0, 1fr);
+  align-items: center;
+  min-height: 106px;
+  gap: 14px;
+  padding: 17px 18px;
+}
+
+.settings-page .metric-card:nth-child(1) .metric-icon {
+  background: #e7f0ff;
+  color: #3277ed;
+}
+
+.settings-page .metric-card:nth-child(2) .metric-icon {
+  background: #e6f8ef;
+  color: #2db675;
+}
+
+.settings-page .metric-card:nth-child(3) .metric-icon {
+  background: #f0eaff;
+  color: #875ce8;
+}
+
+.settings-page .metric-icon {
+  width: 46px;
+  height: 46px;
+  border-radius: 12px;
+}
+
+.settings-page .metric-copy {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.settings-page .metric-value-row {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+}
+
+.settings-page .metric-card strong {
+  color: var(--settings-text);
+  font-size: 1.55rem;
+  line-height: 1;
+}
+
+.settings-page .metric-card span {
+  color: #3e4c66;
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.settings-page .metric-card p {
+  color: var(--settings-muted);
+  font-size: 0.7rem;
+  line-height: 1.45;
+}
+
+.settings-page .panel-section {
+  margin-top: 14px;
+  padding: 18px;
+}
+
+.settings-page .section-heading {
+  align-items: center;
+  margin-bottom: 14px;
+}
+
+.settings-page .section-heading h2 {
+  margin-top: 4px;
+  color: var(--settings-text);
+  font-size: 1.05rem;
+  letter-spacing: 0;
+}
+
+.settings-page .section-heading p {
+  margin-top: 5px;
+  color: var(--settings-muted);
+  font-size: 0.75rem;
+}
+
+.settings-page .status-pill {
+  min-height: 24px;
+  padding: 0 8px;
+  border-radius: 6px;
+  font-size: 0.68rem;
+  font-family: inherit;
+  letter-spacing: 0;
+}
+
+.settings-page .provider-stage {
+  grid-template-columns: 248px minmax(0, 1fr);
+  gap: 12px;
+}
+
+.settings-page .provider-rail {
+  gap: 8px;
+}
+
+/* 列表头部只保留标题和新增入口，让 Provider 卡片成为页面的第一视觉重点。 */
+.settings-page .provider-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 36px;
+  padding: 0 2px 2px;
+}
+
+.settings-page .provider-list-header > strong {
+  color: var(--settings-text);
+  font-size: 0.82rem;
+  line-height: 1.2;
+}
+
+.settings-page .provider-add-button {
+  min-height: 34px;
+  padding: 0 10px;
+  white-space: nowrap;
+}
+
+.settings-page .provider-create-card {
+  gap: 8px;
+  padding: 12px;
+  border-radius: 9px;
+  background: #fbfcff;
+  box-shadow: none;
+}
+
+.settings-page .provider-create-head {
+  justify-content: flex-start;
+  gap: 7px;
+  color: var(--settings-text);
+  font-size: 0.82rem;
+}
+
+.settings-page .provider-list-label {
+  padding: 5px 2px 1px;
+  color: var(--settings-muted);
+  font-size: 0.69rem;
+  font-weight: 700;
+}
+
+.settings-page .provider-tab {
+  min-height: 64px;
+  padding: 10px 11px;
+  border-radius: 8px;
+  border-color: var(--settings-border);
+  background: #fff;
+  box-shadow: none;
+}
+
+.settings-page .provider-tab.active {
+  border-color: #7ca7ff;
+  background: #f2f6ff;
+  box-shadow: inset 3px 0 0 #2563eb;
+}
+
+.settings-page .provider-tab strong {
+  color: #273653;
+  font-size: 0.78rem;
+}
+
+.settings-page .provider-tab span {
+  margin-top: 3px;
+  font-size: 0.67rem;
+}
+
+.settings-page .provider-editor-card {
+  padding: 16px;
+  border-radius: 10px;
+  box-shadow: none;
+}
+
+.settings-page .provider-header-row h3,
+.settings-page .editor-head h3 {
+  color: var(--settings-text);
+  font-size: 0.98rem;
+}
+
+.settings-page .provider-header-row p,
+.settings-page .editor-head p {
+  margin-top: 4px;
+  color: var(--settings-muted);
+  font-size: 0.71rem;
+}
+
+.settings-page .provider-toolbar {
+  gap: 7px;
+}
+
+.settings-page .form-grid {
+  gap: 12px;
+  margin-top: 15px;
+}
+
+.settings-page .field-group {
+  gap: 5px;
+}
+
+.settings-page .field-group span {
+  color: #64728b;
+  font-size: 0.7rem;
+}
+
+.settings-page .field,
+.settings-page .textarea {
+  min-height: 36px;
+  padding: 9px 11px;
+  border-radius: 7px;
+  border-color: #e1e7f0;
+  font-size: 0.76rem;
+  box-shadow: none;
+}
+
+.settings-page .textarea {
+  min-height: 112px;
+  line-height: 1.45;
+}
+
+.settings-page .field:focus,
+.settings-page .textarea:focus {
+  border-color: #91b4ff;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.09);
+}
+
+.settings-page .provider-footer {
+  margin-top: 14px;
+  padding: 10px 12px;
+  border: 1px solid #d9e6ff;
+  border-radius: 8px;
+  background: #f5f8ff;
+}
+
+.settings-page .mini-note {
+  gap: 3px;
+}
+
+.settings-page .mini-note p {
+  color: #607292;
+  font-size: 0.7rem;
+}
+
+.settings-page .model-catalog {
+  margin-top: 10px;
+}
+
+.settings-page .catalog-grid {
+  gap: 8px;
+}
+
+.settings-page .catalog-item {
+  padding: 9px;
+  border-radius: 7px;
+}
+
+.settings-page .catalog-item strong,
+.settings-page .catalog-item span {
+  font-size: 0.7rem;
+}
+
+.settings-page .table-card {
+  border-radius: 9px;
+  box-shadow: none;
+}
+
+.settings-page .data-table {
+  min-width: 760px;
+}
+
+.settings-page .data-table th,
+.settings-page .data-table td {
+  padding: 11px 13px;
+  border-bottom-color: #edf0f5;
+  font-size: 0.73rem;
+}
+
+.settings-page .data-table th {
+  background: #f8faff;
+  color: #7a879c;
+  font-size: 0.65rem;
+  letter-spacing: 0.04em;
+}
+
+.settings-page .primary-cell {
+  gap: 3px;
+}
+
+.settings-page .primary-cell strong {
+  color: #273653;
+  font-size: 0.76rem;
+}
+
+.settings-page .primary-cell span {
+  font-size: 0.66rem;
+}
+
+.settings-page .table-state {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 0 7px;
+  border-radius: 5px;
+  background: #e8f8f0;
+  color: #249461;
+  font-size: 0.65rem;
+}
+
+.settings-page .editor-card {
+  margin-top: 12px;
+  padding: 15px;
+  border-radius: 9px;
+  box-shadow: none;
+}
+
+.settings-page .editor-actions {
+  margin-top: 13px;
+}
+
+.settings-page .page-footer {
+  padding: 13px 2px 0;
+  color: #9aa5b7;
+  font-size: 0.68rem;
+}
+
+@media (max-width: 900px) {
+  .settings-page {
+    padding-inline: 0;
+  }
+
+  .settings-page .provider-stage {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-page .provider-rail {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .settings-page .provider-list-header {
+    grid-column: 1 / -1;
+  }
+
+  .settings-page .provider-create-card,
+  .settings-page .provider-list-label {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 640px) {
+  .settings-page .hero-card,
+  .settings-page .panel-section {
+    padding: 15px;
+  }
+
+  .settings-page .hero-card {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .settings-page .hero-actions {
+    width: 100%;
+  }
+
+  .settings-page .hero-actions .button {
+    flex: 1;
+  }
+
+  .settings-page .metrics-grid,
+  .settings-page .provider-rail {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-page .provider-create-card,
+  .settings-page .provider-list-label {
+    grid-column: auto;
+  }
+
+  .settings-page .section-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .settings-page .heading-meta {
+    justify-content: flex-start;
+  }
+}
+
+/* 中文说明：以下样式只作用于“新建研究会话”的空白工作台，执行中的时间线仍使用原来的紧凑输入框。 */
+.session-workspace-shell[data-welcome-visible="true"] {
+  max-width: 1240px;
+}
+
+.session-workspace-shell[data-welcome-visible="true"] .session-workbench,
+.session-workspace-shell[data-welcome-visible="true"] .session-main-column {
+  min-height: calc(100vh - 72px);
+}
+
+.session-workspace-shell[data-welcome-visible="true"] .session-content-area {
+  place-items: center;
+  align-content: center;
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+.session-composer-card[data-variant="welcome"] {
+  display: grid;
+  width: min(100%, 1120px);
+  gap: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.session-welcome-heading {
+  display: grid;
+  justify-items: center;
+  gap: 12px;
+  text-align: center;
+}
+
+.session-welcome-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  gap: 7px;
+  padding: 0 14px;
+  border: 1px solid #dce5ff;
+  border-radius: 999px;
+  background: #edf2ff;
+  color: #4e6ef2;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.session-welcome-heading h2 {
+  margin: 0;
+  color: #17233d;
+  font-size: 2.35rem;
+  font-weight: 800;
+  line-height: 1.18;
+  letter-spacing: 0;
+}
+
+.session-welcome-heading h2 strong {
+  color: #4e6ef2;
+  font-weight: inherit;
+}
+
+.session-welcome-heading p {
+  max-width: 760px;
+  margin: 0;
+  color: #74829a;
+  font-size: 0.88rem;
+  line-height: 1.65;
+}
+
+.session-welcome-prompt-card {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid #dce5fb;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow: 0 18px 45px rgba(64, 83, 140, 0.1);
+}
+
+.session-welcome-input-row {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 12px;
+  min-height: 190px;
+  padding: 20px 22px 12px;
+  border: 1px solid #dce5fb;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.session-welcome-input-icon {
+  margin-top: 4px;
+  color: #5271f2;
+}
+
+.session-composer-card[data-variant="welcome"] .session-composer-textarea {
+  min-height: 156px;
+  max-height: 250px;
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  color: #24324b;
+  font-size: 0.98rem;
+  line-height: 1.65;
+  resize: vertical;
+}
+
+.session-composer-card[data-variant="welcome"] .session-composer-textarea::placeholder {
+  color: #9aa7bb;
+}
+
+.session-composer-card[data-variant="welcome"] .session-composer-textarea:focus {
+  box-shadow: none;
+}
+
+.session-composer-card[data-variant="welcome"] .session-composer-send {
+  width: 58px;
+  height: 58px;
+  align-self: end;
+  margin-bottom: 2px;
+  border: 0;
+  border-radius: 50%;
+  background: #536df2;
+  box-shadow: 0 8px 18px rgba(83, 109, 242, 0.25);
+}
+
+.session-composer-card[data-variant="welcome"] .session-composer-send:hover:not(:disabled) {
+  background: #415fe9;
+  transform: translateY(-1px);
+}
+
+.session-welcome-settings-button,
+.session-welcome-topic-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 32px;
+  border: 1px solid #dce5fb;
+  background: #fff;
+  color: #596a87;
+  font-size: 0.72rem;
+  font-weight: 600;
+  line-height: 1.2;
+  transition: border-color 160ms ease, color 160ms ease, background 160ms ease, transform 160ms ease;
+}
+
+.session-welcome-settings-button:hover,
+.session-welcome-topic-button:hover {
+  border-color: #aebfff;
+  background: #f6f8ff;
+  color: #4e6ef2;
+}
+
+.session-welcome-settings-button {
+  width: 32px;
+  flex: 0 0 32px;
+  margin-left: auto;
+  padding: 0;
+  border-radius: 50%;
+}
+
+.session-composer-card[data-variant="welcome"] .session-composer-constraints-panel {
+  position: static;
+  margin: 0 4px;
+  border-color: #dce5fb;
+  border-radius: 8px;
+  background: #fafcff;
+  box-shadow: none;
+}
+
+.session-welcome-quick-start {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px;
+  border-top: 1px solid #edf1f8;
+}
+
+.session-welcome-quick-label {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+  color: #5371f3;
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
+.session-welcome-topic-button {
+  min-width: 0;
+  gap: 6px;
+  padding: 0 10px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.session-welcome-topic-button span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.session-welcome-inspiration {
+  display: inline-flex;
+  align-items: center;
+  justify-self: center;
+  gap: 7px;
+  margin: 0;
+  color: #7988a2;
+  font-size: 0.72rem;
+}
+
+.session-welcome-inspiration svg {
+  color: #6d84ef;
+}
+
+/* 中文说明：历史会话的删除入口保持文字和图标同一行，颜色明确但不使用厚重边框。 */
+.sidebar-session-item {
+  grid-template-columns: 3px minmax(0, 1fr) auto;
+}
+
+.sidebar-session-delete {
+  display: inline-flex;
+  align-items: center;
+  align-self: center;
+  justify-content: center;
+  width: auto;
+  min-width: 0;
+  height: 24px;
+  gap: 3px;
+  padding: 0 2px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #ff4d4f;
+  font-size: 0.62rem;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.sidebar-session-delete:hover,
+.sidebar-session-delete:focus-visible {
+  background: #fff0f0;
+  color: #f23636;
+  outline: 0;
+}
+
+/* 中文说明：删除需要再确认一次，遮罩层让用户把注意力集中在当前操作上。 */
+.session-delete-dialog-backdrop {
+  position: fixed;
+  z-index: 100;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(15, 23, 42, 0.26);
+}
+
+.session-delete-dialog {
+  width: min(420px, 100%);
+  padding: 26px 24px 22px;
+  border: 1px solid #edf0f5;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 18px 42px rgba(15, 23, 42, 0.22);
+}
+
+.session-delete-dialog-copy {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.session-delete-dialog-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  margin-top: 1px;
+  border-radius: 50%;
+  background: #f59e0b;
+  color: #fff;
+}
+
+.session-delete-dialog-icon svg {
+  stroke-width: 2.5;
+}
+
+.session-delete-dialog h2,
+.session-delete-dialog p {
+  margin: 0;
+}
+
+.session-delete-dialog h2 {
+  color: #1f2937;
+  font-size: 0.98rem;
+  font-weight: 700;
+  line-height: 1.45;
+}
+
+.session-delete-dialog p {
+  margin-top: 12px;
+  color: #313b4c;
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+.session-delete-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 24px;
+}
+
+.session-delete-dialog-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 80px;
+  height: 38px;
+  padding: 0 18px;
+  border-radius: 9px;
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.session-delete-dialog-cancel {
+  border: 1px solid #e1e6ee;
+  background: #fff;
+  color: #4b5565;
+}
+
+.session-delete-dialog-confirm {
+  border: 1px solid #ff3f3f;
+  background: #ff3f3f;
+  color: #fff;
+}
+
+.session-delete-dialog-cancel:hover:not(:disabled) {
+  border-color: #cbd3df;
+  background: #f8fafc;
+}
+
+.session-delete-dialog-confirm:hover:not(:disabled) {
+  border-color: #ec2828;
+  background: #ec2828;
+}
+
+.session-delete-dialog-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+@media (max-width: 980px) {
+  .session-welcome-quick-start {
+    flex-wrap: wrap;
+  }
+}
+
+@media (max-width: 640px) {
+  /* 中文说明：移动端的主题按钮文字较长，明确允许每层容器收缩，避免它们把整块欢迎页撑出屏幕。 */
+  .session-workspace-shell[data-welcome-visible="true"],
+  .session-workspace-shell[data-welcome-visible="true"] .session-workbench,
+  .session-workspace-shell[data-welcome-visible="true"] .session-main-column,
+  .session-workspace-shell[data-welcome-visible="true"] .session-content-area,
+  .session-composer-card[data-variant="welcome"],
+  .session-welcome-prompt-card,
+  .session-welcome-input-row,
+  .session-welcome-quick-start {
+    min-width: 0;
+  }
+
+  .session-welcome-heading,
+  .session-composer-card[data-variant="welcome"] {
+    width: 100%;
+  }
+
+  .session-workspace-shell[data-welcome-visible="true"] .session-content-area {
+    padding-top: 0;
+  }
+
+  .session-composer-card[data-variant="welcome"] {
+    gap: 18px;
+  }
+
+  .session-welcome-heading {
+    gap: 9px;
+  }
+
+  .session-welcome-heading h2 {
+    max-width: 100%;
+    font-size: 1.75rem;
+    overflow-wrap: anywhere;
+  }
+
+  .session-welcome-heading p {
+    font-size: 0.78rem;
+  }
+
+  .session-welcome-prompt-card {
+    gap: 12px;
+    padding: 10px;
+  }
+
+  .session-welcome-input-row {
+    grid-template-columns: 25px minmax(0, 1fr);
+    min-height: 172px;
+    padding: 15px 13px 10px;
+  }
+
+  .session-composer-card[data-variant="welcome"] .session-composer-textarea {
+    min-height: 138px;
+    font-size: 0.86rem;
+  }
+
+  .session-composer-card[data-variant="welcome"] .session-composer-send {
+    grid-column: 2;
+    justify-self: end;
+    width: 48px;
+    height: 48px;
+  }
+
+  .session-welcome-quick-start {
+    align-items: stretch;
+  }
+
+  .session-welcome-quick-label {
+    flex-basis: 100%;
+  }
+
+  .session-welcome-topic-button {
+    flex: 1 1 calc(50% - 8px);
+    min-width: 0;
+    max-width: calc(50% - 4px);
+  }
+}

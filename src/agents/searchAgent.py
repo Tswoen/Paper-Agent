@@ -66,7 +66,7 @@ class SearchAgent(BaseAgent):
         name="search_agent",
         role="search",
         description="根据主题与约束生成论文检索计划的代理。",
-        llm_profile="default_agent",
+        llm_profile="luna_agent",
         skills=(),
         input_keys=("request",),  # 当前 Agent 所必须的输入字段
     )

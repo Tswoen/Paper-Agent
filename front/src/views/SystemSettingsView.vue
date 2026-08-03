@@ -9,7 +9,6 @@ import {
   Save,
   SearchCheck,
   ShieldCheck,
-  Sparkles,
 } from "lucide-vue-next";
 import { computed, onMounted, reactive, ref, watch } from "vue";
 
@@ -47,8 +46,6 @@ type AgentDraft = {
   provider: string;
   model_name: string;
   temperature: string;
-  max_tokens: string;
-  context_window_tokens: string;
   reasoning_effort: string;
 };
 
@@ -67,6 +64,8 @@ const savingProvider = ref(false);
 const savingAgent = ref(false);
 const savingEmbedding = ref(false);
 const showApiKey = ref(false);
+// 控制右侧是否处于新增状态，新增时显示空白表单，已有 Provider 则显示配置详情。
+const isCreatingProvider = ref(false);
 const selectedProviderName = ref("");
 const editingAgentName = ref("");
 const editingEmbeddingName = ref("");
@@ -90,8 +89,6 @@ const agentDraft = reactive<AgentDraft>({
   provider: "",
   model_name: "",
   temperature: "",
-  max_tokens: "",
-  context_window_tokens: "",
   reasoning_effort: "none",
 });
 const embeddingDraft = reactive<EmbeddingDraft>({
@@ -116,11 +113,21 @@ const providerTypes = computed(() => settings.value?.provider_types ?? []);
 const selectedProvider = computed(() =>
   providers.value.find((item) => item.name === selectedProviderName.value) ?? null,
 );
+const providerBackend = computed({
+  get: () => (isCreatingProvider.value ? creatingProvider.backend : providerDraft.backend),
+  set: (value: string) => {
+    if (isCreatingProvider.value) {
+      creatingProvider.backend = value;
+      return;
+    }
+    providerDraft.backend = value;
+  },
+});
 const activeProviderModels = computed(
   () => providerModelsMap[selectedProviderName.value]?.models ?? [],
 );
 const selectedProviderType = computed(() =>
-  providerTypes.value.find((item) => item.name === providerDraft.backend) ?? null,
+  providerTypes.value.find((item) => item.name === providerBackend.value) ?? null,
 );
 const editingAgent = computed(() =>
   agents.value.find((item) => item.name === editingAgentName.value) ?? null,
@@ -177,6 +184,9 @@ const healthCards = computed(() => {
 watch(
   providers,
   (list) => {
+    if (isCreatingProvider.value) {
+      return;
+    }
     if (!list.length) {
       selectedProviderName.value = "";
       return;
@@ -190,7 +200,7 @@ watch(
 );
 
 watch(selectedProvider, (provider) => {
-  if (!provider) {
+  if (!provider || isCreatingProvider.value) {
     return;
   }
   syncProviderDraft(provider);
@@ -246,17 +256,33 @@ async function refreshSettings() {
 }
 
 function primeEditors() {
-  const firstAgent = settings.value?.agents[0];
-  const firstEmbedding = settings.value?.embedding_profiles[0];
-  if (firstAgent && !agents.value.some((item) => item.name === editingAgentName.value)) {
-    editingAgentName.value = firstAgent.name;
-  }
-  if (firstEmbedding && !embeddings.value.some((item) => item.name === editingEmbeddingName.value)) {
-    editingEmbeddingName.value = firstEmbedding.name;
-  }
   if (!creatingProvider.backend) {
     creatingProvider.backend = providerTypes.value[0]?.name ?? "";
   }
+}
+
+function startCreatingProvider() {
+  isCreatingProvider.value = true;
+  selectedProviderName.value = "";
+  creatingProvider.name = "";
+  creatingProvider.backend = providerTypes.value[0]?.name ?? "";
+  providerDraft.backend = creatingProvider.backend;
+  providerDraft.api_key = "";
+  providerDraft.api_key_env = "";
+  providerDraft.api_base = selectedProviderType.value?.default_api_base ?? "";
+  providerDraft.extra_headers = "{}";
+  providerDraft.extra_body = "{}";
+}
+
+function selectProvider(name: string) {
+  // 点击已有 Provider 时，先退出新增状态，再让 watcher 把对应配置填入右侧表单。
+  isCreatingProvider.value = false;
+  selectedProviderName.value = name;
+}
+
+function cancelCreatingProvider() {
+  isCreatingProvider.value = false;
+  selectedProviderName.value = providers.value[0]?.name ?? "";
 }
 
 function syncProviderDraft(provider: ProviderItem) {
@@ -274,8 +300,6 @@ function syncAgentDraft(agent: AgentItem) {
   agentDraft.provider = agent.provider;
   agentDraft.model_name = agent.model_name;
   agentDraft.temperature = toInputString(agent.temperature);
-  agentDraft.max_tokens = toInputString(agent.max_tokens);
-  agentDraft.context_window_tokens = toInputString(agent.context_window_tokens);
   agentDraft.reasoning_effort = agent.reasoning_effort ?? "none";
 }
 
@@ -331,11 +355,16 @@ async function createProvider() {
   try {
     settings.value = await saveProvider(name, {
       provider_type: backend,
-      api_base: providerTypes.value.find((item) => item.name === backend)?.default_api_base || undefined,
-      api_key: "",
-      extra_headers: {},
-      extra_body: {},
+      api_base:
+        emptyToUndefined(providerDraft.api_base) ||
+        providerTypes.value.find((item) => item.name === backend)?.default_api_base ||
+        undefined,
+      api_key: providerDraft.api_key.trim(),
+      api_key_env: emptyToUndefined(providerDraft.api_key_env),
+      extra_headers: parseJsonRecord(providerDraft.extra_headers, "额外请求头"),
+      extra_body: parseJsonRecord(providerDraft.extra_body, "额外请求体"),
     });
+    isCreatingProvider.value = false;
     selectedProviderName.value = name;
     creatingProvider.name = "";
     invalidateProviderDerivedState(name);
@@ -361,8 +390,6 @@ async function submitAgent() {
       provider: agentDraft.provider,
       model_name: agentDraft.model_name.trim(),
       temperature: parseOptionalNumber(agentDraft.temperature),
-      max_tokens: parseOptionalInteger(agentDraft.max_tokens),
-      context_window_tokens: parseOptionalInteger(agentDraft.context_window_tokens),
       reasoning_effort: emptyToUndefined(agentDraft.reasoning_effort),
     });
     invalidateConnectivity("agent", agentDraft.name);
@@ -485,7 +512,7 @@ function providerStatusTone(provider: ProviderItem) {
 }
 
 function providerStatusLabel(provider: ProviderItem) {
-  return provider.configured ? "已配置" : "待完善";
+  return provider.configured ? "已启用" : "待配置";
 }
 
 function modelCatalogStatus(providerName: string) {
@@ -500,7 +527,7 @@ function modelCatalogStatus(providerName: string) {
 }
 
 function agentSummary(agent: AgentItem) {
-  return `依赖 ${agent.provider} · 上下文 ${agent.context_window_tokens ?? "-"} · 最大输出 ${agent.max_tokens ?? "-"}`;
+  return agent.description;
 }
 
 function embeddingSummary(item: EmbeddingProfileItem) {
@@ -634,11 +661,11 @@ function handleError(error: unknown, title: string) {
 </script>
 
 <template>
-  <section class="page-shell">
+  <section class="page-shell settings-page">
     <header class="hero-card">
       <div class="hero-copy">
         <span class="eyebrow">Runtime Configuration</span>
-        <h3>系统配置工作台</h3>
+        <h1>系统配置工作台</h1>
         <p>
           用一个干净的控制台统一管理模型上游、智能体与嵌入配置。
           每次保存都会即时落盘，下一次请求直接生效。
@@ -664,12 +691,11 @@ function handleError(error: unknown, title: string) {
     <template v-else-if="settings">
       <section class="metrics-grid">
         <article v-for="card in healthCards" :key="card.label" class="metric-card">
-          <div class="metric-icon">
-            <component :is="card.icon" :size="16" />
+          <div class="metric-icon"><component :is="card.icon" :size="20" /></div>
+          <div class="metric-copy">
+            <div class="metric-value-row"><strong>{{ card.value }}</strong><span>{{ card.label }}</span></div>
+            <p>{{ card.detail }}</p>
           </div>
-          <strong>{{ card.value }}</strong>
-          <span>{{ card.label }}</span>
-          <p>{{ card.detail }}</p>
         </article>
       </section>
 
@@ -691,30 +717,16 @@ function handleError(error: unknown, title: string) {
 
         <div class="provider-stage">
           <aside class="provider-rail">
-            <div class="provider-create-card">
-              <div class="provider-create-head">
-                <Sparkles :size="16" />
-                <strong>新增 Provider</strong>
-              </div>
-              <input
-                v-model="creatingProvider.name"
-                class="field"
-                type="text"
-                placeholder="例如 openai_main"
-              />
-              <select v-model="creatingProvider.backend" class="field">
-                <option value="" disabled>选择 Provider 类型</option>
-                <option
-                  v-for="item in providerTypes"
-                  :key="item.name"
-                  :value="item.name"
-                >
-                  {{ item.label }}
-                </option>
-              </select>
-              <button class="button secondary block" type="button" @click="createProvider">
-                <Plus :size="16" />
-                创建 Provider
+            <div class="provider-list-header">
+              <strong>Provider 列表</strong>
+              <button
+                class="button secondary provider-add-button"
+                type="button"
+                :aria-pressed="isCreatingProvider"
+                @click="startCreatingProvider"
+              >
+                <Plus :size="15" />
+                新增 Provider
               </button>
             </div>
 
@@ -724,7 +736,7 @@ function handleError(error: unknown, title: string) {
               class="provider-tab"
               :class="{ active: provider.name === selectedProviderName }"
               type="button"
-              @click="selectedProviderName = provider.name"
+              @click="selectProvider(provider.name)"
             >
               <div class="provider-tab-main">
                 <strong>{{ provider.label }}</strong>
@@ -737,33 +749,60 @@ function handleError(error: unknown, title: string) {
             </button>
           </aside>
 
-          <div v-if="selectedProvider" class="provider-editor-card">
+          <div v-if="isCreatingProvider || selectedProvider" class="provider-editor-card">
             <div class="provider-header-row">
               <div>
-                <h3>{{ selectedProvider.label }}</h3>
-                <p>{{ selectedProvider.name }} · {{ selectedProvider.provider_type }}</p>
+                <template v-if="isCreatingProvider">
+                  <h3>新增 Provider</h3>
+                  <p>在右侧完成初始化，保存后会加入 Provider 列表。</p>
+                </template>
+                <template v-else>
+                  <h3>{{ selectedProvider?.label }}</h3>
+                  <p>{{ selectedProvider?.name }} · {{ selectedProvider?.provider_type }}</p>
+                </template>
               </div>
               <div class="provider-toolbar">
-                <button
-                  class="button secondary"
-                  type="button"
-                  :disabled="testingState[selectedProvider.name]"
-                  @click="fetchModels(selectedProvider.name)"
-                >
-                  <SearchCheck :size="16" />
-                  同步模型目录
-                </button>
-                <button class="button primary" type="button" :disabled="savingProvider" @click="submitProvider">
-                  <Save :size="16" />
-                  保存 Provider
-                </button>
+                <template v-if="isCreatingProvider">
+                  <button class="button secondary" type="button" @click="cancelCreatingProvider">
+                    取消
+                  </button>
+                  <button class="button primary" type="button" :disabled="savingProvider" @click="createProvider">
+                    <Save :size="16" />
+                    创建 Provider
+                  </button>
+                </template>
+                <template v-else>
+                  <button
+                    class="button secondary"
+                    type="button"
+                    :disabled="testingState[selectedProvider?.name || '']"
+                    @click="fetchModels(selectedProvider?.name || '')"
+                  >
+                    <SearchCheck :size="16" />
+                    同步模型目录
+                  </button>
+                  <button class="button primary" type="button" :disabled="savingProvider" @click="submitProvider">
+                    <Save :size="16" />
+                    保存 Provider
+                  </button>
+                </template>
               </div>
             </div>
 
             <div class="form-grid provider-form-grid">
+              <label v-if="isCreatingProvider" class="field-group">
+                <span>Provider ID</span>
+                <input
+                  v-model="creatingProvider.name"
+                  class="field"
+                  type="text"
+                  placeholder="例如 openai_main"
+                />
+              </label>
+
               <label class="field-group">
                 <span>Provider 类型</span>
-                <select v-model="providerDraft.backend" class="field">
+                <select v-model="providerBackend" class="field">
                   <option
                     v-for="item in providerTypes"
                     :key="item.name"
@@ -830,35 +869,37 @@ function handleError(error: unknown, title: string) {
               </label>
             </div>
 
-            <div class="provider-footer">
-              <div class="mini-note">
-                <span class="eyebrow">Model Catalog</span>
-                <p>
-                  目录抓取只用于辅助选择模型名，不能代表当前智能体或嵌入配置已经真实可调用。
-                </p>
+            <template v-if="!isCreatingProvider && selectedProvider">
+              <div class="provider-footer">
+                <div class="mini-note">
+                  <span class="eyebrow">Model Catalog</span>
+                  <p>
+                    目录抓取只用于辅助选择模型名，不能代表当前智能体或嵌入配置已经真实可调用。
+                  </p>
+                </div>
+                <StatusPill
+                  v-if="modelCatalogStatus(selectedProvider.name)"
+                  :tone="modelCatalogStatus(selectedProvider.name)?.tone"
+                  :label="modelCatalogStatus(selectedProvider.name)?.label || ''"
+                />
               </div>
-              <StatusPill
-                v-if="modelCatalogStatus(selectedProvider.name)"
-                :tone="modelCatalogStatus(selectedProvider.name)?.tone"
-                :label="modelCatalogStatus(selectedProvider.name)?.label || ''"
-              />
-            </div>
 
-            <div class="model-catalog">
-              <div v-if="activeProviderModels.length" class="catalog-grid">
-                <article
-                  v-for="model in activeProviderModels.slice(0, 8)"
-                  :key="model.id"
-                  class="catalog-item"
-                >
-                  <strong>{{ model.label }}</strong>
-                  <span>{{ model.owned_by || "upstream" }}</span>
-                </article>
+              <div class="model-catalog">
+                <div v-if="activeProviderModels.length" class="catalog-grid">
+                  <article
+                    v-for="model in activeProviderModels.slice(0, 8)"
+                    :key="model.id"
+                    class="catalog-item"
+                  >
+                    <strong>{{ model.label }}</strong>
+                    <span>{{ model.owned_by || "upstream" }}</span>
+                  </article>
+                </div>
+                <div v-else class="empty-line">
+                  <span>尚未同步模型目录，点击“同步模型目录”即可拉取。</span>
+                </div>
               </div>
-              <div v-else class="empty-line">
-                <span>尚未同步模型目录，点击“同步模型目录”即可拉取。</span>
-              </div>
-            </div>
+            </template>
           </div>
         </div>
       </section>
@@ -961,19 +1002,6 @@ function handleError(error: unknown, title: string) {
             <label class="field-group">
               <span>Temperature</span>
               <input v-model="agentDraft.temperature" class="field" type="number" step="0.1" />
-            </label>
-            <label class="field-group">
-              <span>Max Tokens</span>
-              <input v-model="agentDraft.max_tokens" class="field" type="number" step="1" />
-            </label>
-            <label class="field-group">
-              <span>上下文窗口</span>
-              <input
-                v-model="agentDraft.context_window_tokens"
-                class="field"
-                type="number"
-                step="1"
-              />
             </label>
             <label class="field-group">
               <span>Reasoning Effort</span>

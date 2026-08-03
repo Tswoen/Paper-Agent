@@ -211,7 +211,7 @@ class WritingAgent(BaseAgent):
             max_tokens=5000,
             reasoning_effort="medium",
         )
-        self._notify_section_usage(state, response)
+        _notify_section_usage(state, response)
         raw_output = str(getattr(response, "content", "") or "")
         raw_outputs = [*list(state.get("raw_model_outputs") or []), raw_output]
         if not response.ok:
@@ -311,7 +311,7 @@ class WritingAgent(BaseAgent):
             max_tokens=1200,
             reasoning_effort="medium",
         )
-        self._notify_section_usage(state, response)
+        _notify_section_usage(state, response)
         raw_output = str(getattr(response, "content", "") or "")
         raw_outputs = [*list(state.get("raw_model_outputs") or []), raw_output]
         if not response.ok:
@@ -521,8 +521,6 @@ def load_writing_agent_llm(
         system = SystemConfig.load(system_config_path)
         config = ModelConfig.from_dict(data, system)
         resolved_agent_name = agent_name or WritingAgent.spec.llm_profile
-        if resolved_agent_name not in config.agents:
-            return None
         return make_provider(config, resolved_agent_name, client=client)
     except Exception:
         # 中文注释：配置读取失败时返回 None，让写作节点可以生成保守草稿，不让流程直接崩掉。

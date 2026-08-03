@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { AlertCircle, LoaderCircle } from "lucide-vue-next";
 import { computed, onMounted, ref, watch } from "vue";
 import { RouterView, useRoute, useRouter } from "vue-router";
 
@@ -16,6 +17,8 @@ const sessions = ref<SessionSummary[]>([]);
 const sessionsLoading = ref(false);
 const creatingSession = ref(false);
 const selectedSessionKey = ref("");
+const pendingRemovalSession = ref<SessionSummary | null>(null);
+const deletingSession = ref(false);
 
 const workspaceBindings = computed(() => ({
   sessions: sessions.value,
@@ -86,11 +89,34 @@ async function selectSession(sessionKey: string) {
   await ensureSessionsRoute();
 }
 
-/** 中文注释：删除历史会话后，如果删掉的是当前正在看的会话，就自动切到下一条，或者进入空白输入区。 */
-async function removeSession(sessionKey: string) {
+/** 中文注释：点击左侧删除按钮时先记住用户选中的会话，弹出确认框后不立刻删，避免误点导致记录丢失。 */
+function requestSessionRemoval(sessionKey: string) {
+  if (deletingSession.value) {
+    return;
+  }
+
+  pendingRemovalSession.value = sessions.value.find((session) => session.key === sessionKey) ?? null;
+}
+
+/** 中文注释：取消操作只关闭确认框，不会向后端发送任何删除请求。 */
+function cancelSessionRemoval() {
+  if (!deletingSession.value) {
+    pendingRemovalSession.value = null;
+  }
+}
+
+/** 中文注释：用户在确认框中再次点“删除”后，才真正删除会话；删掉当前会话时仍按原规则切到下一条。 */
+async function confirmSessionRemoval() {
+  const session = pendingRemovalSession.value;
+  if (!session || deletingSession.value) {
+    return;
+  }
+
+  const sessionKey = session.key;
   const removedIndex = sessions.value.findIndex((session) => session.key === sessionKey);
   const wasSelected = selectedSessionKey.value === sessionKey;
 
+  deletingSession.value = true;
   try {
     await deleteSession(sessionKey);
     const nextSessions = sessions.value.filter((session) => session.key !== sessionKey);
@@ -106,8 +132,11 @@ async function removeSession(sessionKey: string) {
       title: "会话已删除",
       description: "左侧历史记录已同步更新。",
     });
+    pendingRemovalSession.value = null;
   } catch (error) {
     handleError(error, "删除会话失败");
+  } finally {
+    deletingSession.value = false;
   }
 }
 
@@ -145,7 +174,7 @@ function handleError(error: unknown, title: string) {
       @toggle="sidebarCollapsed = !sidebarCollapsed"
       @create-session="createNewSession"
       @select-session="selectSession"
-      @remove-session="removeSession"
+      @remove-session="requestSessionRemoval"
     />
     <main class="app-main">
       <RouterView v-slot="{ Component }">
@@ -156,5 +185,37 @@ function handleError(error: unknown, title: string) {
       </RouterView>
     </main>
     <ToastStack />
+    <Teleport to="body">
+      <div
+        v-if="pendingRemovalSession"
+        class="session-delete-dialog-backdrop"
+        @click.self="cancelSessionRemoval"
+      >
+        <section
+          class="session-delete-dialog"
+          role="alertdialog"
+          aria-modal="true"
+          aria-labelledby="session-delete-dialog-title"
+          aria-describedby="session-delete-dialog-description"
+        >
+          <div class="session-delete-dialog-copy">
+            <span class="session-delete-dialog-icon" aria-hidden="true"><AlertCircle :size="20" /></span>
+            <div>
+              <h2 id="session-delete-dialog-title">确定删除对话？</h2>
+              <p id="session-delete-dialog-description">删除后，聊天记录将不可恢复。</p>
+            </div>
+          </div>
+          <div class="session-delete-dialog-actions">
+            <button class="session-delete-dialog-cancel" type="button" :disabled="deletingSession" @click="cancelSessionRemoval">
+              取消
+            </button>
+            <button class="session-delete-dialog-confirm" type="button" :disabled="deletingSession" @click="confirmSessionRemoval">
+              <LoaderCircle v-if="deletingSession" class="spinning" :size="16" />
+              <span>{{ deletingSession ? "删除中" : "删除" }}</span>
+            </button>
+          </div>
+        </section>
+      </div>
+    </Teleport>
   </div>
 </template>

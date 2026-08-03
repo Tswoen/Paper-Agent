@@ -22,6 +22,6 @@ read:
 
 # analyse 节点的相关系统配置
 analyse:
-  agent_name: analyse_agent
+  agent_name: solar_agent
 
 write:

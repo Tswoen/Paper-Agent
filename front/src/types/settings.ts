@@ -6,8 +6,7 @@ export interface AgentItem {
   model_name: string;
   provider: string;
   resolved_provider: string;
-  max_tokens: number | null;
-  context_window_tokens: number | null;
+  description: string;
   temperature: number | null;
   reasoning_effort: string | null;
   reasoning_effort_values: string[];

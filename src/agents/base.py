@@ -13,6 +13,10 @@ from .skills import SkillRegistry
 from .tools import ToolRegistry
 
 
+# 后端节点只允许从前端配置的三个固定模型档位中选择模型。
+SUPPORTED_LLM_PROFILES = frozenset({"default_agent", "luna_agent", "solar_agent"})
+
+
 @dataclass(frozen=True, slots=True)
 class AgentSpec:
     """声明 Agent 的静态能力与职责边界。
@@ -28,6 +32,12 @@ class AgentSpec:
     tools: tuple[str, ...] = ()
     skills: tuple[str, ...] = ()
     input_keys: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        # 提前拦截拼写错误的 profile，避免运行到节点时才发现模型配置无法加载。
+        if self.llm_profile not in SUPPORTED_LLM_PROFILES:
+            allowed = ", ".join(sorted(SUPPORTED_LLM_PROFILES))
+            raise ValueError(f"llm_profile must be one of: {allowed}")
 
 
 @dataclass(slots=True)

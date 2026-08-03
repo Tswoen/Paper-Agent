@@ -121,6 +121,8 @@ class AgentConfig:
     provider: str
     model_name: str
     label: str | None = None
+    # 面向使用者的角色说明，只描述这个 Agent 适合做什么。
+    description: str | None = None
     temperature: float | None = None
     max_tokens: int | None = None
     reasoning_effort: str | None = None
@@ -173,12 +175,13 @@ class ModelConfig:
         )
 
     def resolve_agent(self, name: str | None = None) -> AgentConfig:
-        agent_name = name or self.default_agent
+        agent_name = (name or self.default_agent).strip()
+        if self.default_agent not in self.agents:
+            raise ValueError("default_agent must be configured")
         if agent_name in self.agents:
             return self.agents[agent_name]
-        if self.default_agent in self.agents:
-            return self.agents[self.default_agent]
-        raise ValueError(f"unknown agent: {agent_name}")
+        # luna_agent、solar_agent 或其他不存在的 profile 都使用必配的默认模型，保证节点仍可运行。
+        return self.agents[self.default_agent]
 
     def resolve_provider_config(self, agent: AgentConfig) -> tuple[str, ProviderConfig]:
         try:
@@ -277,9 +280,9 @@ def _agents_from_dict(data: Mapping[str, Any], system: SystemConfig) -> dict[str
     agents: dict[str, AgentConfig] = {}
     for name, raw in raw_agents.items():
         agents[name] = _agent_from_dict(raw, system.llm)
-    if "default_agent" not in agents and raw_agents:
-        first_name = next(iter(raw_agents))
-        agents["default_agent"] = agents[first_name]
+    # default_agent 是所有节点回退时依赖的底线配置，不能拿其他 Agent 冒充。
+    if "default_agent" not in agents:
+        raise ValueError("default_agent must be configured")
     return agents
 
 
@@ -289,6 +292,7 @@ def _agent_from_dict(raw: Mapping[str, Any], defaults: LLMDefaults) -> AgentConf
         provider=str(raw.get("provider") or "auto"),
         model_name=str(raw.get("model_name") or raw.get("modelName") or raw.get("model") or ""),
         label=raw.get("label"),
+        description=raw.get("description"),
         temperature=raw.get("temperature", defaults.temperature),
         max_tokens=raw.get("max_tokens", raw.get("maxTokens", defaults.max_tokens)),
         reasoning_effort=raw.get("reasoning_effort", raw.get("reasoningEffort", defaults.reasoning_effort)),

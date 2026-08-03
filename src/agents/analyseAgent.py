@@ -38,7 +38,8 @@ class AnalyseAgent(BaseAgent):
         name="analyse_agent",
         role="analyze",
         description="根据阅读节点产出的结构化摘要，分析子主题和全局研究现状。",
-        llm_profile="analyse_agent",
+        # 分析任务需要更强的模型；如果用户没有配置 solar_agent，模型工厂会回退到 default_agent。
+        llm_profile="solar_agent",
         skills=(),
         input_keys=("request",),
     )
@@ -105,10 +106,7 @@ def load_analyse_agent_llm(
         system = SystemConfig.load(system_config_path)
         config = ModelConfig.from_dict(data, system)
         resolved_agent_name = agent_name or AnalyseAgent.spec.llm_profile
-        # 中文说明：分析节点必须使用自己的模型配置。
-        # 如果配置里没有 analyse_agent，就不要悄悄退回 default_agent，避免用户误以为已经分开配置。
-        if resolved_agent_name not in config.agents:
-            return None
+        # 模型工厂会把未配置的 luna_agent 或 solar_agent 自动替换为 default_agent。
         return make_provider(config, resolved_agent_name, client=client)
     except Exception:
         # 中文说明：分析模型配置不可用时返回 None，让分析节点生成结构稳定的兜底报告。

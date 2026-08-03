@@ -476,14 +476,11 @@ def _embedding_profiles(data: JsonObject) -> JsonObject:
 def _resolve_agent_name(config: ModelConfig, requested: str | None) -> str:
     """根据请求参数与默认值解析当前生效的 agent 名称。"""
 
+    if config.default_agent not in config.agents:
+        raise SettingsError("default_agent must be configured")
     if requested and requested in config.agents:
         return requested
-    if config.default_agent in config.agents:
-        return config.default_agent
-    try:
-        return next(iter(config.agents))
-    except StopIteration as exc:
-        raise SettingsError("no agent configured") from exc
+    return config.default_agent
 
 
 def _agent_payload(name: str, agent: AgentConfig, provider_config: ProviderConfig) -> JsonObject:
@@ -492,6 +489,7 @@ def _agent_payload(name: str, agent: AgentConfig, provider_config: ProviderConfi
     return {
         "name": name,
         "label": agent.label or name,
+        "description": _agent_description(name, agent),
         "model": agent.model_name,
         "model_name": agent.model_name,
         "provider": agent.provider,
@@ -519,6 +517,7 @@ def _agent_item(name: str, agent: AgentConfig, is_default: bool) -> JsonObject:
     return {
         "name": name,
         "label": agent.label or name,
+        "description": _agent_description(name, agent),
         "is_default": is_default,
         "model": agent.model_name,
         "model_name": agent.model_name,
@@ -530,6 +529,21 @@ def _agent_item(name: str, agent: AgentConfig, is_default: bool) -> JsonObject:
         "reasoning_effort": agent.reasoning_effort,
         "reasoning_effort_values": ["none", "low", "medium", "high"],
     }
+
+
+def _agent_description(name: str, agent: AgentConfig) -> str:
+    """返回列表中展示的 Agent 作用说明。"""
+
+    if agent.description and agent.description.strip():
+        return agent.description.strip()
+
+    # 没有单独写说明时，根据内置的三个角色给出清晰的默认提示。
+    descriptions = {
+        "luna_agent": "基础能力，适合简单任务，价格最低。",
+        "default_agent": "中等能力，适合大多数任务，默认使用，价格适中。",
+        "solar_agent": "最高能力，适合最难任务，价格最高。",
+    }
+    return descriptions.get(name.lower(), "通用模型能力，适合按需分配任务。")
 
 
 def _embedding_items(config: ModelConfig) -> list[JsonObject]:

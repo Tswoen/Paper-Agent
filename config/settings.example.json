@@ -25,26 +25,25 @@
   "agents": {
     "default_agent": {
       "label": "Default Agent",
+      "description": "中等能力，适合大多数任务，默认使用，价格适中。",
       "provider": "openai_official",
       "model_name": "gpt-5",
       "temperature": 0.7,
-      "max_tokens": 4000,
-      "context_window_tokens": 128000,
       "reasoning_effort": "medium"
     },
-    "paper_reader": {
-      "label": "Paper Reader",
+    "luna_agent": {
+      "label": "Luna Agent",
+      "description": "整理论文摘要和重点，适合阅读任务。",
       "provider": "openrouter_main",
       "model_name": "deepseek/deepseek-chat-v3-0324",
       "temperature": 0.3
     },
-    "analyse_agent": {
-      "label": "Analyse Agent",
+    "solar_agent": {
+      "label": "Solar Agent",
+      "description": "分析论文内容并归纳研究现状。",
       "provider": "openai_official",
       "model_name": "gpt-5",
       "temperature": 0.2,
-      "max_tokens": 4000,
-      "context_window_tokens": 128000,
       "reasoning_effort": "medium"
     }
   },

@@ -234,7 +234,8 @@ function statusLabel(status: SessionStatus) {
                 aria-label="删除会话"
                 @click.stop="emit('removeSession', session.key)"
               >
-                <Trash2 :size="14" />
+                <Trash2 :size="13" />
+                <span>删除</span>
               </button>
             </div>
           </div>

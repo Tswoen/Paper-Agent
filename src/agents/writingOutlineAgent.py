@@ -23,7 +23,7 @@ class WritingOutlineAgent(BaseAgent):
         name="writing_outline_agent",
         role="plan",
         description="根据论文分析结果生成章节和小节级别的写作大纲。",
-        # 中文说明：大纲和分析关系很近，先复用 analyse_agent 的模型配置，避免新增配置后用户还要手动改 model.json。
+        # 中文说明：大纲和分析关系很近，先复用 default_agent 的模型配置，减少用户需要维护的配置项。
         llm_profile="default_agent",
         skills=(),
         input_keys=("request", "analysis_report"),
@@ -91,8 +91,6 @@ def load_writing_outline_agent_llm(
         system = SystemConfig.load(system_config_path)
         config = ModelConfig.from_dict(data, system)
         resolved_agent_name = agent_name or WritingOutlineAgent.spec.llm_profile
-        if resolved_agent_name not in config.agents:
-            return None
         return make_provider(config, resolved_agent_name, client=client)
     except Exception:
         # 中文说明：配置读取失败时返回 None，让图节点生成一个保守的大纲，而不是让流程直接崩掉。
