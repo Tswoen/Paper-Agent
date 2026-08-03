@@ -1,48 +1,42 @@
 {
   "providers": {
-    "openai_official": {
-      "backend": "openai",
-      "api_key_env": "OPENAI_API_KEY",
-      "api_base": "https://api.openai.com/v1",
-      "extra_headers": {},
-      "extra_body": {}
-    },
     "openrouter_main": {
       "backend": "openai_compat",
-      "api_key_env": "OPENROUTER_API_KEY",
-      "api_base": "https://openrouter.ai/api/v1",
+      "api_key": "",
+      "api_base": "",
       "extra_headers": {},
       "extra_body": {}
     },
-    "anthropic_official": {
-      "backend": "anthropic",
-      "api_key_env": "ANTHROPIC_API_KEY",
-      "api_base": "https://api.anthropic.com/v1/messages",
+    "emb_openai": {
+      "backend": "openai_compat",
+      "api_key": "",
       "extra_headers": {},
-      "extra_body": {}
+      "extra_body": {},
+      "api_base": ""
     }
   },
   "agents": {
     "default_agent": {
       "label": "Default Agent",
       "description": "中等能力，适合大多数任务，默认使用，价格适中。",
-      "provider": "openai_official",
-      "model_name": "gpt-5",
+      "provider": "openrouter_main",
+      "model_name": "DeepSeek-V4-Flash",
       "temperature": 0.7,
-      "reasoning_effort": "medium"
+      "reasoning_effort": "none"
     },
     "luna_agent": {
       "label": "Luna Agent",
-      "description": "整理论文摘要和重点，适合阅读任务。",
+      "description": "基础能力，适合简单任务，价格最低。",
       "provider": "openrouter_main",
-      "model_name": "deepseek/deepseek-chat-v3-0324",
-      "temperature": 0.3
+      "model_name": "DeepSeek-V4-Flash",
+      "temperature": 0.2,
+      "reasoning_effort": "medium"
     },
     "solar_agent": {
       "label": "Solar Agent",
-      "description": "分析论文内容并归纳研究现状。",
-      "provider": "openai_official",
-      "model_name": "gpt-5",
+      "description": "最高能力，适合最难任务，价格最高。",
+      "provider": "openrouter_main",
+      "model_name": "DeepSeek-V4-Flash",
       "temperature": 0.2,
       "reasoning_effort": "medium"
     }
@@ -50,9 +44,9 @@
   "embedding_profiles": {
     "default_embedding": {
       "label": "Default Embedding",
-      "provider": "openai_official",
-      "model_name": "text-embedding-3-small",
-      "dimensions": 1536,
+      "provider": "emb_openai",
+      "model_name": "BAAI/bge-m3",
+      "dimensions": null,
       "batch_size": 32
     }
   }
