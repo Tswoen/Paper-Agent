@@ -18,7 +18,7 @@ class AnalyseModelResult:
 
     中文说明：
     parsed 是已经解析出来的 JSON；如果为 None，说明模型不可用、调用失败或格式不对。
-    reason 用简单中文说明失败原因，方便分析节点生成兜底报告。
+    reason 用简单中文说明失败原因，供分析节点决定当前阶段是保守处理还是直接中止。
     """
 
     parsed: JsonObject | None = None

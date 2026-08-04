@@ -15,6 +15,13 @@ from src.repositories.sessions.base import SessionRepository
 
 # 综合分析采用独立的全域八部分结构，因此提升报告版本号。
 ANALYSIS_VERSION = "3.0"
+# 全局综合分析不能用普通文字兜底。这里保留一次额外尝试，避免偶发的模型格式问题
+# 直接让本次任务失败；如果两次都不是合法 JSON，就让工作流明确中止。
+OVERALL_ANALYSIS_MAX_ATTEMPTS = 2
+
+
+class OverallAnalysisError(RuntimeError):
+    """全局综合分析没有得到可继续写作的合法 JSON。"""
 
 
 def run_analyse_node():
@@ -28,7 +35,11 @@ def run_analyse_node():
     """
 
     async def _node(state: State) -> State:
-        """执行分析节点，并尽量保证模型不可用时也返回稳定结构。"""
+        """执行分析节点。
+
+        子主题分析失败时仍可保留保守结果，但全局综合分析是后续写作的核心依据；
+        如果它没有返回合法 JSON，节点会在重试用尽后直接失败，不生成虚假的综合报告。
+        """
 
         request = state.get("request")
         if request is None:
@@ -121,12 +132,19 @@ def run_analyse_node():
                 if reporter is not None:
                     reporter.progress("综合分析模型调用完成", stage="analyse_overall", **usage)
 
-            overall_analysis = await _analyse_overall(
-                topic=request.topic,
-                subtopic_analyses=subtopic_analyses,
-                agent=agent,
-                usage_callback=report_overall_usage,
-            )
+            try:
+                overall_analysis = await _analyse_overall(
+                    topic=request.topic,
+                    subtopic_analyses=subtopic_analyses,
+                    agent=agent,
+                    usage_callback=report_overall_usage,
+                )
+            except OverallAnalysisError as exc:
+                # 中文说明：综合分析失败时把同一张综合卡片更新为失败，随后重新抛出异常。
+                # 这样会阻止后续写作节点，也不会留下看起来像正常结果的 fallback 报告。
+                if reporter is not None:
+                    reporter.failed(str(exc), stage="analyse_overall")
+                raise
             report = _build_final_report(
                 topic=request.topic,
                 subtopic_analyses=subtopic_analyses,
@@ -175,12 +193,33 @@ async def _analyse_one_subtopic(group: JsonObject, *, topic: str, agent: Analyse
 
 
 async def _analyse_overall(topic: str, subtopic_analyses: list[JsonObject], agent: AnalyseAgent, usage_callback: Any | None = None) -> JsonObject:
-    """综合所有子主题的分析摘要，得到独立的八部分全域分析。"""
+    """综合所有子主题的分析摘要，得到独立的八部分全域分析。
 
-    result = await agent.async_analyse_overall(topic=topic, subtopic_analyses=subtopic_analyses, usage_callback=usage_callback)
-    if result.parsed is None:
-        return _fallback_overall_analysis(topic, subtopic_analyses, reason=result.reason)
-    return _normalize_overall_analysis(result.parsed, subtopic_analyses)
+    中文说明：
+    全局结果会直接进入写作大纲和正文，所以 JSON 解析失败时不能拼一份通用文字继续往下写。
+    这里最多发起两次完整的综合分析请求；第二次仍失败就抛出异常，让工作流停在分析节点。
+    """
+
+    last_reason = "模型没有返回可解析的 JSON"
+    for attempt in range(1, OVERALL_ANALYSIS_MAX_ATTEMPTS + 1):
+        result = await agent.async_analyse_overall(
+            topic=topic,
+            subtopic_analyses=subtopic_analyses,
+            usage_callback=usage_callback,
+        )
+        if result.parsed is not None:
+            return _normalize_overall_analysis(result.parsed, subtopic_analyses)
+
+        # 中文说明：模型调用本身已经由 provider 负责网络重试；这里的重试针对的是
+        # “请求成功但返回内容不是 JSON”这一业务层问题。两次都失败时必须中止，不能 fallback。
+        last_reason = str(result.reason or "").strip() or "模型没有返回可解析的 JSON"
+        if attempt < OVERALL_ANALYSIS_MAX_ATTEMPTS:
+            continue
+
+    raise OverallAnalysisError(
+        f"全局分析未返回合法 JSON，已尝试 {OVERALL_ANALYSIS_MAX_ATTEMPTS} 次（含 "
+        f"{OVERALL_ANALYSIS_MAX_ATTEMPTS - 1} 次重试），任务已中止：{last_reason}"
+    )
 
 
 def _build_subtopic_groups(read_results: list[JsonObject], read_summary: JsonObject, search_summary: JsonObject) -> list[JsonObject]:
