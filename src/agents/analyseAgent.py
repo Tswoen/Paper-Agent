@@ -10,6 +10,7 @@ from src.llm import ModelConfig, ProviderSnapshot, SystemConfig, make_provider
 
 from .base import AgentContext, AgentSpec, BaseAgent
 from .contracts import JsonObject
+from .Prompts import ANALYSE_OVERALL_SYSTEM_PROMPT, ANALYSE_SUBTOPIC_SYSTEM_PROMPT
 
 
 @dataclass(slots=True)
@@ -143,11 +144,8 @@ def _subtopic_messages(*, topic: str, group: JsonObject) -> list[JsonObject]:
     return [
         {
             "role": "system",
-            "content": (
-                "你是论文综述分析助手。请先认真思考不同论文之间的关系，但最终只输出 JSON，"
-                "不要输出 Markdown、解释文字或代码块。所有判断都必须带论文引用，引用格式使用 [paperId]。"
-                "输出只能包含“输出要求”中的字段，不要添加其他字段。"
-            ),
+            # 中文说明：子主题分析的系统规则统一放在 Prompts.py。
+            "content": ANALYSE_SUBTOPIC_SYSTEM_PROMPT,
         },
         {
             "role": "user",
@@ -188,13 +186,8 @@ def _overall_messages(*, topic: str, subtopic_analyses: list[JsonObject]) -> lis
     return [
         {
             "role": "system",
-            "content": (
-                "你是论文综述的全域综合分析助手。你的任务是跨子主题升维整合、去重凝练和全局归纳，"
-                "不能把各子主题原文简单拼接，也不能只重复某一个子主题的结论。"
-                "请比较不同子主题的联系、差异、共同规律和适用边界，最终只输出合法 JSON。"
-                "每一个重要判断都必须在句子中保留来自输入分析的 [paperId] 引用；允许使用 Markdown 段落、列表和小标题，"
-                "但 JSON 字符串必须合法转义。输出只能包含“输出要求”中的八个字段，不要添加其他字段。"
-            ),
+            # 中文说明：全局分析单独使用专门提示词，强调跨主题归纳和证据可追溯。
+            "content": ANALYSE_OVERALL_SYSTEM_PROMPT,
         },
         {
             "role": "user",

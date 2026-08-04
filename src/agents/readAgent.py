@@ -15,6 +15,7 @@ from src.paper_retrieval.models import PaperDocument
 
 from .base import AgentContext, AgentSpec, BaseAgent
 from .contracts import JsonObject
+from .Prompts import READ_AGENT_SYSTEM_PROMPT
 
 
 @dataclass(slots=True)
@@ -210,10 +211,8 @@ class ReadAgent(BaseAgent):
                 "发表位置": paper.venue,
             },
         }
-        instruction = """你是论文摘要阅读助手。只能依据给出的 JSON 内容，不能猜测论文没有写明的信息。
-请只返回一个 JSON 对象，字段必须包含：main_question、methods、datasets、contributions、limitations、main_results、short_summary、missing_information、evidence_level、score、decision、reason。
-methods、datasets、contributions、limitations、main_results、missing_information 必须是字符串数组；没有证据就用空数组。
-evidence_level 只能是 metadata 或 abstract。score 是 0 到 100 的整数。decision 只能是 deep_read、abstract_only、insufficient。"""
+        # 中文说明：阅读规则集中管理，确保同步和异步阅读使用完全相同的提示词。
+        instruction = READ_AGENT_SYSTEM_PROMPT
         return [{"role": "system", "content": instruction}, {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]
 
     def _parse_model_result(self, response: LLMResponse) -> JsonObject | None:

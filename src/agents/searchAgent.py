@@ -11,6 +11,7 @@ from src.llm import ModelConfig, ProviderSnapshot, SystemConfig, make_provider
 
 from .base import AgentContext, AgentSpec, BaseAgent
 from .contracts import JsonObject
+from .Prompts import SEARCH_AGENT_SYSTEM_PROMPT
 
 
 @dataclass(slots=True)
@@ -203,21 +204,8 @@ class SearchAgent(BaseAgent):
         """
 
         request = state["request"]
-        system_prompt = """
-你是一名论文检索助手。请把用户输入的论文调研主题拆成若干个较小的研究方向，然后为每个研究方向生成英文检索关键词。
-
-输出要求：
-1. 严格输出合法 JSON，不要输出 Markdown、解释文字或代码块。
-2. JSON 字段必须包含 subtopics。
-3. subtopics 是数组，每一项包含：
-   - subtopic: 简短研究方向，可以用中文或英文。
-   - keyword: 英文检索关键词表达式，格式必须类似 "(k1 and k2) or (k3 and k4)"。
-4. keyword 里只放真正有检索意义的英文词或短语，不要放年份、数据源名称，也不要放无意义的大词。
-5. 如果主题很窄，也至少给出 1 个 subtopic。
-
-JSON 示例：
-{"subtopics":[{"subtopic":"Transformer 在机器翻译中的建模方法","keyword":"(transformer and machine translation) or (attention mechanism and neural machine translation)"}]}
-"""
+        # 中文说明：系统规则统一放在 Prompts.py，当前函数只负责填充用户主题。
+        system_prompt = SEARCH_AGENT_SYSTEM_PROMPT
         user_prompt = json.dumps(
             {
                 "topic": getattr(request, "topic", ""),

@@ -13,6 +13,7 @@ from src.utils.read_utils.chunkers import TextChunk, load_chunks_file
 
 from .base import AgentContext, AgentSpec, BaseAgent
 from .contracts import JsonObject
+from .Prompts import WRITING_ABSTRACT_SYSTEM_PROMPT, WRITING_AGENT_SYSTEM_PROMPT, WRITING_REVIEW_SYSTEM_PROMPT
 
 
 WritingAction = Literal["tool", "draft"]
@@ -538,26 +539,8 @@ def build_writing_agent(llm: ProviderSnapshot | None | str = "auto") -> WritingA
 def _write_messages(state: SectionLoopState) -> list[JsonObject]:
     """构造写作提示词，让模型用 JSON 表达下一步动作。"""
 
-    system_prompt = """
-你是一个论文综述写作 Agent。你需要根据小节任务、证据、前置小节和工具结果完成当前小节正文。
-
-你每次只能做两类动作之一：
-1. 如果资料不够，返回工具调用 JSON：
-{"action":"tool","tool_name":"get_extraction","arguments":{"paperIds":["论文 paperId"]},"reason":"为什么需要这个工具"}
-或：
-{"action":"tool","tool_name":"search_section","arguments":{"requests":[{"paperId":"论文 paperId","chunkIds":["chunkId"]}]},"reason":"为什么需要这些原文片段"}
-或：
-{"action":"tool","tool_name":"get_chunk_by_embed","arguments":{"query":"检索问题"},"reason":"为什么需要全库检索"}
-2. 如果资料足够，返回正文 JSON：
-{"action":"draft","content":"小节正文","paperIds":["正文里实际引用到的 paperId"]}
-
-写正文时必须遵守：
-- 语言要学术化、逻辑要连贯，不要写成项目汇报。
-- 只能使用输入证据和工具结果，不要编造论文结论。
-- 凡是用到某篇论文的观点，句末必须标注对应 paperId，例如 [abc123]。
-- 正文字数尽量接近用户给出的 word_count。
-- 只输出合法 JSON，不要输出 Markdown 代码块，也不要输出解释文字。
-"""
+    # 中文说明：每轮写作都复用统一规则，确保工具调用和正文输出格式稳定。
+    system_prompt = WRITING_AGENT_SYSTEM_PROMPT
     user_prompt = json.dumps(
         {
             "section_id": state.get("section_id"),
@@ -583,16 +566,8 @@ def _write_messages(state: SectionLoopState) -> list[JsonObject]:
 def _abstract_messages(*, topic: str, sections: list[JsonObject], word_count: int) -> list[JsonObject]:
     """构造摘要提示词，只把已经完成的小节正文交给模型。"""
 
-    system_prompt = """
-你是一名论文综述摘要写作助手。请根据已经完成的正文生成摘要，不要补充正文中没有出现的事实。
-
-要求：
-1. 只输出合法 JSON，不要输出 Markdown、解释文字或代码块。
-2. JSON 格式必须是 {"content":"摘要正文"}。
-3. 摘要应概括研究主题、正文梳理的主要方向、核心发现、主要不足和研究展望。
-4. 摘要中不要添加 [paperId] 引用，不要编造正文没有提到的论文、数据或结论。
-5. 摘要语言要简洁、连贯，接近给定字数。
-"""
+    # 中文说明：摘要只读取已完成的小节正文，系统提示词不在这里重复维护。
+    system_prompt = WRITING_ABSTRACT_SYSTEM_PROMPT
     body = [
         {
             "小节标题": str(section.get("section_title") or section.get("section_id") or ""),
@@ -629,18 +604,8 @@ def _fallback_abstract(topic: str, sections: list[JsonObject]) -> str:
 def _review_messages(state: SectionLoopState) -> list[JsonObject]:
     """构造审查提示词，只检查逻辑和语言。"""
 
-    system_prompt = """
-你是论文综述正文审查 Agent。只检查两件事：
-1. 逻辑是否通顺，前后是否衔接自然；
-2. 语言是否学术化，是否像正式综述正文。
-
-请严格返回 JSON：
-{"passed":true,"suggestions":[],"message":"审查说明"}
-或：
-{"passed":false,"suggestions":["具体整改建议1","具体整改建议2"],"message":"不通过原因"}
-
-不要检查参考文献格式，不要要求补充新功能，不要输出 Markdown。
-"""
+    # 中文说明：审查范围保持窄而明确，避免模型把审查变成重新设计全文。
+    system_prompt = WRITING_REVIEW_SYSTEM_PROMPT
     user_prompt = json.dumps(
         {
             "section_id": state.get("section_id"),

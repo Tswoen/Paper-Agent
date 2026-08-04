@@ -9,6 +9,7 @@ from src.llm import ModelConfig, ProviderSnapshot, SystemConfig, make_provider
 
 from .base import AgentContext, AgentSpec, BaseAgent
 from .contracts import JsonObject
+from .Prompts import WRITING_OUTLINE_AGENT_SYSTEM_PROMPT
 
 
 class WritingOutlineAgent(BaseAgent):
@@ -114,28 +115,8 @@ def _outline_messages(state: JsonObject) -> list[JsonObject]:
     overall_analysis = _compact_overall_analysis(dict(analysis_report.get("overall_analysis") or {}))
     subtopic_analyses = _compact_subtopic_analyses(list(analysis_report.get("subtopic_analyses") or []))
 
-    system_prompt = """
-你是一名论文写作大纲助手。请根据已有分析生成一份“写作大纲”，不要写正文。
-
-输出要求：
-1. 只输出合法 JSON，不要输出 Markdown、解释文字或代码块。
-2. 只生成论文正文大纲：不要生成摘要、引言、绪论、参考文献或 bibliography 等部分，直接从正文的第一个研究主题开始安排章节。
-3. 最外层必须是对象，章节键名使用 Chapter1、Chapter2、Chapter3 这种格式。
-4. 每章必须包含：
-   - title：本章标题，简短明确，不能省略。
-   - description：本章总体写作描述，用来锁定本章只写什么、不写什么。
-   - Sections：对象，小节键名使用 section1、section2、section3 这种格式。
-5. 每个小节必须包含：
-   - title：本小节标题，简短明确，不能省略。
-   - task：本小节写作策略，要说明本节该怎么展开。
-   - evidence-map：数组，只能从输入的“综合分析节点输出”对象中选择本节要使用的原始证据、观点或 paperId。
-   - ref-sections：数组，写明写本节前需要参考的前置小节；没有就用空数组。
-   - word-count：整数，表示本节建议字数。
-6. 章节和小节数量要适中，不要为了显得复杂而拆太碎。
-7. 输入中的“综合分析节点输出”是 evidence-map 的唯一来源。它包含八个 JSON 字段；请先判断本节对应哪些字段，再从这些字段的值中原样复制相关证据句、观点句或明确出现的 paperId。
-8. evidence-map 中的内容不得由你重新编造、扩展或改写，也不能引用“综合分析节点输出”之外的信息；如果没有直接相关内容，必须使用空数组。
-9. 章节和小节的主题可以参考 overall_framework，但所有证据都必须能在“综合分析节点输出”的字段值中找到。
-"""
+    # 中文说明：大纲约束集中管理，避免大纲格式与后续写作节点的输入约定不一致。
+    system_prompt = WRITING_OUTLINE_AGENT_SYSTEM_PROMPT
     user_prompt = json.dumps(
         {
             "用户综述主题": getattr(request, "topic", ""),
