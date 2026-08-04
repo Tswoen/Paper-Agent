@@ -180,7 +180,7 @@ git clone https://github.com/Tswoen/Paper-Agent.git && cd Paper-Agent
 poetry install
 
 # 3. Configure environment variables
-cp .env.example .env   # Fill in your API Key
+cp example.env .env   # Fill in your API Key
 
 # 4. Start the backend (default :8000)
 poetry run python main.py
