@@ -74,6 +74,12 @@ def create_sessions_router(
 
         return await resolved_run_service.start_run(session_key, await _json_body(request))
 
+    @router.post("/{session_key}/runs/{run_id}/cancel", status_code=202)
+    async def cancel_run(session_key: str, run_id: str) -> JsonObject:
+        """接收用户主动停止请求，后台任务会在当前等待点尽快结束。"""
+
+        return await resolved_run_service.cancel_run(session_key, run_id)
+
     @router.get("/{session_key}/runs/{run_id}/stream")
     async def stream_run(session_key: str, run_id: str) -> StreamingResponse:
         """以 SSE 形式持续返回指定 run 的实时事件。"""

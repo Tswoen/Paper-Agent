@@ -4,7 +4,7 @@ from typing import Any
 
 from src.agents import ReviewRequest
 from src.graph import run_graph
-from src.graph.runtime import InlineWorkflowSyncPort, WorkflowRuntimeContext
+from src.graph.runtime import InlineWorkflowSyncPort, WorkflowCancellation, WorkflowRuntimeContext
 from src.repositories.sessions.base import SessionRepository
 from src.services.sessions import RuntimeEventEmitter
 
@@ -35,6 +35,7 @@ def build_paper_workflow_message_handler(repo: SessionRepository):
                     turn_id=turn_id,
                     workflow_name="paper_graph",
                 ),
+                cancellation=frame.get("cancellation") if isinstance(frame.get("cancellation"), WorkflowCancellation) else None,
             )
 
         checkpoint = frame.get("read_resume_checkpoint")

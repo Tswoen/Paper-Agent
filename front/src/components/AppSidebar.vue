@@ -97,6 +97,12 @@ function statusLabel(status: SessionStatus) {
   if (status === "running") {
     return "运行中";
   }
+  if (status === "cancel_requested") {
+    return "正在停止";
+  }
+  if (status === "cancelled") {
+    return "已停止";
+  }
   if (status === "completed") {
     return "已完成";
   }

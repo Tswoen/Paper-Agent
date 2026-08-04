@@ -41,12 +41,12 @@ def build_graph():
     """构建当前论文工作流使用的执行图。"""
 
     workflow = StateGraph(State)
-    workflow.add_node("run_search_agent", run_search_agent_node())
-    workflow.add_node("run_read", run_read_node())
-    workflow.add_node("run_analyse", run_analyse_node())
-    workflow.add_node("run_writing_outline", run_writing_outline_node())
-    workflow.add_node("run_writing", run_writing_node())
-    workflow.add_node("compose_reply", run_compose_reply_node())
+    workflow.add_node("run_search_agent", _with_cancellation_boundary("run_search_agent", run_search_agent_node()))
+    workflow.add_node("run_read", _with_cancellation_boundary("run_read", run_read_node()))
+    workflow.add_node("run_analyse", _with_cancellation_boundary("run_analyse", run_analyse_node()))
+    workflow.add_node("run_writing_outline", _with_cancellation_boundary("run_writing_outline", run_writing_outline_node()))
+    workflow.add_node("run_writing", _with_cancellation_boundary("run_writing", run_writing_node()))
+    workflow.add_node("compose_reply", _with_cancellation_boundary("compose_reply", run_compose_reply_node()))
     workflow.add_conditional_edges(START, _entrypoint, {"run_search_agent": "run_search_agent", "run_read": "run_read"})
     workflow.add_edge("run_search_agent", "run_read")
     workflow.add_edge("run_read", "run_analyse")
@@ -55,6 +55,29 @@ def build_graph():
     workflow.add_edge("run_writing", "compose_reply")
     workflow.add_edge("compose_reply", END)
     return workflow.compile(name="paper_graph")
+
+
+def _with_cancellation_boundary(node_name: str, node):
+    """给所有图节点加上统一的用户停止检查，避免节点里重复写样板代码。"""
+
+    async def _guarded(state: State) -> State:
+        """开始和结束节点时各检查一次，已完成的当前节点不会再启动下一个节点。"""
+
+        runtime = state.get("runtime_context")
+        cancellation = getattr(runtime, "cancellation", None)
+        if cancellation is not None:
+            cancellation.raise_if_requested()
+
+        result = await node(state)
+
+        # 中文注释：如果用户在节点执行期间点了停止，丢弃这个节点尚未提交的结果，
+        # 让恢复时从上一个稳定状态重新执行，避免把半成品误认为已经完成。
+        if cancellation is not None:
+            cancellation.raise_if_requested()
+        return result
+
+    _guarded.__name__ = f"{node_name}_with_cancellation"
+    return _guarded
 
 
 async def run_graph(

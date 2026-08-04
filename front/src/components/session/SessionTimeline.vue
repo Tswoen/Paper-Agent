@@ -19,8 +19,11 @@ function statusTone(status: string) {
   if (status === "completed" || status === "success") {
     return "success";
   }
-  if (status === "running" || status === "pending") {
+  if (status === "running" || status === "pending" || status === "cancel_requested") {
     return "warning";
+  }
+  if (status === "cancelled") {
+    return "neutral";
   }
   if (status === "failed" || status === "error") {
     return "danger";

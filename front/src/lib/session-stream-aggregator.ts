@@ -74,7 +74,7 @@ export class SessionStreamAggregator {
     this.runtimeEvents = [];
     this.runtimeEventMap = new Map();
     this.artifacts = [...thread.artifacts];
-    this.isStreaming = thread.status === "running" || thread.has_pending_tool_calls;
+    this.isStreaming = thread.status === "running" || thread.status === "cancel_requested" || thread.has_pending_tool_calls;
     this.runStartedAt = thread.run_started_at;
     this.streamError = null;
     this.status = thread.status;
@@ -150,9 +150,9 @@ export class SessionStreamAggregator {
         if ("run_started_at" in event) {
           this.runStartedAt = event.run_started_at ?? null;
         }
-        this.isStreaming = event.status === "running";
-        // 中文注释：只要后端明确告诉我们不是运行中，就要把卡片上的“正在生成中”也关掉。
-        if (event.status && event.status !== "running") {
+        this.isStreaming = event.status === "running" || event.status === "cancel_requested";
+        // 中文注释：只有正在运行或正在停止时保留忙碌状态，其他状态都要结束“正在生成中”。
+        if (event.status && event.status !== "running" && event.status !== "cancel_requested") {
           this.runStartedAt = null;
           this.stopActiveAssistantStreaming();
           this.activeNodeKey = null;
@@ -176,6 +176,11 @@ export class SessionStreamAggregator {
         return;
       case "turn_end":
         this.status = event.status ?? this.status;
+        if (event.status === "cancelled") {
+          // 用户主动停止后，后端不会再为每个正在运行的子节点单独发送结束事件。
+          // 这里统一补上取消状态，避免整体已经停止但节点卡片仍显示“处理中”。
+          this.markUnfinishedRuntimeEventsCancelled(event);
+        }
         this.isStreaming = false;
         this.activeNodeKey = null;
         this.stopActiveAssistantStreaming();
@@ -391,6 +396,42 @@ export class SessionStreamAggregator {
     for (const event of this.runtimeEvents) {
       update(event);
     }
+  }
+
+  /**
+   * 将运行树中还没有结束的节点统一标记为已取消。
+   * 已完成、已失败或已经跳过的节点不改动，保证用户仍能看到中断前已经完成的结果。
+   */
+  private markUnfinishedRuntimeEventsCancelled(event: SessionRuntimeEvent) {
+    const timestamp = event.timestamp ?? new Date().toISOString();
+    const update = (item: UIRuntimeTimelineEvent) => {
+      if (item.status === "running" || item.status === "pending" || item.status === "cancel_requested") {
+        item.status = "cancelled";
+        item.showContent = "已停止";
+        item.updatedAt = timestamp;
+        item.completedAt = timestamp;
+        item.metadata = {
+          ...item.metadata,
+          cancellation_reason: "user_requested",
+        };
+        item.raw = {
+          ...item.raw,
+          event: "runtime_event",
+          status: "cancelled",
+          message: "任务已按用户请求停止",
+          timestamp,
+        };
+      }
+
+      for (const child of item.children) {
+        update(child);
+      }
+    };
+
+    for (const item of this.runtimeEvents) {
+      update(item);
+    }
+    this.recalculateTokenTotals();
   }
 
   /** 把子事件挂到父事件下面；如果已经挂过，就只保持原位置，不重复插入。 */

@@ -27,8 +27,11 @@ function statusTone(status: string) {
   if (status === "completed" || status === "success") {
     return "success";
   }
-  if (status === "running" || status === "pending") {
+  if (status === "running" || status === "pending" || status === "cancel_requested") {
     return "warning";
+  }
+  if (status === "cancelled") {
+    return "neutral";
   }
   if (status === "failed" || status === "error") {
     return "danger";
@@ -39,6 +42,12 @@ function statusTone(status: string) {
 function statusLabel(status: string) {
   if (status === "running") {
     return "处理中";
+  }
+  if (status === "cancel_requested") {
+    return "正在停止";
+  }
+  if (status === "cancelled") {
+    return "已停止";
   }
   if (status === "completed") {
     return "完成";
@@ -62,7 +71,7 @@ function statusIcon(status: string) {
   if (status === "failed" || status === "error") {
     return TriangleAlert;
   }
-  if (status === "running" || status === "pending") {
+  if (status === "running" || status === "pending" || status === "cancel_requested") {
     return LoaderCircle;
   }
   return CircleDot;

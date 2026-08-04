@@ -87,6 +87,16 @@ export function startSessionRun(
   });
 }
 
+export function cancelSessionRun(
+  sessionKey: string,
+  runId: string,
+): Promise<{ session_key: string; run_id: string; status: string }> {
+  return request<{ session_key: string; run_id: string; status: string }>(
+    `/api/sessions/${encodeURIComponent(sessionKey)}/runs/${encodeURIComponent(runId)}/cancel`,
+    { method: "POST", body: JSON.stringify({}) },
+  );
+}
+
 export function subscribeSessionRun(
   streamUrl: string,
   handlers: {

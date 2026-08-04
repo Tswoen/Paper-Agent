@@ -8,7 +8,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from src.graph.runtime import InlineWorkflowSyncPort, WorkflowRuntimeContext
+from src.graph.runtime import InlineWorkflowSyncPort, WorkflowCancellation, WorkflowRuntimeContext
 from src.graph.runtime_resources import WorkflowRuntimeResources
 from src.models.sessions import SessionRecord, utc_now
 from src.repositories.sessions.base import SessionRepository
@@ -31,6 +31,8 @@ class RunBrokerState:
     events: list[JsonObject] = field(default_factory=list)
     subscribers: list[asyncio.Queue[JsonObject | None]] = field(default_factory=list)
     closed: bool = False
+    cancellation: WorkflowCancellation = field(default_factory=WorkflowCancellation)
+    task: asyncio.Task[None] | None = None
 
 
 class SessionRunBroker:
@@ -54,6 +56,47 @@ class SessionRunBroker:
                 turn_id=turn_id,
                 created_at=created_at,
             )
+
+    def attach_task(self, run_id: str, task: asyncio.Task[None]) -> None:
+        """记录后台任务句柄，取消接口才能真正停止对应的工作流。"""
+
+        with self._lock:
+            state = self._runs.get(run_id)
+            if state is None:
+                raise SessionError(f"run not found: {run_id}", 404)
+            state.task = task
+
+    def get_run(self, run_id: str) -> RunBrokerState | None:
+        """读取当前进程里的 run 状态，供取消接口校验会话归属。"""
+
+        with self._lock:
+            return self._runs.get(run_id)
+
+    def cancellation_for(self, run_id: str) -> WorkflowCancellation:
+        """返回指定 run 的停止控制对象，供工作流运行时使用。"""
+
+        with self._lock:
+            state = self._runs.get(run_id)
+            if state is None:
+                raise SessionError(f"run not found: {run_id}", 404)
+            return state.cancellation
+
+    def request_cancel(self, run_id: str) -> asyncio.Task[None] | None:
+        """记录停止请求，并返回后台任务句柄供服务层发出取消信号。"""
+
+        with self._lock:
+            state = self._runs.get(run_id)
+            if state is None:
+                raise SessionError(f"run not found: {run_id}", 404)
+            state.cancellation.request()
+            return state.task
+
+    def is_cancel_requested(self, run_id: str) -> bool:
+        """查询指定 run 是否已经收到停止请求，避免停止与完成同时发生时误报成功。"""
+
+        with self._lock:
+            state = self._runs.get(run_id)
+            return bool(state and state.cancellation.is_requested())
 
     async def publish(self, run_id: str, event: JsonObject) -> JsonObject:
         """向指定 run 广播一条事件，并保留一份内存历史。"""
@@ -202,7 +245,7 @@ class SessionRunService:
             persist_event=True,
         )
 
-        asyncio.create_task(
+        task = asyncio.create_task(
             self._run_in_background(
                 session_key=session_key,
                 run_id=run_id,
@@ -211,12 +254,53 @@ class SessionRunService:
                 body=copy.deepcopy(body),
             )
         )
+        self.broker.attach_task(run_id, task)
         return {
             "session_key": session_key,
             "run_id": run_id,
             "turn_id": turn_id,
             "status": "accepted",
             "stream_url": f"/api/sessions/{session_key}/runs/{run_id}/stream",
+        }
+
+    async def cancel_run(self, session_key: str, run_id: str) -> JsonObject:
+        """处理用户主动停止请求，并让后台任务尽快在当前等待点退出。"""
+
+        state = self.broker.get_run(run_id)
+        if state is None or state.session_key != session_key:
+            raise SessionError("run not found", 404)
+
+        if state.closed or (state.task is not None and state.task.done()):
+            return {
+                "session_key": session_key,
+                "run_id": run_id,
+                "status": "already_finished",
+            }
+
+        already_requested = state.cancellation.is_requested()
+        task = self.broker.request_cancel(run_id)
+        turn_id = state.turn_id
+        # 中文注释：先把“正在停止”告诉前端，再取消后台任务，避免任务太快结束时前端看不到中间状态。
+        if not already_requested:
+            self._publish_runtime_event_nowait(
+                session_key,
+                run_id,
+                turn_id,
+                {
+                    "event": "status",
+                    "status": "cancel_requested",
+                    "message": "已收到停止请求，正在保存当前进度",
+                    "turn_id": turn_id,
+                    "timestamp": utc_now(),
+                },
+                persist_event=True,
+            )
+        if task is not None and not task.done():
+            task.cancel()
+        return {
+            "session_key": session_key,
+            "run_id": run_id,
+            "status": "cancel_requested",
         }
 
     async def stream_events(self, session_key: str, run_id: str):
@@ -244,6 +328,7 @@ class SessionRunService:
         # 中文注释：每次后台 run 都创建自己独立的一份运行时资源，后面节点可以通过
         # runtime_context 共享这些资源，不会和别的 run 混用。
         resources = WorkflowRuntimeResources()
+        cancellation = self.broker.cancellation_for(run_id)
 
         def emit(event: JsonObject) -> JsonObject:
             """同步发布当前 run 事件，同时更新本地助手缓冲区。"""
@@ -274,6 +359,7 @@ class SessionRunService:
                 workflow_name="paper_graph",
             ),
             resources=resources,
+            cancellation=cancellation,
         )
 
         try:
@@ -299,6 +385,16 @@ class SessionRunService:
                     {"run_id": run_id, "turn_id": turn_id, "runtime_context": runtime_context, **body},
                     emit,
                 )
+                if self.broker.is_cancel_requested(run_id):
+                    self._finalize_cancelled(
+                        session_key,
+                        run_id,
+                        turn_id,
+                        assistant_buffer,
+                        already_closed=saw_turn_end,
+                    )
+                    logger.info("run cancelled after user request")
+                    return
                 if not saw_turn_end:
                     emit(
                         {
@@ -310,6 +406,21 @@ class SessionRunService:
                     )
                 self._finalize_success(session_key, run_id, turn_id, assistant_buffer)
                 logger.info("后台 run 执行完成")
+        except asyncio.CancelledError:
+            if self.broker.is_cancel_requested(run_id):
+                # 中文注释：用户主动停止不是程序错误，不发送 error 事件，也不把会话标成 failed。
+                self._finalize_cancelled(session_key, run_id, turn_id, assistant_buffer, already_closed=saw_turn_end)
+                logger.info("run cancelled by user")
+            else:
+                # 中文注释：如果没有用户停止标记，说明是服务关闭或其他外部取消，不能伪装成用户操作。
+                self._finalize_failure(
+                    session_key=session_key,
+                    run_id=run_id,
+                    turn_id=turn_id,
+                    assistant_buffer=assistant_buffer,
+                    error=RuntimeError("后台 run 被外部取消"),
+                    already_closed=saw_turn_end,
+                )
         except Exception as error:
             logger.exception("后台 run 执行失败")
             self._finalize_failure(
@@ -334,6 +445,35 @@ class SessionRunService:
 
         assistant_buffer.persist(self.repo, session_key, turn_id)
         self.repo.set_status(session_key, "completed")
+        self.repo.set_run_started_at(session_key, None)
+        self.broker.close_run_nowait(run_id)
+
+    def _finalize_cancelled(
+        self,
+        session_key: str,
+        run_id: str,
+        turn_id: str,
+        assistant_buffer: AssistantMessageBuffer,
+        already_closed: bool = False,
+    ) -> None:
+        """保存用户停止前已经产生的回复，并把 run 结束为 cancelled。"""
+
+        if not already_closed:
+            self._publish_runtime_event_nowait(
+                session_key,
+                run_id,
+                turn_id,
+                {
+                    "event": "turn_end",
+                    "status": "cancelled",
+                    "message": "任务已按用户请求停止，已保留当前进度",
+                    "turn_id": turn_id,
+                    "timestamp": utc_now(),
+                },
+                persist_event=True,
+            )
+        assistant_buffer.persist(self.repo, session_key, turn_id)
+        self.repo.set_status(session_key, "cancelled")
         self.repo.set_run_started_at(session_key, None)
         self.broker.close_run_nowait(run_id)
 

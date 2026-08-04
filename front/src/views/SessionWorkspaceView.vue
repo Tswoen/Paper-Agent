@@ -12,7 +12,7 @@ import {
   Upload,
 } from "lucide-vue-next";
 
-import { ApiRequestError, createSession, fetchSessionThread, startSessionRun, subscribeSessionRun } from "../api/sessions";
+import { ApiRequestError, cancelSessionRun, createSession, fetchSessionThread, startSessionRun, subscribeSessionRun } from "../api/sessions";
 import SessionComposer from "../components/session/SessionComposer.vue";
 import SessionTimeline from "../components/session/SessionTimeline.vue";
 import StatusPill from "../components/StatusPill.vue";
@@ -45,6 +45,8 @@ const draft = ref("");
 const constraints = ref<SessionConstraints>({});
 const threadLoading = ref(false);
 const sending = ref(false);
+const cancelling = ref(false);
+const activeRunId = ref<string | null>(null);
 const streamSource = ref<EventSource | null>(null);
 const manualClose = ref(false);
 const timelineSnapshot = ref<SessionTimelineSnapshot | null>(null);
@@ -74,6 +76,9 @@ const shouldShowTimeline = computed(() => {
 const shouldShowWelcomeComposer = computed(() => !threadLoading.value && !shouldShowTimeline.value);
 
 const statusText = computed(() => {
+  if (cancelling.value || currentStatus.value === "cancel_requested") {
+    return "正在停止";
+  }
   if (sending.value) {
     return "正在连接";
   }
@@ -127,6 +132,8 @@ const timelineStats = computed(() => {
 const taskStatusLabel = computed(() => {
   if (currentStatus.value === "completed") return "已完成";
   if (currentStatus.value === "running") return "执行中";
+  if (currentStatus.value === "cancel_requested") return "正在停止";
+  if (currentStatus.value === "cancelled") return "已停止";
   if (currentStatus.value === "failed") return "执行失败";
   return "等待开始";
 });
@@ -192,6 +199,8 @@ async function selectSession(sessionKey: string) {
   }
 
   closeStream(true);
+  activeRunId.value = null;
+  cancelling.value = false;
   selectedSessionKey.value = sessionKey;
   constraints.value = {};
   threadLoading.value = true;
@@ -232,6 +241,8 @@ function resetToBlankWorkspace() {
   selectedRunStartedAt.value = null;
   timelineSnapshot.value = null;
   sending.value = false;
+  cancelling.value = false;
+  activeRunId.value = null;
   threadLoading.value = false;
 }
 
@@ -257,6 +268,7 @@ async function submitTopic() {
       constraints: { ...constraints.value },
     });
     emit("refreshSessions");
+    activeRunId.value = accepted.run_id;
     openStream(sessionKey, accepted.stream_url);
   } catch (error) {
     draft.value = submittedContent;
@@ -284,6 +296,7 @@ async function resumeLatestCheckpoint() {
       resume_from_last_checkpoint: true,
     });
     emit("refreshSessions");
+    activeRunId.value = accepted.run_id;
     openStream(selectedSessionKey.value, accepted.stream_url);
   } catch (error) {
     await reloadCurrentThread();
@@ -327,10 +340,28 @@ function openStream(sessionKey: string, streamUrl: string) {
   });
 }
 
+/** 向后端发送真正的停止请求；这里只关闭 SSE 会让后台任务继续运行。 */
+async function cancelActiveRun() {
+  const runId = activeRunId.value;
+  if (!selectedSessionKey.value || !runId || cancelling.value) {
+    return;
+  }
+
+  cancelling.value = true;
+  try {
+    await cancelSessionRun(selectedSessionKey.value, runId);
+  } catch (error) {
+    cancelling.value = false;
+    handleError(error, "停止工作流失败");
+  }
+}
+
 /** 当 run 结束时刷新线程和列表，确保左侧历史与中间时间线都展示落库后的结果。 */
 async function handleRunFinished(sessionKey: string, event: SessionRuntimeEvent) {
   closeStream(true);
   sending.value = false;
+  cancelling.value = false;
+  activeRunId.value = null;
   await reloadCurrentThread();
   emit("refreshSessions");
   if (event.status === "failed") {
@@ -338,6 +369,14 @@ async function handleRunFinished(sessionKey: string, event: SessionRuntimeEvent)
       tone: "error",
       title: "工作流执行失败",
       description: event.message ?? event.content ?? "请查看时间线中的错误信息。",
+    });
+    return;
+  }
+  if (event.status === "cancelled") {
+    pushToast({
+      tone: "info",
+      title: "工作流已停止",
+      description: "已保留停止前已经完成的结果。",
     });
     return;
   }
@@ -492,9 +531,12 @@ function handleError(error: unknown, title: string) {
             :rows="3"
             :running="isRunning"
             :sending="sending || props.creatingSession"
+            :cancellable="Boolean(activeRunId)"
+            :cancelling="cancelling"
             :status-text="statusText"
             v-model:constraints="constraints"
             @submit="submitTopic"
+            @cancel="cancelActiveRun"
           />
 
           <SessionTimeline
@@ -516,9 +558,12 @@ function handleError(error: unknown, title: string) {
           v-model="draft"
           :running="isRunning"
           :sending="sending || props.creatingSession"
+          :cancellable="Boolean(activeRunId)"
+          :cancelling="cancelling"
           :status-text="statusText"
           v-model:constraints="constraints"
           @submit="submitTopic"
+          @cancel="cancelActiveRun"
         />
       </div>
 
@@ -529,7 +574,7 @@ function handleError(error: unknown, title: string) {
             <span class="insight-status-icon"><CheckCircle2 :size="24" /></span>
             <strong>{{ taskStatusLabel }}</strong>
           </div>
-          <p>{{ currentStatus === "completed" ? "任务已成功完成所有步骤" : "任务正在按照流程执行" }}</p>
+          <p>{{ currentStatus === "completed" ? "任务已成功完成所有步骤" : currentStatus === "cancelled" ? "已保留停止前的处理进度" : "任务正在按照流程执行" }}</p>
         </section>
 
         <section class="insight-card">

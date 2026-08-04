@@ -7,6 +7,7 @@ import {
   Lightbulb,
   LoaderCircle,
   SendHorizonal,
+  Square,
   Sparkles,
 } from "lucide-vue-next";
 
@@ -17,6 +18,8 @@ const props = withDefaults(
     modelValue: string;
     running: boolean;
     sending: boolean;
+    cancellable?: boolean;
+    cancelling?: boolean;
     statusText: string;
     variant?: "default" | "welcome";
     heading?: string;
@@ -31,6 +34,8 @@ const props = withDefaults(
     helperText: "",
     placeholder: "输入研究主题或调研任务...",
     rows: 1,
+    cancellable: false,
+    cancelling: false,
   },
 );
 
@@ -38,6 +43,7 @@ const emit = defineEmits<{
   "update:modelValue": [value: string];
   "update:constraints": [value: SessionConstraints];
   submit: [];
+  cancel: [];
 }>();
 
 interface TopicSuggestion {
@@ -176,13 +182,14 @@ function onKeydown(event: KeyboardEvent) {
           <button
             class="button primary compact session-composer-send"
             type="button"
-            :disabled="running || sending || !modelValue.trim()"
-            :title="running || sending ? props.statusText : '开始调研'
-            "
-            aria-label="开始调研"
-            @click="emit('submit')"
+            :disabled="props.cancelling || (!props.cancellable && (running || sending || !modelValue.trim()))"
+            :title="props.cancellable ? '停止当前任务' : running || sending ? props.statusText : '开始调研'"
+            :aria-label="props.cancellable ? '停止当前任务' : '开始调研'"
+            @click="props.cancellable ? emit('cancel') : emit('submit')"
           >
-            <LoaderCircle v-if="running || sending" class="spinning" :size="22" />
+            <LoaderCircle v-if="props.cancelling" class="spinning" :size="22" />
+            <Square v-else-if="props.cancellable" :size="22" />
+            <LoaderCircle v-else-if="running || sending" class="spinning" :size="22" />
             <SendHorizonal v-else :size="22" />
           </button>
         </div>
@@ -257,11 +264,14 @@ function onKeydown(event: KeyboardEvent) {
         <button
           class="button primary compact session-composer-send"
           type="button"
-          :disabled="running || sending || !modelValue.trim()"
-          :title="running || sending ? props.statusText : '发送，Ctrl / Command + Enter'"
-          @click="emit('submit')"
+          :disabled="props.cancelling || (!props.cancellable && (running || sending || !modelValue.trim()))"
+          :title="props.cancellable ? '停止当前任务' : running || sending ? props.statusText : '发送，Ctrl / Command + Enter'"
+          :aria-label="props.cancellable ? '停止当前任务' : '发送'"
+          @click="props.cancellable ? emit('cancel') : emit('submit')"
         >
-          <LoaderCircle v-if="running || sending" class="spinning" :size="16" />
+          <LoaderCircle v-if="props.cancelling" class="spinning" :size="16" />
+          <Square v-else-if="props.cancellable" :size="16" />
+          <LoaderCircle v-else-if="running || sending" class="spinning" :size="16" />
           <SendHorizonal v-else :size="16" />
         </button>
       </div>

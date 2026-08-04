@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Protocol
 
@@ -13,6 +14,38 @@ from src.models.sessions import utc_now
 
 JsonObject = dict[str, Any]
 WorkflowEventEmitter = Callable[[JsonObject], JsonObject]
+
+
+class WorkflowCancellation:
+    """保存一次运行是否收到用户停止请求。"""
+
+    def __init__(self) -> None:
+        """创建一个还没有收到停止请求的控制对象。"""
+
+        self._requested = False
+        self._event = asyncio.Event()
+
+    def request(self) -> None:
+        """记录用户已经请求停止，并唤醒正在等待这个信号的代码。"""
+
+        self._requested = True
+        self._event.set()
+
+    def is_requested(self) -> bool:
+        """返回用户是否已经请求停止。"""
+
+        return self._requested
+
+    async def wait(self) -> None:
+        """等待用户发出停止请求，供需要主动等待的任务使用。"""
+
+        await self._event.wait()
+
+    def raise_if_requested(self) -> None:
+        """在安全边界检查停止请求，收到请求后让当前异步任务退出。"""
+
+        if self._requested:
+            raise asyncio.CancelledError()
 
 
 class WorkflowSyncPort(Protocol):
@@ -34,6 +67,9 @@ class WorkflowRuntimeContext:
     run_id: str | None = None
     workflow_name: str = "paper_graph"
     sync_port: WorkflowSyncPort | None = None
+    # 中文注释：这个对象只保存“用户是否点了停止”，不保存模型或数据库连接，
+    # 节点可以在开始新阶段前检查它，后台服务也可以用它配合取消当前任务。
+    cancellation: WorkflowCancellation | None = None
     # 中文注释：resources 里放的是单次 run 共用的并发控制对象和公共资源，
     # 例如下载限流、共用 AsyncClient、embedding 连接等。节点通过 runtime_context
     # 就能拿到这些资源，不需要再往 State 顶层散落很多字段。

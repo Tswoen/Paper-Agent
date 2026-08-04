@@ -1,4 +1,10 @@
-export type SessionStatus = "created" | "running" | "completed" | "failed";
+export type SessionStatus =
+  | "created"
+  | "running"
+  | "cancel_requested"
+  | "cancelled"
+  | "completed"
+  | "failed";
 
 export interface SessionSummary {
   key: string;
