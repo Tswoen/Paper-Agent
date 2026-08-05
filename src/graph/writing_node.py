@@ -6,7 +6,11 @@ import re
 from pathlib import Path
 from typing import Any, cast
 
-from src.agents.writingAgent import WritingAgent, build_writing_agent, load_writing_agent_llm
+from src.agents.writingAgent import (
+    WritingAgent,
+    build_writing_agent,
+    load_writing_agent_llm,
+)
 from src.graph.runtime import WorkflowRuntimeContext
 from src.graph.state_models import JsonObject, State
 from src.llm import ProviderSnapshot, SystemConfig
@@ -212,7 +216,9 @@ def run_writing_node():
 
         updated = dict(state)
         updated.update(
-            writing_sections=written_sections,
+            # 中文说明：报告生成后 section 内容已经换成参考文献序号，状态里也保存同一份内容，
+            # 避免前端读取 writing_sections 时又看到旧的 [paperId] 引用。
+            writing_sections=list(writing_report.get("sections") or written_sections),
             writing_report=writing_report,
             writing_artifact_refs=artifact_refs,
             diagnostics=diagnostics,
@@ -332,15 +338,25 @@ def _build_writing_report(
 ) -> JsonObject:
     """整理正文、摘要和参考文献组成的完整写作产物。"""
 
+    citation_index_by_paper_id = {
+        str(item.get("paperId") or "").strip().lower(): str(item.get("index"))
+        for item in references
+        if str(item.get("paperId") or "").strip() and item.get("index") is not None
+    }
+    # 中文说明：参考文献编号只有在所有论文都整理完之后才确定，
+    # 因此正文先保留 paperId，最后在这里一次性替换成 [1]、[2] 这样的序号。
+    numbered_sections = _replace_section_citations(sections, citation_index_by_paper_id)
+    numbered_abstract = _replace_citation_numbers(abstract, citation_index_by_paper_id)
+
     return {
         "writing_version": WRITING_VERSION,
         "topic": topic,
         "writing_outline": outline,
-        "sections": sections,
-        "abstract": abstract,
+        "sections": numbered_sections,
+        "abstract": numbered_abstract,
         "references": references,
         "references_markdown": _references_markdown(references),
-        "content_markdown": _compose_content_markdown(abstract, sections, references),
+        "content_markdown": _compose_content_markdown(numbered_abstract, numbered_sections, references),
         "cited_paper_ids": [str(item.get("paperId") or "") for item in references if str(item.get("paperId") or "").strip()],
         "execution_metadata": {
             "model_used": model_used,
@@ -350,6 +366,36 @@ def _build_writing_report(
             "created_at": utc_now(),
         },
     }
+
+
+def _replace_section_citations(
+    sections: list[JsonObject],
+    citation_index_by_paper_id: dict[str, str],
+) -> list[JsonObject]:
+    """把正文小节中的 `[paperId]` 替换为参考文献序号。"""
+
+    if not citation_index_by_paper_id:
+        return [dict(section) for section in sections]
+
+    replaced: list[JsonObject] = []
+    for section in sections:
+        item = dict(section)
+        item["content"] = _replace_citation_numbers(str(item.get("content") or ""), citation_index_by_paper_id)
+        replaced.append(item)
+    return replaced
+
+
+def _replace_citation_numbers(content: str, citation_index_by_paper_id: dict[str, str]) -> str:
+    """替换一段文本中的论文编号，普通 Markdown 方括号保持不变。"""
+
+    citation_pattern = re.compile(r"\[([^\[\]\r\n]+)\]")
+
+    def replace(match: re.Match[str]) -> str:
+        candidate = match.group(1).strip().strip('"').strip("'").strip()
+        index = citation_index_by_paper_id.get(candidate.lower())
+        return f"[{index}]" if index else match.group(0)
+
+    return citation_pattern.sub(replace, content)
 
 
 def _extract_paper_ids_from_sections(sections: list[JsonObject]) -> list[str]:
@@ -368,6 +414,9 @@ def _extract_paper_ids_from_sections(sections: list[JsonObject]) -> list[str]:
             candidate = match.group(1).strip().strip('"').strip("'")
             if not candidate or any(character.isspace() for character in candidate):
                 continue
+            # 中文说明：即使模型漏掉了前面的归一化，也不能把切片编号直接生成参考文献。
+            if _is_chunk_id(candidate):
+                continue
             paper_id = declared_by_key.get(candidate.lower(), candidate)
             if candidate.lower() not in declared_by_key and not re.search(r"\d|[:/.]", candidate):
                 continue
@@ -381,11 +430,19 @@ def _extract_paper_ids_from_sections(sections: list[JsonObject]) -> list[str]:
         # 避免正文内容和写作 Agent 的引用记录不一致。
         for paper_id in list(section.get("cited_paper_ids") or []):
             text = str(paper_id or "").strip()
+            if _is_chunk_id(text):
+                continue
             key = text.lower()
             if text and key not in seen:
                 seen.add(key)
                 found.append(text)
     return found
+
+
+def _is_chunk_id(value: str) -> bool:
+    """判断一个候选编号是否符合全文切片的页码或分段编号格式。"""
+
+    return bool(re.search(r":(?:p|c)\d{4}(?::s\d{4})?$", str(value or "").strip(), flags=re.IGNORECASE))
 
 
 def _collect_paper_metadata(
@@ -618,6 +675,8 @@ def _collect_cited_paper_ids(sections: list[JsonObject]) -> list[str]:
     for section in sections:
         for paper_id in list(section.get("cited_paper_ids") or []):
             text = str(paper_id or "").strip()
+            if _is_chunk_id(text):
+                continue
             key = text.lower()
             if not text or key in seen:
                 continue

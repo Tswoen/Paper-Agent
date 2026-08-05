@@ -136,7 +136,7 @@ class WritingAgent(BaseAgent):
             "progress_callback": progress_callback,
         }
         final_state = await graph.ainvoke(initial_state)
-        return {
+        section_result = {
             "section_id": section_id,
             "task": task,
             "word_count": word_count,
@@ -148,6 +148,15 @@ class WritingAgent(BaseAgent):
             "completed": bool(final_state.get("completed")),
             "warnings": list(final_state.get("warnings") or []),
         }
+        # 中文说明：结构化摘要里的来源标记和切片检索返回的 chunkId 都是“证据位置”，
+        # 不能直接作为正文引用。这里在小节离开 Agent 前统一换成真正的 paperId，
+        # 这样后面的参考文献解析只需要处理一种引用格式。
+        return normalize_writing_section_citations(
+            section_result,
+            read_results=list(read_results),
+            session_read_results=list(session_read_results or []),
+            cache_dir=Path(cache_dir),
+        )
 
     async def async_write_abstract(
         self,
@@ -458,6 +467,148 @@ def search_section(
         selected = [_chunk_to_markdown(chunks_by_id[chunk_id]) for chunk_id in chunk_ids if chunk_id in chunks_by_id]
         found.append({"paperId": paper_id, "status": "ok" if selected else "missing_chunk_ids", "chunks": selected})
     return found
+
+
+def normalize_writing_section_citations(
+    section: JsonObject,
+    *,
+    read_results: list[JsonObject],
+    session_read_results: list[JsonObject],
+    cache_dir: Path,
+) -> JsonObject:
+    """把小节里可能出现的切片引用统一改成对应的论文编号。
+
+    中文说明：全文结构化摘要会把证据位置写成 `[论文编号:p0001]`，切片工具返回的
+    结果还会同时出现 `paperId` 和 `chunkId`。模型有时会把后者误写进正文，因此这里
+    统一查找“切片编号 -> 论文编号”的关系，再处理正文和 cited_paper_ids 两个字段。
+    """
+
+    normalized = dict(section)
+    chunk_to_paper = _build_chunk_to_paper_map(
+        [*read_results, *session_read_results, section.get("tool_results") or []],
+        cache_dir=cache_dir,
+    )
+    content = _replace_chunk_citations(str(normalized.get("content") or ""), chunk_to_paper)
+    cited_paper_ids: list[str] = []
+    for value in list(normalized.get("cited_paper_ids") or []):
+        paper_id = _resolve_citation_paper_id(str(value or ""), chunk_to_paper)
+        if paper_id:
+            cited_paper_ids.append(paper_id)
+
+    normalized["content"] = content.strip()
+    normalized["cited_paper_ids"] = _deduplicate_strings(cited_paper_ids)
+    return normalized
+
+
+def _build_chunk_to_paper_map(payloads: list[Any], *, cache_dir: Path) -> dict[str, str]:
+    """从工具结果、阅读结果和本地切片缓存建立编号映射。"""
+
+    mapping: dict[str, str] = {}
+    _collect_chunk_mappings(payloads, mapping)
+
+    # 中文说明：结构化摘要里只有正文中的 chunkId，未必会把 chunks_used 一起传给写作 Agent。
+    # 因此再根据结果里出现过的 paperId 读取对应缓存，补齐摘要引用所需的映射。
+    paper_ids = _collect_payload_paper_ids(payloads)
+    for paper_id in paper_ids:
+        chunks_path = _find_chunks_path(paper_id, cache_dir)
+        if chunks_path is None:
+            continue
+        for chunk in load_chunks_file(chunks_path):
+            _register_chunk_mapping(mapping, chunk.chunk_id, chunk.paperId or paper_id)
+    return mapping
+
+
+def _collect_chunk_mappings(value: Any, mapping: dict[str, str], inherited_paper_id: str = "") -> None:
+    """递归读取 payload 中显式提供的 paperId、chunkId 和 chunks_used。"""
+
+    if isinstance(value, dict):
+        nested_paper = value.get("paper")
+        nested_paper_id = ""
+        if isinstance(nested_paper, dict):
+            nested_paper_id = str(nested_paper.get("paperId") or nested_paper.get("id") or "").strip()
+        paper_id = str(value.get("paperId") or value.get("paper_id") or nested_paper_id or inherited_paper_id).strip()
+        for key, item in value.items():
+            normalized_key = str(key)
+            if normalized_key in {"chunkId", "chunk_id"}:
+                _register_chunk_mapping(mapping, str(item or ""), paper_id)
+                continue
+            if normalized_key in {"chunkIds", "chunk_ids", "chunks_used"}:
+                for chunk_id in _string_list(item):
+                    _register_chunk_mapping(mapping, chunk_id, paper_id)
+                continue
+            _collect_chunk_mappings(item, mapping, paper_id)
+        return
+    if isinstance(value, list):
+        for item in value:
+            _collect_chunk_mappings(item, mapping, inherited_paper_id)
+
+
+def _collect_payload_paper_ids(value: Any) -> list[str]:
+    """只从结构化字段收集真实 paperId，不把正文里的方括号内容当成编号。"""
+
+    found: list[str] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            normalized_key = str(key)
+            if normalized_key in {"paperId", "paper_id"}:
+                text = str(item or "").strip()
+                if text:
+                    found.append(text)
+            elif normalized_key in {"paperIds", "paper_ids"}:
+                found.extend(_string_list(item))
+            else:
+                found.extend(_collect_payload_paper_ids(item))
+    elif isinstance(value, list):
+        for item in value:
+            found.extend(_collect_payload_paper_ids(item))
+    return _deduplicate_strings(found)
+
+
+def _register_chunk_mapping(mapping: dict[str, str], chunk_id: str, paper_id: str) -> None:
+    """登记完整 chunkId，并登记去掉末尾分段号后的短格式。"""
+
+    chunk_text = str(chunk_id or "").strip()
+    paper_text = str(paper_id or "").strip()
+    if not chunk_text or not paper_text:
+        return
+    key = chunk_text.lower()
+    mapping.setdefault(key, paper_text)
+    # 中文说明：切片通常形如 `paper:p0001:s0001`，模型在摘要中常会省略最后的分段号，
+    # 所以 `paper:p0001` 也必须能映射回同一篇论文。
+    short_key = re.sub(r":s\d+$", "", key, flags=re.IGNORECASE)
+    mapping.setdefault(short_key, paper_text)
+
+
+def _resolve_citation_paper_id(value: str, chunk_to_paper: dict[str, str]) -> str:
+    """把一个引用候选值解析为论文编号；无法解析时保留原值。"""
+
+    text = str(value or "").strip().strip('"').strip("'").strip()
+    if not text:
+        return ""
+    key = text.lower()
+    mapped = chunk_to_paper.get(key)
+    if mapped:
+        return mapped
+    # 中文说明：如果缓存中暂时没有对应 chunks.json，切片编号仍然保留了
+    # `paperId:p0001` 的前缀。直接取前缀可以避免把切片编号继续传播到正文。
+    prefix_match = re.match(r"^(?P<paper>.+):(?:p|c)\d{4}(?::s\d{4})?$", text, flags=re.IGNORECASE)
+    return prefix_match.group("paper").strip() if prefix_match else text
+
+
+def _replace_chunk_citations(content: str, chunk_to_paper: dict[str, str]) -> str:
+    """只替换能确认是切片编号的方括号内容，避免破坏普通 Markdown。"""
+
+    if not content:
+        return content
+
+    citation_pattern = re.compile(r"\[([^\[\]\r\n]+)\]")
+
+    def replace(match: re.Match[str]) -> str:
+        candidate = match.group(1).strip().strip('"').strip("'").strip()
+        resolved = _resolve_citation_paper_id(candidate, chunk_to_paper)
+        return f"[{resolved}]" if resolved != candidate else match.group(0)
+
+    return citation_pattern.sub(replace, content)
 
 
 def get_chunk_by_embed(query: str):

@@ -169,6 +169,8 @@ WRITING_AGENT_SYSTEM_PROMPT = """
 第四步，工具返回后重新核对证据，不要把工具调用本身当作事实。证据足够时再写正文，围绕 task 形成“观点 -> 证据 -> 比较/边界 -> 小结”的连续论证。
 第五步，写完后检查每个来自论文的观点、结果和比较是否在句末标注 [paperId]，并检查 paperIds 是否只列出正文实际引用的编号。
 
+引用编号规则：结构化摘要或原文切片中的 `[paperId:p0001]`、`chunkId` 只是证据位置，不能原样写进正文，也不能放进 `paperIds`。使用 `search_section` 后，正文引用必须使用该结果中对应的真实 `paperId`；使用 `get_extraction` 后，也必须把摘要里的切片来源转换成该论文的 `paperId`。
+
 你只能返回以下 JSON 之一，不能有额外字段：
 1. get_extraction：
 {"action":"tool","tool_name":"get_extraction","arguments":{"paperIds":["P1"]},"reason":"缺少 P1 的方法和主要结果，需要先读取结构化证据"}
