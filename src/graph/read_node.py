@@ -393,6 +393,8 @@ async def _run_read_node_async(state: State) -> State:
             stage="read_done",
             total=len(papers),
             completed=len(results),
+            deep_read_paper_count=summary["deep_read_paper_count"],
+            deep_read_papers=summary["deep_read_papers"],
             indexed_paper_count=summary["indexed_paper_count"],
         )
     updated = dict(state)
@@ -1119,6 +1121,14 @@ def _build_summary(results: list[PaperReadResult], deep_read_count: int) -> Json
         "total_paper_count": len(results),
         "deep_read_attempt_count": deep_read_count,
         "deep_read_candidate_count": sum(item.relevance.decision == "deep_read" for item in results),
+        # 中文说明：只有真正占用全文精读名额并进入全文处理流程的论文，才会出现在这里。
+        # 这和 indexed_paper_count 不同：全文下载、解析或建立向量索引失败的论文也会保留在清单中。
+        "deep_read_paper_count": sum(_infer_deep_read_reserved(item) for item in results),
+        "deep_read_papers": [
+            _deep_read_paper_item(item)
+            for item in results
+            if _infer_deep_read_reserved(item)
+        ],
         "indexed_paper_count": sum(item.full_text.status == "indexed" for item in results),
         "failed_fulltext_count": sum(item.full_text.status in {"download_failed", "parse_failed"} for item in results),
         "insufficient_paper_count": sum(item.relevance.decision == "insufficient" for item in results),
@@ -1174,6 +1184,19 @@ def _summary_paper_item(result: PaperReadResult) -> JsonObject:
         "year": result.paper.year,
         "extraction": dict(result.extraction or empty_extraction()),
         "processing_status": "completed" if result.full_text.status == "indexed" else result.full_text.status,
+    }
+
+
+def _deep_read_paper_item(result: PaperReadResult) -> JsonObject:
+    """整理已经进入全文精读流程的论文，供汇总信息和前端详情展示。"""
+
+    # 中文说明：这里同时保留全文状态，方便用户看出“已精读但未成功建立索引”的情况。
+    return {
+        "paperId": result.paper.paperId or result.paper.id,
+        "title": result.paper.title,
+        "year": result.paper.year,
+        "relevance_score": result.relevance.score,
+        "full_text_status": result.full_text.status,
     }
 
 
