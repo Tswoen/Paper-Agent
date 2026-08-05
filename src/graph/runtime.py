@@ -230,6 +230,13 @@ _STAGE_DISPLAY: dict[tuple[str, str], RuntimeStageDisplay] = {
         "写作大纲",
         updates_parent=True,
     ),
+    # 中文说明：模型用量回调也属于写作大纲主阶段，直接更新主卡片，
+    # 避免额外生成一张一直停留在“处理中”的 writing outline 子卡片。
+    ("write_outline", "writing_outline"): RuntimeStageDisplay(
+        "write_outline",
+        "写作大纲",
+        updates_parent=True,
+    ),
     # 中文说明：保存出来的 JSON 产物仍然单独显示，用户可以知道文件已经保存成功。
     ("write_outline", "writing_outline_artifact_ready"): RuntimeStageDisplay(
         "writing_outline_artifact_ready",

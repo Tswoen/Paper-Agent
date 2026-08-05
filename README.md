@@ -256,6 +256,8 @@ Provider 配置常用字段如下：
 | `read.vector_store_path` | Chroma 向量库路径 |
 | `read.vector_store_collection` | 向量集合名称 |
 
+论文检索源头apikey的配置
+
 ## 项目结构
 
 ```text
@@ -305,3 +307,5 @@ Paper-Agent/
 **让论文检索更快，让研究脉络更清楚。**
 
 </div>
+
+

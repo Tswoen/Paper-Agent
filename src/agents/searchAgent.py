@@ -124,7 +124,13 @@ class SearchAgent(BaseAgent):
         if self.context.llm is None:
             return None, None, {"used_llm": False, "status": "no_llm", "message": "未注入可用 LLM，搜索阶段已终止。"}
         messages = self._build_llm_messages(state)
-        response = self.context.llm.provider.chat_with_retry(messages, max_tokens=800)
+        # 搜索关键词需要先理解研究主题，再拆分出多个检索方向，所以固定开启中等强度的思考模式。
+        # 这里显式传参，避免注入的模型配置把思考强度覆盖成 none。
+        response = self.context.llm.provider.chat_with_retry(
+            messages,
+            max_tokens=800,
+            reasoning_effort="medium",
+        )
         self.report_usage(response, usage_callback)
         raw_model_output = response.content or ""
         if not response.ok:
@@ -188,13 +194,19 @@ class SearchAgent(BaseAgent):
         provider = self.context.llm.provider
         chat = getattr(provider, "chat", None)
         if callable(chat):
-            response = chat(messages, max_tokens=800)
+            # 异步调用与同步调用保持相同的思考设置，确保工作流入口不同也不会改变搜索质量。
+            response = chat(messages, max_tokens=800, reasoning_effort="medium")
             if inspect.isawaitable(response):
                 return await response
             return response
         # 中文注释：这一步只是给极少数还没补齐 async 接口的旧 provider 兜底。
         # 新链路正常情况下会直接走上面的 await provider.chat(...)。
-        return await asyncio.to_thread(provider.chat_with_retry, messages, max_tokens=800)
+        return await asyncio.to_thread(
+            provider.chat_with_retry,
+            messages,
+            max_tokens=800,
+            reasoning_effort="medium",
+        )
 
     def _build_llm_messages(self, state: JsonObject) -> list[JsonObject]:
         """构造给大模型的消息。
