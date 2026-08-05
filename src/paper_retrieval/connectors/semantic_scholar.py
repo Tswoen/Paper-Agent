@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import os
-
 import httpx
 
 from ..models import PaperDocument, SearchRequest
@@ -34,13 +32,15 @@ class SemanticScholarPaperConnector(PaperSearchConnector):
     )
 
     def __init__(self, client: httpx.Client | None = None, api_key: str | None = None):
-        """初始化 HTTP 客户端，并在可用时注入 API Key。"""
+        """初始化 HTTP 客户端，并在配置了密钥时注入 API Key。"""
 
         headers = {
             "User-Agent": "papers-agents/0.1 paper-retrieval",
             "Accept": "application/json",
         }
-        resolved_key = (api_key or os.getenv("SEMANTIC_SCHOLAR_API_KEY") or os.getenv("PAPER_SEARCH_MCP_SEMANTIC_SCHOLAR_API_KEY") or "").strip()
+        # 中文说明：密钥由 PaperSearchService 从 config/system.yaml 读出后传入。
+        # 配置为 null 时不添加 x-api-key，请求会按 Semantic Scholar 的匿名规则执行。
+        resolved_key = (api_key or "").strip()
         if resolved_key:
             headers["x-api-key"] = resolved_key
         self.headers = headers

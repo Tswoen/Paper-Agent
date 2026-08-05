@@ -68,11 +68,22 @@ class ReadDefaults:
 
 
 @dataclass(slots=True)
+class PaperRetrievalConfig:
+    """保存论文检索数据源需要的可选密钥。"""
+
+    # 中文说明：这两个值只给论文数据源使用，和大模型服务的 API Key 完全分开，
+    # 避免用户误把论文检索密钥填到模型设置里。
+    openalex_api_key: str | None = None
+    semantic_scholar_api_key: str | None = None
+
+
+@dataclass(slots=True)
 class SystemConfig:
     """从 config/system.yaml 读取的系统默认值。"""
 
     llm: LLMDefaults = field(default_factory=LLMDefaults)
     embedding: EmbeddingDefaults = field(default_factory=EmbeddingDefaults)
+    paper_retrieval: PaperRetrievalConfig = field(default_factory=PaperRetrievalConfig)
     read: ReadDefaults = field(default_factory=ReadDefaults)
 
     @classmethod
@@ -87,6 +98,7 @@ class SystemConfig:
         defaults = dict((data or {}).get("defaults") or {})
         llm = dict(defaults.get("llm") or {})
         embedding = dict(defaults.get("embedding") or {})
+        paper_retrieval = dict((data or {}).get("paper_retrieval") or {})
         read = dict((data or {}).get("read") or {})
         return cls(
             llm=LLMDefaults(
@@ -98,6 +110,12 @@ class SystemConfig:
             embedding=EmbeddingDefaults(
                 dimensions=embedding.get("dimensions"),
                 batch_size=embedding.get("batch_size", 32),
+            ),
+            paper_retrieval=PaperRetrievalConfig(
+                # 中文说明：配置里的 null 或空白内容都按“没有配置密钥”处理，
+                # 这样用户不必为了关闭密钥专门删除配置行。
+                openalex_api_key=_optional_text(paper_retrieval.get("openalex_api_key")),
+                semantic_scholar_api_key=_optional_text(paper_retrieval.get("semantic_scholar_api_key")),
             ),
             read=ReadDefaults(
                 agent_name=str(read.get("agent_name") or "default_agent"),
@@ -399,6 +417,15 @@ def _optional_bool(value: Any) -> bool | None:
         if lowered in {"false", "0", "no", "off"}:
             return False
     return None
+
+
+def _optional_text(value: Any) -> str | None:
+    """把配置中的可选文本整理成非空字符串或 None。"""
+
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _read_positive_int(value: Any, default: int, *, maximum: int | None = None) -> int:

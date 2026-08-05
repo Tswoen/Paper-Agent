@@ -16,13 +16,16 @@ class OpenAlexPaperConnector(PaperSearchConnector):
     source_name = "openalex"
     _endpoint = "https://api.openalex.org/works"
 
-    def __init__(self, client: httpx.Client | None = None):
-        """初始化 HTTP 客户端。"""
+    def __init__(self, client: httpx.Client | None = None, api_key: str | None = None):
+        """初始化 HTTP 客户端，并保存可选的 OpenAlex API Key。"""
 
         self.headers = {
             "User-Agent": "papers-agents/0.1 paper-retrieval",
             "Accept": "application/json",
         }
+        # 中文说明：OpenAlex 把密钥放在请求参数 api_key 中；密钥为空时不发送该参数，
+        # 因此 config/system.yaml 保持 null 也能继续使用匿名检索。
+        self.api_key = (api_key or "").strip()
         self.client = client or httpx.Client(
             timeout=20.0,
             headers=self.headers,
@@ -72,6 +75,8 @@ class OpenAlexPaperConnector(PaperSearchConnector):
             filters.append(f"to_publication_date:{request.year_to}-12-31")
         if filters:
             params["filter"] = ",".join(filters)
+        if self.api_key:
+            params["api_key"] = self.api_key
         return params
 
     def _parse_payload(self, payload: dict[str, object], request: SearchRequest) -> list[PaperDocument]:

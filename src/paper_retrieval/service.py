@@ -4,6 +4,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import TYPE_CHECKING
 
+from src.llm.config import SystemConfig
 from src.utils import get_logger, logging_context
 
 from .connectors import ArxivPaperConnector, OpenAlexPaperConnector, PaperSearchConnector, SemanticScholarPaperConnector
@@ -212,8 +213,11 @@ class PaperSearchService:
     def _build_default_connectors(self) -> dict[str, PaperSearchConnector]:
         """构建默认 connector 注册表。"""
 
-        openalex = OpenAlexPaperConnector()
-        semantic = SemanticScholarPaperConnector()
+        # 中文说明：论文检索密钥与模型密钥分开保存在 system.yaml 中。
+        # 每次新建检索服务都会重新读取配置，修改密钥后无需改业务代码。
+        retrieval_config = SystemConfig.load().paper_retrieval
+        openalex = OpenAlexPaperConnector(api_key=retrieval_config.openalex_api_key)
+        semantic = SemanticScholarPaperConnector(api_key=retrieval_config.semantic_scholar_api_key)
         arxiv = ArxivPaperConnector()
         return {
             "openalex": openalex,
