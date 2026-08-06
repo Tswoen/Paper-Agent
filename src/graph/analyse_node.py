@@ -289,9 +289,9 @@ def _paper_analysis_input(item: JsonObject) -> JsonObject:
             "evidence_level": note.get("evidence_level") or "",
         },
         "relevance": {
+            "match_levels": dict(relevance.get("match_levels") or {}),
             "score": relevance.get("score", 0),
-            "decision": relevance.get("decision") or "",
-            "reason": _shorten(relevance.get("reason"), 300),
+            "status": relevance.get("status") or "",
         },
         "full_text_status": full_text.get("status") or "",
         "extraction": _shorten_json(extraction, 1200),

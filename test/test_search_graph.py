@@ -49,8 +49,9 @@ def _read_snapshot() -> ProviderSnapshot:
     return _fake_snapshot(
         response_text=(
             '{"main_question":"agent search","methods":[],"datasets":[],"contributions":[],"limitations":[],'
-            '"main_results":[],"short_summary":"agent search summary","missing_information":[],'
-            '"evidence_level":"abstract","score":80,"decision":"abstract_only","reason":"matches topic"}'
+            '"main_results":[],"short_summary":"agent search summary","match_levels":'
+            '{"research_question":"not_match","research_object_or_scene":"not_match",'
+            '"method_or_technical_route":"not_match"}}'
         )
     )
 

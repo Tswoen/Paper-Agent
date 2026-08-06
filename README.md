@@ -246,8 +246,7 @@ Provider 配置常用字段如下：
 
 | 参数 | 作用 |
 | --- | --- |
-| `read.paper_cache_dir` | PDF、Markdown、抽取结果和分块文件的缓存目录 |
-| `read.deep_score_threshold` | 触发全文精读的相关性分数阈值 |
+| `read.paper_cache_dir` | PDF、Markdown 和分块文件的缓存目录 |
 | `read.connect_timeout_seconds` | 连接论文来源的超时时间 |
 | `read.download_timeout_seconds` | 下载全文的超时时间 |
 | `read.max_file_size_mb` | 允许下载的最大文件大小 |
@@ -307,5 +306,3 @@ Paper-Agent/
 **让论文检索更快，让研究脉络更清楚。**
 
 </div>
-
-

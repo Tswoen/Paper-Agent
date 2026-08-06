@@ -84,11 +84,11 @@ def run_compose_reply_node():
                 relevance = dict(result.get("relevance") or {})
                 note = dict(result.get("note") or {})
                 full_text = dict(result.get("full_text") or {})
-                decision = relevance.get("decision") or "insufficient"
+                selection_status = relevance.get("status") or "not_eligible"
                 score = relevance.get("score") if relevance.get("score") is not None else "-"
                 short_summary = str(note.get("short_summary") or "暂无可用摘要笔记")
                 lines.append(
-                    f"{index}. {paper.title} | 相关度 {score} | {decision} | 全文状态："
+                    f"{index}. {paper.title} | 匹配分数 {score} | {selection_status} | 全文状态："
                     f"{full_text.get('status') or 'not_requested'}\n   {short_summary}"
                 )
             assistant_text = "\n".join(lines)

@@ -10,7 +10,7 @@ from typing import Any
 
 from src.llm import ModelConfig, ProviderSnapshot, SystemConfig, make_provider
 from src.llm.base import LLMResponse
-from src.models.read_models import ReadNote, ReadRelevance
+from src.models.read_models import ReadNote, ReadRelevance, normalize_match_levels
 from src.paper_retrieval.models import PaperDocument
 
 from .base import AgentContext, AgentSpec, BaseAgent
@@ -47,7 +47,7 @@ class ReadAgentModelUnavailableError(RuntimeError):
 
 
 class ReadAgent(BaseAgent):
-    """负责阅读摘要并判断论文是否值得全文精读的 Agent。
+    """负责阅读摘要并给出论文与用户主题的三维匹配程度。
 
     中文注释：这个 Agent 只管“理解论文摘要”这一件事，不管下载全文、转 Markdown、
     建向量库和保存 checkpoint。那些步骤属于阅读节点的流程安排，留在 graph 层更清楚。
@@ -56,7 +56,7 @@ class ReadAgent(BaseAgent):
     spec = AgentSpec(
         name="read_agent",
         role="read",
-        description="根据论文标题和摘要整理阅读笔记，并判断是否需要全文精读。",
+        description="根据论文标题和摘要整理阅读笔记，并给出三维匹配程度。",
         llm_profile="default_agent",
         input_keys=("paper", "topic"),
     )
@@ -170,10 +170,9 @@ class ReadAgent(BaseAgent):
 
         note = ReadNote(
             short_summary=f"《{paper.title}》只有标题和基本信息，暂无摘要可供整理。",
-            missing_information=["研究问题", "研究方法", "数据集", "实验结果", "论文不足"],
             evidence_level="metadata",
         )
-        relevance = ReadRelevance(reason="论文没有摘要，现有资料不足")
+        relevance = ReadRelevance()
         return AbstractReadResult(note=note, relevance=relevance, warnings=[])
 
     def _fallback_abstract_note(self, paper: PaperDocument, *, warning: str) -> AbstractReadResult:
@@ -187,14 +186,9 @@ class ReadAgent(BaseAgent):
             short_summary += "..."
         note = ReadNote(
             short_summary=f"《{title}》的模型阅读结果不可用，以下仅保留论文原始摘要片段：{short_summary}",
-            missing_information=["研究问题", "研究方法", "数据集", "实验结果", "论文不足"],
             evidence_level="abstract" if abstract else "metadata",
         )
-        relevance = ReadRelevance(
-            score=0,
-            decision="insufficient",
-            reason="模型已返回内容，但内容格式或字段无法可靠使用",
-        )
+        relevance = ReadRelevance()
         return AbstractReadResult(note=note, relevance=relevance, warnings=[warning])
 
     def _abstract_messages(self, paper: PaperDocument, topic: str, constraints: JsonObject) -> list[JsonObject]:
@@ -206,9 +200,6 @@ class ReadAgent(BaseAgent):
             "论文": {
                 "标题": paper.title,
                 "摘要": paper.abstract,
-                "作者": paper.authors,
-                "年份": paper.year,
-                "发表位置": paper.venue,
             },
         }
         # 中文说明：阅读规则集中管理，确保同步和异步阅读使用完全相同的提示词。
@@ -240,17 +231,9 @@ class ReadAgent(BaseAgent):
             limitations=self._string_list(payload.get("limitations")),
             main_results=self._string_list(payload.get("main_results")),
             short_summary=self._text_value(payload.get("short_summary"))[:800],
-            missing_information=self._string_list(payload.get("missing_information")),
-            evidence_level="abstract" if payload.get("evidence_level") == "abstract" else "metadata",
+            evidence_level="abstract",
         )
-        decision = str(payload.get("decision") or "insufficient")
-        if decision not in {"deep_read", "abstract_only", "insufficient"}:
-            decision = "insufficient"
-        relevance = ReadRelevance(
-            score=self._score_value(payload.get("score")),
-            decision=decision,
-            reason=self._text_value(payload.get("reason")) or "模型未提供判断原因",
-        )
+        relevance = ReadRelevance(match_levels=normalize_match_levels(payload.get("match_levels")))
         return note, relevance, []
 
     def _model_unavailable_message(self, response: LLMResponse) -> str:
@@ -280,15 +263,6 @@ class ReadAgent(BaseAgent):
             if text:
                 result.append(text)
         return result
-
-    def _score_value(self, value: Any) -> int:
-        """把相关性分数限制到 0 到 100。"""
-
-        try:
-            return max(0, min(100, int(value)))
-        except (TypeError, ValueError):
-            return 0
-
 
 def load_read_agent_llm(
     agent_name: str | None = None,

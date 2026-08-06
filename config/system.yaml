@@ -17,7 +17,6 @@ paper_retrieval:
 read:
   agent_name: default_agent
   paper_cache_dir: data/paper_cache
-  deep_score_threshold: 80
   connect_timeout_seconds: 10
   download_timeout_seconds: 60
   max_file_size_mb: 50

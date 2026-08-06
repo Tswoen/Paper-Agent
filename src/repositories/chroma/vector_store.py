@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -8,6 +9,11 @@ import chromadb
 
 
 MetadataValue = str | int | float | bool
+
+# 中文注释：当前使用的 Chroma 本地客户端会在同一进程内共享一份底层数据库对象。
+# 多个线程同时创建或关闭同一个本地数据库时，Chroma 可能提前关闭仍在使用的对象。
+# 这里用一把锁把“创建客户端到关闭客户端”这段时间隔开，避免论文并发建立索引时互相影响。
+_LOCAL_CHROMA_CLIENT_LOCK = threading.RLock()
 
 
 @dataclass(slots=True)
@@ -44,23 +50,31 @@ class ChromaVectorStore:
     def __init__(self, connection: ChromaConnection) -> None:
         """根据本地目录和 collection 名称创建向量库操作对象。"""
 
-        self.connection = connection
-        self.persist_path = Path(connection.persist_path)
-        self.collection_name = connection.collection_name.strip()
-        if not self.collection_name:
-            raise ValueError("Chroma collection 名称不能为空")
+        self._lock_is_held = False
+        _LOCAL_CHROMA_CLIENT_LOCK.acquire()
+        self._lock_is_held = True
+        try:
+            self.connection = connection
+            self.persist_path = Path(connection.persist_path)
+            self.collection_name = connection.collection_name.strip()
+            if not self.collection_name:
+                raise ValueError("Chroma collection 名称不能为空")
 
-        # 中文注释：Chroma 会把数据库文件保存在 persist_path 目录下。
-        # 这里提前创建目录，是为了让错误更早暴露，也方便用户直接看到向量库保存在哪里。
-        self.persist_path.mkdir(parents=True, exist_ok=True)
+            # 中文注释：Chroma 会把数据库文件保存在 persist_path 目录下。
+            # 这里提前创建目录，是为了让错误更早暴露，也方便用户直接看到向量库保存在哪里。
+            self.persist_path.mkdir(parents=True, exist_ok=True)
 
-        # 中文注释：PersistentClient 表示“本地持久保存”的 Chroma 客户端。
-        # 也就是说程序退出后，写入的向量仍然会留在这个目录中。
-        self._client = chromadb.PersistentClient(path=str(self.persist_path))
+            # 中文注释：PersistentClient 表示“本地持久保存”的 Chroma 客户端。
+            # 也就是说程序退出后，写入的向量仍然会留在这个目录中。
+            self._client = chromadb.PersistentClient(path=str(self.persist_path))
 
-        # 中文注释：collection 可以理解为一张专门存论文切片的表。
-        # 如果已经存在就直接复用，不存在就自动创建，避免每次运行都要手动初始化。
-        self._collection = self._client.get_or_create_collection(name=self.collection_name)
+            # 中文注释：collection 可以理解为一张专门存论文切片的表。
+            # 如果已经存在就直接复用，不存在就自动创建，避免每次运行都要手动初始化。
+            self._collection = self._client.get_or_create_collection(name=self.collection_name)
+        except Exception:
+            # 中文注释：如果创建客户端的中途失败，也必须归还锁；否则后续论文无法继续建立索引。
+            self._release_client_lock()
+            raise
 
     def close(self) -> None:
         """关闭 Chroma 客户端占用的本地文件句柄。"""
@@ -68,12 +82,24 @@ class ChromaVectorStore:
         # 中文注释：Windows 上如果不关闭 Chroma 客户端，临时目录或测试目录可能会因为
         # 数据库文件还被占用而无法删除。正常服务长期运行时不一定需要手动调用，
         # 但脚本验证或短生命周期任务结束前调用它会更稳。
-        close = getattr(self._client, "close", None)
-        if callable(close):
-            close()
-        clear_cache = getattr(self._client, "clear_system_cache", None)
-        if callable(clear_cache):
-            clear_cache()
+        try:
+            close = getattr(self._client, "close", None)
+            if callable(close):
+                close()
+        finally:
+            # 中文注释：无论关闭时是否报错，都要归还锁，避免后续索引任务永久等待。
+            self._release_client_lock()
+
+        # 中文注释：不能在这里调用 clear_system_cache()。这个方法会把整个程序里
+        # 所有 Chroma 客户端共用的记录一起清空；当多篇论文同时建立索引时，其他还在
+        # 写入的客户端会因此失效，并报出找不到 vector_store 或 bindings 的错误。
+
+    def _release_client_lock(self) -> None:
+        """归还当前对象持有的 Chroma 操作锁。"""
+
+        if self._lock_is_held:
+            self._lock_is_held = False
+            _LOCAL_CHROMA_CLIENT_LOCK.release()
 
     def upsert(self, items: list[VectorUpsertItem]) -> int:
         """新增或更新切片；如果 id 已存在，Chroma 会用新内容覆盖旧内容。"""

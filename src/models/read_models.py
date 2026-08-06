@@ -20,7 +20,7 @@ class ReadNote:
     limitations: list[str] = field(default_factory=list)
     main_results: list[str] = field(default_factory=list)
     short_summary: str = ""
-    missing_information: list[str] = field(default_factory=list)
+    # 中文说明：证据等级由程序根据是否提供摘要确定，不再要求模型额外判断。
     evidence_level: str = "metadata"
 
     def to_dict(self) -> JsonObject:
@@ -28,14 +28,51 @@ class ReadNote:
 
         return asdict(self)
 
+MATCH_LEVEL_FIELDS = (
+    "research_question",
+    "research_object_or_scene",
+    "method_or_technical_route",
+)
+
+# 中文说明：模型只能从这三个文字中选择，其他值统一按不匹配处理，避免错误内容影响名额分配。
+MATCH_LEVEL_VALUES = {"match", "partial_match", "not_match"}
+
+# 中文说明：总分只能由下面这张固定表计算，模型不会也不允许直接给总分。
+MATCH_LEVEL_SCORES = {
+    "research_question": {"match": 50, "partial_match": 25, "not_match": 0},
+    "research_object_or_scene": {"match": 30, "partial_match": 15, "not_match": 0},
+    "method_or_technical_route": {"match": 20, "partial_match": 10, "not_match": 0},
+}
+
+
+def normalize_match_levels(value: Any) -> dict[str, str]:
+    """整理模型返回的三个匹配程度，缺失或错误值都当作不匹配。"""
+
+    payload = value if isinstance(value, dict) else {}
+    return {
+        field_name: str(payload.get(field_name) or "not_match")
+        if str(payload.get(field_name) or "not_match") in MATCH_LEVEL_VALUES
+        else "not_match"
+        for field_name in MATCH_LEVEL_FIELDS
+    }
+
+
+def calculate_relevance_score(match_levels: Any) -> int:
+    """按固定表计算总分，保证全文筛选不受模型主观分数影响。"""
+
+    normalized = normalize_match_levels(match_levels)
+    return sum(MATCH_LEVEL_SCORES[field_name][normalized[field_name]] for field_name in MATCH_LEVEL_FIELDS)
+
 
 @dataclass(slots=True)
 class ReadRelevance:
-    """保存论文与用户主题的匹配判断，不与全文下载状态混在一起。"""
+    """保存三维匹配、程序计算的分数和全文筛选结果。"""
 
+    match_levels: dict[str, str] = field(
+        default_factory=lambda: {field_name: "not_match" for field_name in MATCH_LEVEL_FIELDS}
+    )
     score: int = 0
-    decision: str = "insufficient"
-    reason: str = "资料不足，无法可靠判断"
+    status: str = "not_eligible"
 
     def to_dict(self) -> JsonObject:
         """把相关性判断转换为普通字典。"""

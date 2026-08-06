@@ -8,7 +8,7 @@ from typing import Any, NoReturn, cast
 
 from src.agents.readAgent import ReadAgentModelUnavailableError, build_read_agent, load_read_agent_llm
 from src.utils.read_utils.read_fulltext import async_convert_fulltext_to_markdown
-from src.models.read_models import FullTextStatus, PaperReadResult, ReadNote, ReadRelevance
+from src.models.read_models import FullTextStatus, PaperReadResult, ReadNote, ReadRelevance, calculate_relevance_score, normalize_match_levels
 from src.repositories.node_persistence.read_persistence import ReadPersistenceSink
 from src.repositories.chroma.read_vector_store import EmbeddingConnection, async_index_chunk_file, async_index_markdown_chunks
 from src.graph.checkpoint_halt import halt_with_checkpoint
@@ -20,7 +20,7 @@ from src.paper_retrieval.download import async_download_paper_fulltext
 from src.paper_retrieval.models import PaperDocument
 from src.repositories.sessions.base import SessionRepository
 from src.utils.read_utils.chunkers import async_build_chunks_file
-from src.utils.read_utils.extraction import async_extract_paper_from_chunks, async_write_failed_extraction, empty_extraction, extraction_payload
+from src.utils.read_utils.extraction import empty_extraction
 
 
 class ReadResourceUnavailableError(RuntimeError):
@@ -83,32 +83,6 @@ class PaperTaskInput:
     position: int
     restored_status: JsonObject
     restored_result: PaperReadResult | None = None
-
-
-class DeepReadQuota:
-    """统一控制本次阅读批次还剩多少全文精读名额。"""
-
-    def __init__(self, used_count: int, limit: int):
-        """记录已经占用的名额和总上限，供并发论文任务共享。"""
-
-        self._used_count = max(0, int(used_count))
-        self._limit = max(0, int(limit))
-        self._lock = asyncio.Lock()
-
-    async def try_acquire(self) -> bool:
-        """尝试占用一个全文精读名额，成功时返回真。"""
-
-        async with self._lock:
-            if self._used_count >= self._limit:
-                return False
-            self._used_count += 1
-            return True
-
-    @property
-    def used_count(self) -> int:
-        """返回当前已经占用的全文精读名额。"""
-
-        return self._used_count
 
 
 class CompletedPaperCounter:
@@ -309,7 +283,6 @@ async def _run_read_node_async(state: State) -> State:
     system_config = SystemConfig.load()
     config = system_config.read
     checkpoint = _checkpoint_from_state(state)
-    # <question>在检索节点不是已经去过重了吗？为什么这里还要再次去重？
     papers = _deduplicate_papers(list(state.get("search_results") or _papers_from_payload(checkpoint.get("search_results"))))
 
     reporter = _resolve_reporter(state)
@@ -326,9 +299,14 @@ async def _run_read_node_async(state: State) -> State:
     results_by_paper_id = {result.paper.id: result for result in recovered_results}
     artifact_refs: list[JsonObject] = list(state.get("read_artifact_refs") or checkpoint.get("read_artifact_refs") or [])
     paper_runtime_statuses = _restore_paper_runtime_statuses(papers, checkpoint, recovered_results)
-    deep_read_count = _restore_deep_read_count(recovered_results, checkpoint)
+    # 中文说明：恢复时，正在进行全文处理的论文会保存在每篇论文的运行状态中。
+    # 先把它们放回结果字典，后面统一重新计算名额，不沿用旧的先到先得计数。
+    for paper in papers:
+        restored_result = _paper_result_from_runtime_status(paper_runtime_statuses.get(paper.id) or {}, paper)
+        if restored_result is not None:
+            results_by_paper_id.setdefault(paper.id, restored_result)
     deep_read_limit = _deep_read_limit(request.constraints, len(papers))
-    completed_counter = CompletedPaperCounter(len(recovered_results))
+    completed_counter = CompletedPaperCounter(len(results_by_paper_id))
 
     if reporter is not None:
         reporter.started(
@@ -355,11 +333,10 @@ async def _run_read_node_async(state: State) -> State:
             artifact_refs=artifact_refs,
             paper_runtime_statuses=paper_runtime_statuses,
             completed_counter=completed_counter,
-            deep_read_count=deep_read_count,
             deep_read_limit=deep_read_limit,
         )
     except ReadResourceUnavailableError as exc:
-        deep_read_count = int(getattr(exc, "deep_read_count", deep_read_count))
+        deep_read_count = int(getattr(exc, "deep_read_count", 0))
         _halt_for_resource_unavailable(
             state,
             papers=papers,
@@ -758,7 +735,6 @@ def _read_note_from_payload(value: Any) -> ReadNote:
         limitations=_string_list(payload.get("limitations")),
         main_results=_string_list(payload.get("main_results")),
         short_summary=_text_value(payload.get("short_summary")),
-        missing_information=_string_list(payload.get("missing_information")),
         evidence_level=_text_value(payload.get("evidence_level")) or "metadata",
     )
 
@@ -767,13 +743,13 @@ def _read_relevance_from_payload(value: Any) -> ReadRelevance:
     """把 checkpoint 中的相关性 JSON 恢复为 ReadRelevance。"""
 
     payload = value if isinstance(value, dict) else {}
-    decision = _text_value(payload.get("decision")) or "insufficient"
-    if decision not in {"deep_read", "abstract_only", "insufficient"}:
-        decision = "insufficient"
+    status = _text_value(payload.get("status")) or "not_eligible"
+    if status not in {"not_eligible", "selected_for_deep_read", "not_selected_due_to_limit"}:
+        status = "not_eligible"
     return ReadRelevance(
         score=_score_value(payload.get("score")),
-        decision=decision,
-        reason=_text_value(payload.get("reason")) or "资料不足，无法可靠判断",
+        match_levels=normalize_match_levels(payload.get("match_levels")),
+        status=status,
     )
 
 
@@ -790,29 +766,6 @@ def _full_text_from_payload(value: Any) -> FullTextStatus:
         page_count=_optional_int(payload.get("page_count")),
         chunk_count=_score_value(payload.get("chunk_count")),
     )
-
-
-def _restore_deep_read_count(results: list[PaperReadResult], checkpoint: JsonObject) -> int:
-    """恢复已经消耗的全文精读次数，兼容 embedding 中断时的 pending 论文。"""
-
-    restored_count = _restored_deep_read_count(results)
-    checkpoint_count = _optional_int(checkpoint.get("deep_read_count"))
-    if checkpoint_count is None:
-        return restored_count
-    # 中文注释：embedding 失败时，当前论文已经下载并转成 Markdown，但不会放进
-    # read_results。checkpoint 里的 deep_read_count 会把这篇 pending 论文也算进去，
-    # 这里取较大值，避免恢复后超过本次全文精读数量上限。
-    return max(restored_count, checkpoint_count)
-
-
-def _restored_deep_read_count(results: list[PaperReadResult]) -> int:
-    """根据已恢复结果估算已经占用的全文精读数量。"""
-
-    # 中文注释：恢复时不能简单用 relevance.decision 统计精读次数，因为有些论文
-    # 判断为 deep_read 但因上限没有真正下载；只统计已经进入全文链路的状态，
-    # 保证恢复后 deep_read_limit 仍然按原规则生效。
-    counted_statuses = {"downloaded", "markdown_ready", "indexed", "download_failed", "parse_failed"}
-    return sum(result.full_text.status in counted_statuses for result in results)
 
 
 def _embedding_error_details(result: PaperReadResult, *, stage: str, message: str) -> JsonObject:
@@ -887,9 +840,9 @@ def _legacy_read_one_paper(
         )
     note, relevance, warnings = _legacy_build_abstract_note(paper, topic=topic, constraints=constraints, llm=llm)
     result = PaperReadResult(paper=paper, note=note, relevance=relevance, warnings=warnings)
-    # 中文注释：检索节点已经保证进入这里的论文都有摘要。
-    # 阅读节点这里只根据模型给出的相关性判断是否需要全文精读，不再处理“没有摘要”的情况。
-    should_deep_read = relevance.decision == "deep_read" and relevance.score >= config.deep_score_threshold
+    # 这个旧同步入口仅保留给独立调试使用，主流程不会调用它。
+    # 只要核心研究问题不匹配，就不会进入全文处理。
+    should_deep_read = relevance.match_levels.get("research_question") != "not_match"
     if not should_deep_read:
         result.full_text = FullTextStatus(status="not_requested", reason="当前论文只保留摘要笔记")
         return result, False
@@ -1111,7 +1064,7 @@ def _build_summary(results: list[PaperReadResult], deep_read_count: int) -> Json
 
     global_statistics = {
         "total_papers_received": len(results),
-        "passed_abstract_filter": sum(item.relevance.decision == "deep_read" for item in results),
+        "passed_abstract_filter": sum(item.relevance.status != "not_eligible" for item in results),
         "fulltext_downloaded": sum(bool(item.full_text.source_path) for item in results),
         "extraction_succeeded": sum(bool(item.extraction and any(str(value).strip() for value in item.extraction.values())) for item in results),
         "vectorized": sum(item.full_text.status == "indexed" for item in results),
@@ -1120,18 +1073,18 @@ def _build_summary(results: list[PaperReadResult], deep_read_count: int) -> Json
     return {
         "total_paper_count": len(results),
         "deep_read_attempt_count": deep_read_count,
-        "deep_read_candidate_count": sum(item.relevance.decision == "deep_read" for item in results),
-        # 中文说明：只有真正占用全文精读名额并进入全文处理流程的论文，才会出现在这里。
-        # 这和 indexed_paper_count 不同：全文下载、解析或建立向量索引失败的论文也会保留在清单中。
-        "deep_read_paper_count": sum(_infer_deep_read_reserved(item) for item in results),
+        "deep_read_candidate_count": sum(item.relevance.status != "not_eligible" for item in results),
+        # 中文说明：只要被统一排序选中，就保留在精读清单中；下载、解析或建立
+        # 向量索引失败不会改变它已经获得全文名额这一事实。
+        "deep_read_paper_count": sum(item.relevance.status == "selected_for_deep_read" for item in results),
         "deep_read_papers": [
             _deep_read_paper_item(item)
             for item in results
-            if _infer_deep_read_reserved(item)
+            if item.relevance.status == "selected_for_deep_read"
         ],
         "indexed_paper_count": sum(item.full_text.status == "indexed" for item in results),
         "failed_fulltext_count": sum(item.full_text.status in {"download_failed", "parse_failed"} for item in results),
-        "insufficient_paper_count": sum(item.relevance.decision == "insufficient" for item in results),
+        "not_eligible_paper_count": sum(item.relevance.status == "not_eligible" for item in results),
         "subtopics": _read_subtopics(results),
         "global_statistics": global_statistics,
     }
@@ -1196,6 +1149,8 @@ def _deep_read_paper_item(result: PaperReadResult) -> JsonObject:
         "title": result.paper.title,
         "year": result.paper.year,
         "relevance_score": result.relevance.score,
+        "match_levels": dict(result.relevance.match_levels),
+        "selection_status": result.relevance.status,
         "full_text_status": result.full_text.status,
     }
 
@@ -1300,20 +1255,121 @@ async def _process_papers_concurrently(
     artifact_refs: list[JsonObject],
     paper_runtime_statuses: dict[str, JsonObject],
     completed_counter: CompletedPaperCounter,
-    deep_read_count: int,
     deep_read_limit: int,
 ) -> int:
-    """按论文建立任务池，哪篇先完成就先落盘、先更新进度。"""
+    """先并发阅读全部摘要，再统一选择全文精读论文。"""
 
-    quota = DeepReadQuota(deep_read_count, deep_read_limit)
-    work_items = _build_pending_paper_tasks(papers, paper_runtime_statuses, results_by_paper_id)
+    # 中文说明：第一阶段只调用一次摘要模型，不会下载任何全文。这样模型较早返回的论文
+    # 也不能提前占用全文名额，所有论文都拿到固定分数后才会一起排序。
+    abstract_items = [
+        PaperTaskInput(paper=paper, position=position, restored_status={}, restored_result=None)
+        for position, paper in enumerate(papers, start=1)
+        if paper.id not in results_by_paper_id
+    ]
+    await _run_paper_task_batch(
+        abstract_items,
+        topic=topic,
+        constraints=constraints,
+        config=config,
+        llm=llm,
+        embedding_connection=embedding_connection,
+        embedding_error=embedding_error,
+        reporter=reporter,
+        sink=sink,
+        runtime_resources=runtime_resources,
+        results_by_paper_id=results_by_paper_id,
+        artifact_refs=artifact_refs,
+        paper_runtime_statuses=paper_runtime_statuses,
+        completed_counter=completed_counter,
+        total_paper_count=len(papers),
+        process_full_text=False,
+        selected_count=0,
+    )
+
+    selected_paper_ids = _assign_deep_read_selection(
+        papers,
+        results_by_paper_id,
+        paper_runtime_statuses,
+        deep_read_limit,
+    )
+
+    # 没有获得全文名额的论文到这里已经完成，立即保存其结构化摘要。
+    for position, paper in enumerate(papers, start=1):
+        result = results_by_paper_id[paper.id]
+        if paper.id not in selected_paper_ids:
+            await _finalize_paper_result(
+                result,
+                paper_position=position,
+                results_by_paper_id=results_by_paper_id,
+                paper_runtime_statuses=paper_runtime_statuses,
+                completed_counter=completed_counter,
+                total_paper_count=len(papers),
+                reporter=reporter,
+                sink=sink,
+                artifact_refs=artifact_refs,
+            )
+
+    # 中文说明：第二阶段只处理统一排序选中的论文。恢复运行时，已经下载或转换过的
+    # 论文会从保存的文件继续，而不是再次调用摘要模型。
+    deep_read_items = [
+        PaperTaskInput(
+            paper=paper,
+            position=position,
+            restored_status=dict(paper_runtime_statuses.get(paper.id) or {}),
+            restored_result=results_by_paper_id[paper.id],
+        )
+        for position, paper in enumerate(papers, start=1)
+        if paper.id in selected_paper_ids and _deep_read_needs_processing(results_by_paper_id[paper.id])
+    ]
+    await _run_paper_task_batch(
+        deep_read_items,
+        topic=topic,
+        constraints=constraints,
+        config=config,
+        llm=llm,
+        embedding_connection=embedding_connection,
+        embedding_error=embedding_error,
+        reporter=reporter,
+        sink=sink,
+        runtime_resources=runtime_resources,
+        results_by_paper_id=results_by_paper_id,
+        artifact_refs=artifact_refs,
+        paper_runtime_statuses=paper_runtime_statuses,
+        completed_counter=completed_counter,
+        total_paper_count=len(papers),
+        process_full_text=True,
+        selected_count=len(selected_paper_ids),
+    )
+    return len(selected_paper_ids)
+
+
+async def _run_paper_task_batch(
+    work_items: list[PaperTaskInput],
+    *,
+    topic: str,
+    constraints: JsonObject,
+    config: Any,
+    llm: ProviderSnapshot | None,
+    embedding_connection: EmbeddingConnection | None,
+    embedding_error: str | None,
+    reporter: Any,
+    sink: ReadPersistenceSink | None,
+    runtime_resources: WorkflowRuntimeResources | None,
+    results_by_paper_id: dict[str, PaperReadResult],
+    artifact_refs: list[JsonObject],
+    paper_runtime_statuses: dict[str, JsonObject],
+    completed_counter: CompletedPaperCounter,
+    total_paper_count: int,
+    process_full_text: bool,
+    selected_count: int,
+) -> None:
+    """执行一个阶段的论文任务，并在资源不可用时保留已完成结果。"""
+
     if not work_items:
-        return quota.used_count
-
+        return
     semaphore = runtime_resources.paper_task_semaphore if runtime_resources is not None else _FALLBACK_PAPER_TASK_SEMAPHORE
-    tasks: dict[asyncio.Task[PaperReadResult], PaperTaskInput] = {}
-    for item in work_items:
-        task = asyncio.create_task(
+    tasks = {
+        asyncio.create_task(
             _run_one_paper_task(
                 item,
                 topic=topic,
@@ -1326,13 +1382,13 @@ async def _process_papers_concurrently(
                 runtime_resources=runtime_resources,
                 paper_runtime_statuses=paper_runtime_statuses,
                 completed_counter=completed_counter,
-                deep_read_quota=quota,
-                total_paper_count=len(papers),
+                total_paper_count=total_paper_count,
                 semaphore=semaphore,
+                process_full_text=process_full_text,
             )
-        )
-        tasks[task] = item
-
+        ): item
+        for item in work_items
+    }
     pending = set(tasks)
     while pending:
         done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
@@ -1342,58 +1398,145 @@ async def _process_papers_concurrently(
             try:
                 result = task.result()
             except ReadResourceUnavailableError as exc:
-                if resource_error is None:
-                    resource_error = exc
-            else:
-                results_by_paper_id[item.paper.id] = result
-                completion_status = _paper_completion_runtime_status(result)
-                completion_message = _paper_completion_message(result)
-                completion_error = _paper_completion_error_message(result)
+                resource_error = resource_error or exc
+                continue
+            results_by_paper_id[item.paper.id] = result
+            if not process_full_text:
                 _set_paper_runtime_status(
                     paper_runtime_statuses,
                     item.paper,
-                    status=completion_status,
-                    current_stage="paper_completed",
+                    status="running",
+                    current_stage="abstract_ready",
                     result=result,
-                    error_message=completion_error,
+                    error_message="",
                 )
-                completed = completed_counter.increment()
-                _report_progress(
-                    reporter,
-                    item.paper,
-                    "paper_completed",
-                    completed,
-                    len(papers),
-                    runtime_status=completion_status,
-                    message=completion_message,
-                    current_status=result.full_text.status,
-                    paper_position=item.position,
-                    error_message=completion_error,
-                )
-                _, save_error = await _persist_completed_paper_async(
-                    result,
-                    sink=sink,
-                    artifact_refs=artifact_refs,
-                    reporter=reporter,
-                    completed=completed,
-                    total=len(papers),
-                    paper_position=item.position,
-                )
-                _set_paper_runtime_status(
-                    paper_runtime_statuses,
-                    item.paper,
-                    status="failed" if save_error or completion_status == "failed" else "completed",
-                    current_stage="paper_artifact_ready",
-                    result=result,
-                    error_message=save_error or completion_error,
-                )
+                continue
+            await _finalize_paper_result(
+                result,
+                paper_position=item.position,
+                results_by_paper_id=results_by_paper_id,
+                paper_runtime_statuses=paper_runtime_statuses,
+                completed_counter=completed_counter,
+                total_paper_count=total_paper_count,
+                reporter=reporter,
+                sink=sink,
+                artifact_refs=artifact_refs,
+            )
         if resource_error is not None:
             for task in pending:
                 task.cancel()
             await asyncio.gather(*pending, return_exceptions=True)
-            setattr(resource_error, "deep_read_count", quota.used_count)
+            setattr(resource_error, "deep_read_count", selected_count)
             raise resource_error
-    return quota.used_count
+
+
+async def _finalize_paper_result(
+    result: PaperReadResult,
+    *,
+    paper_position: int,
+    results_by_paper_id: dict[str, PaperReadResult],
+    paper_runtime_statuses: dict[str, JsonObject],
+    completed_counter: CompletedPaperCounter,
+    total_paper_count: int,
+    reporter: Any,
+    sink: ReadPersistenceSink | None,
+    artifact_refs: list[JsonObject],
+) -> None:
+    """保存一篇最终结果，并更新前端看到的完成进度。"""
+
+    results_by_paper_id[result.paper.id] = result
+    completion_status = _paper_completion_runtime_status(result)
+    completion_message = _paper_completion_message(result)
+    completion_error = _paper_completion_error_message(result)
+    _set_paper_runtime_status(
+        paper_runtime_statuses,
+        result.paper,
+        status=completion_status,
+        current_stage="paper_completed",
+        result=result,
+        error_message=completion_error,
+    )
+    completed = completed_counter.increment()
+    _report_progress(
+        reporter,
+        result.paper,
+        "paper_completed",
+        completed,
+        total_paper_count,
+        runtime_status=completion_status,
+        message=completion_message,
+        current_status=result.full_text.status,
+        paper_position=paper_position,
+        error_message=completion_error,
+    )
+    _, save_error = await _persist_completed_paper_async(
+        result,
+        sink=sink,
+        artifact_refs=artifact_refs,
+        reporter=reporter,
+        completed=completed,
+        total=total_paper_count,
+        paper_position=paper_position,
+    )
+    _set_paper_runtime_status(
+        paper_runtime_statuses,
+        result.paper,
+        status="failed" if save_error or completion_status == "failed" else "completed",
+        current_stage="paper_artifact_ready",
+        result=result,
+        error_message=save_error or completion_error,
+    )
+
+
+def _assign_deep_read_selection(
+    papers: list[PaperDocument],
+    results_by_paper_id: dict[str, PaperReadResult],
+    paper_runtime_statuses: dict[str, JsonObject],
+    deep_read_limit: int,
+) -> set[str]:
+    """按固定分数和稳定排序规则，为全部论文统一分配全文名额。"""
+
+    candidates: list[tuple[int, PaperReadResult]] = []
+    for position, paper in enumerate(papers, start=1):
+        result = results_by_paper_id[paper.id]
+        # 中文说明：无论模型是否漏字段，先把三个维度补齐，再由固定表计算 0 到 100 分。
+        result.relevance.match_levels = normalize_match_levels(result.relevance.match_levels)
+        result.relevance.score = calculate_relevance_score(result.relevance.match_levels)
+        if result.relevance.match_levels["research_question"] == "not_match":
+            result.relevance.status = "not_eligible"
+            result.full_text = FullTextStatus(status="not_requested", reason="核心研究问题不匹配，不参与全文精读")
+            continue
+        candidates.append((position, result))
+
+    # 中文说明：position 保留检索节点的原始顺序；位置也相同的极少数情况再按论文编号排序。
+    candidates.sort(key=lambda item: (-item[1].relevance.score, item[0], item[1].paper.id))
+    selected_paper_ids = {result.paper.id for _, result in candidates[:deep_read_limit]}
+    for _, result in candidates:
+        if result.paper.id not in selected_paper_ids:
+            result.relevance.status = "not_selected_due_to_limit"
+            result.full_text = FullTextStatus(status="not_requested", reason="全文精读名额已分配给总分更高的论文")
+            continue
+        result.relevance.status = "selected_for_deep_read"
+        current = dict(paper_runtime_statuses.get(result.paper.id) or {})
+        if _deep_read_needs_processing(result) and not str(current.get("status") or "").startswith("waiting_"):
+            _set_paper_runtime_status(
+                paper_runtime_statuses,
+                result.paper,
+                status="pending",
+                current_stage="selected_for_deep_read",
+                result=result,
+                error_message="",
+                deep_read_reserved=True,
+            )
+    return selected_paper_ids
+
+
+def _deep_read_needs_processing(result: PaperReadResult) -> bool:
+    """判断已选中论文是否还需要继续全文流程。"""
+
+    # 中文说明：下载、转换失败已经是这一轮的最终结果；Markdown 已生成或正在等待
+    # embedding 时则返回真，让恢复流程从现有文件继续。
+    return result.full_text.status not in {"indexed", "download_failed", "parse_failed", "no_url"}
 
 
 async def _run_one_paper_task(
@@ -1409,9 +1552,9 @@ async def _run_one_paper_task(
     runtime_resources: WorkflowRuntimeResources | None,
     paper_runtime_statuses: dict[str, JsonObject],
     completed_counter: CompletedPaperCounter,
-    deep_read_quota: DeepReadQuota,
     total_paper_count: int,
     semaphore: asyncio.Semaphore,
+    process_full_text: bool,
 ) -> PaperReadResult:
     """在线程池外层控制论文级并发，并把单篇异常隔离在当前论文内部。"""
 
@@ -1429,8 +1572,8 @@ async def _run_one_paper_task(
                 runtime_resources=runtime_resources,
                 paper_runtime_statuses=paper_runtime_statuses,
                 completed_counter=completed_counter,
-                deep_read_quota=deep_read_quota,
                 total_paper_count=total_paper_count,
+                process_full_text=process_full_text,
             )
         except ReadResourceUnavailableError as exc:
             _mark_paper_waiting_resource(paper_runtime_statuses, item.paper, exc)
@@ -1494,10 +1637,10 @@ async def _read_one_paper(
     runtime_resources: WorkflowRuntimeResources | None,
     paper_runtime_statuses: dict[str, JsonObject],
     completed_counter: CompletedPaperCounter,
-    deep_read_quota: DeepReadQuota,
     total_paper_count: int,
+    process_full_text: bool,
 ) -> PaperReadResult:
-    """处理一篇论文，单篇内部仍保持顺序执行，只是批次层改成并发。"""
+    """执行摘要阶段或已选中论文的全文阶段。"""
 
     paper = item.paper
     title = paper.title.strip()
@@ -1522,9 +1665,8 @@ async def _read_one_paper(
         )
         return result
 
-    restored_stage = str(item.restored_status.get("current_stage") or "").strip()
     result = item.restored_result
-    if result is None or restored_stage not in {"downloading_full_text", "converting_markdown", "chunking_full_text", "extracting_full_text", "saving_chunks"}:
+    if not process_full_text:
         _set_paper_runtime_status(
             paper_runtime_statuses,
             paper,
@@ -1564,56 +1706,24 @@ async def _read_one_paper(
             usage_callback=report_abstract_usage,
         )
         result = PaperReadResult(paper=paper, note=note, relevance=relevance, warnings=warnings)
-    else:
-        _set_paper_runtime_status(
-            paper_runtime_statuses,
-            paper,
-            status="running",
-            current_stage=restored_stage,
-            result=result,
-            error_message="",
-        )
-
-    should_deep_read = result.relevance.decision == "deep_read" and result.relevance.score >= config.deep_score_threshold
-    if not should_deep_read:
-        result.full_text = FullTextStatus(status="not_requested", reason="当前论文只保留摘要笔记")
-        _report_progress(
-            reporter,
-            paper,
-            "paper_completed",
-            completed_counter.current(),
-            total_paper_count,
-            runtime_status="completed",
-            message="摘要阅读完成，当前论文不需要全文精读",
-            current_status=result.full_text.status,
-            paper_position=item.position,
-        )
         return result
 
-    if not _paper_has_reserved_deep_read(paper_runtime_statuses, paper):
-        if not await deep_read_quota.try_acquire():
-            result.full_text = FullTextStatus(status="not_requested", reason="已达到本次全文精读数量上限")
-            _report_progress(
-                reporter,
-                paper,
-                "paper_completed",
-                completed_counter.current(),
-                total_paper_count,
-                runtime_status="completed",
-                message="摘要阅读完成，已达到全文精读数量上限",
-                current_status=result.full_text.status,
-                paper_position=item.position,
-            )
-            return result
-        _set_paper_runtime_status(
-            paper_runtime_statuses,
-            paper,
-            status="running",
-            current_stage=restored_stage or "reading_abstract",
-            result=result,
-            error_message="",
-            deep_read_reserved=True,
-        )
+    if result is None:
+        raise ValueError("全文阶段缺少摘要阅读结果")
+    if result.relevance.status != "selected_for_deep_read":
+        return result
+
+    restored_stage = str(item.restored_status.get("current_stage") or "").strip()
+    resume_stages = {"downloading_full_text", "converting_markdown", "chunking_full_text", "extracting_full_text", "saving_chunks"}
+    _set_paper_runtime_status(
+        paper_runtime_statuses,
+        paper,
+        status="running",
+        current_stage=restored_stage if restored_stage in resume_stages else "selected_for_deep_read",
+        result=result,
+        error_message="",
+        deep_read_reserved=True,
+    )
 
     full_text = result.full_text
     source_path = Path(full_text.source_path) if full_text.source_path else None
@@ -1737,51 +1847,10 @@ async def _read_one_paper(
     full_text.chunk_count = len(chunk_build.chunks)
     result.full_text = full_text
 
-    _set_paper_runtime_status(
-        paper_runtime_statuses,
-        paper,
-        status="running",
-        current_stage="extracting_full_text",
-        result=result,
-        error_message="",
-    )
-    _report_progress(
-        reporter,
-        paper,
-        "extracting_full_text",
-        completed_counter.current(),
-        total_paper_count,
-        paper_position=item.position,
-    )
-    if llm is None:
-        raise ReadModelUnavailableError("未配置可用的阅读模型，无法从全文 chunks 提取论文结构化信息")
-    try:
-        extraction_record = await async_extract_paper_from_chunks(
-            paper,
-            chunks_path=chunk_build.chunks_path,
-            llm=llm,
-            runtime_resources=runtime_resources,
-        )
-        result.extraction = extraction_payload(extraction_record)
-    except RuntimeError as exc:
-        raise ReadModelUnavailableError(f"全文提取模型调用失败，请验证阅读模型可用后继续执行：{exc}") from exc
-    except (OSError, ValueError) as exc:
-        result.extraction = empty_extraction()
-        warning = f"全文结构化提取失败：{exc}"
-        result.warnings.append(warning)
-        _report_progress(
-            reporter,
-            paper,
-            "extracting_full_text",
-            completed_counter.current(),
-            total_paper_count,
-            runtime_status="failed",
-            message="全文结构化信息提取失败，将继续保存基础阅读结果",
-            current_status=result.full_text.status,
-            paper_position=item.position,
-            error_message=warning,
-        )
-        await async_write_failed_extraction(paper, chunks_path=chunk_build.chunks_path, reason=str(exc))
+    # 中文说明：摘要模型已经为这篇论文调用过一次。这里不再把全文交给模型提取，
+    # 以保证每篇论文只调用一次模型；后续分析直接使用全部论文已有的结构化摘要，
+    # 需要正文细节时会从下面建立的向量索引中检索。
+    result.extraction = empty_extraction()
 
     _set_paper_runtime_status(
         paper_runtime_statuses,

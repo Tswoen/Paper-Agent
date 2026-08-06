@@ -57,7 +57,6 @@ class ReadDefaults:
 
     agent_name: str = "default_agent"
     paper_cache_dir: str = "data/paper_cache"
-    deep_score_threshold: int = 75
     connect_timeout_seconds: int = 10
     download_timeout_seconds: int = 60
     max_file_size_mb: int = 50
@@ -120,7 +119,6 @@ class SystemConfig:
             read=ReadDefaults(
                 agent_name=str(read.get("agent_name") or "default_agent"),
                 paper_cache_dir=str(read.get("paper_cache_dir") or "data/paper_cache"),
-                deep_score_threshold=_read_positive_int(read.get("deep_score_threshold"), 75, maximum=100),
                 connect_timeout_seconds=_read_positive_int(read.get("connect_timeout_seconds"), 10),
                 download_timeout_seconds=_read_positive_int(read.get("download_timeout_seconds"), 60),
                 max_file_size_mb=_read_positive_int(read.get("max_file_size_mb"), 50),
