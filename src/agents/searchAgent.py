@@ -128,7 +128,6 @@ class SearchAgent(BaseAgent):
         # 这里显式传参，避免注入的模型配置把思考强度覆盖成 none。
         response = self.context.llm.provider.chat_with_retry(
             messages,
-            max_tokens=800,
             reasoning_effort="medium",
         )
         self.report_usage(response, usage_callback)
@@ -195,7 +194,7 @@ class SearchAgent(BaseAgent):
         chat = getattr(provider, "chat", None)
         if callable(chat):
             # 异步调用与同步调用保持相同的思考设置，确保工作流入口不同也不会改变搜索质量。
-            response = chat(messages, max_tokens=800, reasoning_effort="medium")
+            response = chat(messages, reasoning_effort="medium")
             if inspect.isawaitable(response):
                 return await response
             return response
@@ -204,7 +203,6 @@ class SearchAgent(BaseAgent):
         return await asyncio.to_thread(
             provider.chat_with_retry,
             messages,
-            max_tokens=800,
             reasoning_effort="medium",
         )
 

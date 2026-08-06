@@ -23,6 +23,15 @@ from src.utils.read_utils.chunkers import async_build_chunks_file
 from src.utils.read_utils.extraction import empty_extraction
 
 
+# 中文说明：全文切分后默认只保留 chunks.json，不调用向量嵌入服务。
+# 以后需要恢复向量检索时，只需把这里改成 True；无需改动全文下载、转换和切分流程。
+ENABLE_FULL_TEXT_EMBEDDING = False
+
+# 中文说明：这两种状态都表示全文处理已经结束。indexed 表示已写入向量库，
+# chunks_saved 表示只保存了切分后的 chunks.json。
+_FULL_TEXT_COMPLETED_STATUSES = frozenset({"indexed", "chunks_saved"})
+
+
 class ReadResourceUnavailableError(RuntimeError):
     """表示阅读节点依赖的外部资源不可用，需要保存现场后等待用户处理。"""
 
@@ -289,11 +298,15 @@ async def _run_read_node_async(state: State) -> State:
     sink = _resolve_sink(state)
     runtime_resources = _resolve_runtime_resources(state)
     llm = _resolve_llm(state, config.agent_name)
-    embedding_connection, embedding_error = _resolve_embedding_connection(
-        system_config,
-        config.download_timeout_seconds,
-        runtime_resources=runtime_resources,
-    )
+    if ENABLE_FULL_TEXT_EMBEDDING:
+        embedding_connection, embedding_error = _resolve_embedding_connection(
+            system_config,
+            config.download_timeout_seconds,
+            runtime_resources=runtime_resources,
+        )
+    else:
+        # 中文说明：关闭向量嵌入时不读取 embedding 配置，避免配置缺失影响全文分块保存。
+        embedding_connection, embedding_error = None, None
 
     recovered_results = _restore_read_results(state, papers, checkpoint)
     results_by_paper_id = {result.paper.id: result for result in recovered_results}
@@ -1136,7 +1149,7 @@ def _summary_paper_item(result: PaperReadResult) -> JsonObject:
         "title": result.paper.title,
         "year": result.paper.year,
         "extraction": dict(result.extraction or empty_extraction()),
-        "processing_status": "completed" if result.full_text.status == "indexed" else result.full_text.status,
+        "processing_status": "completed" if result.full_text.status in _FULL_TEXT_COMPLETED_STATUSES else result.full_text.status,
     }
 
 
@@ -1162,7 +1175,7 @@ def _paper_completion_runtime_status(result: PaperReadResult) -> str:
     # 但对这篇论文来说确实有阶段失败，所以卡片用 failed 更醒目。
     if result.full_text.status in {"download_failed", "no_url", "parse_failed"}:
         return "failed"
-    if result.full_text.reason and result.full_text.status not in {"indexed", "not_requested"}:
+    if result.full_text.reason and result.full_text.status not in _FULL_TEXT_COMPLETED_STATUSES | {"not_requested"}:
         return "failed"
     if any("失败" in warning or "无法" in warning for warning in result.warnings):
         return "failed"
@@ -1177,7 +1190,7 @@ def _paper_completion_message(result: PaperReadResult) -> str:
         return "全文下载失败，已保留摘要阅读结果"
     if status == "parse_failed":
         return "Markdown 转换失败，已保留摘要阅读结果"
-    if result.full_text.reason and status not in {"indexed", "not_requested"}:
+    if result.full_text.reason and status not in _FULL_TEXT_COMPLETED_STATUSES | {"not_requested"}:
         return "全文索引失败，已保留阅读结果"
     if any("全文结构化提取失败" in warning for warning in result.warnings):
         return "全文结构化信息提取失败，已保存基础阅读结果"
@@ -1191,7 +1204,7 @@ def _paper_completion_error_message(result: PaperReadResult) -> str:
 
     if result.full_text.status in {"download_failed", "no_url", "parse_failed"}:
         return result.full_text.reason or result.full_text.status
-    if result.full_text.reason and result.full_text.status not in {"indexed", "not_requested"}:
+    if result.full_text.reason and result.full_text.status not in _FULL_TEXT_COMPLETED_STATUSES | {"not_requested"}:
         return result.full_text.reason
     for warning in result.warnings:
         if "失败" in warning or "无法" in warning:
@@ -1210,7 +1223,7 @@ def _read_errors(results: list[PaperReadResult]) -> list[JsonObject]:
             errors.append({"paperId": paper_id, "stage": "download", "reason": result.full_text.reason})
         elif status == "parse_failed":
             errors.append({"paperId": paper_id, "stage": "parse", "reason": result.full_text.reason})
-        elif result.full_text.reason and status != "indexed":
+        elif result.full_text.reason and status not in _FULL_TEXT_COMPLETED_STATUSES:
             errors.append({"paperId": paper_id, "stage": "vectorize", "reason": result.full_text.reason})
         for warning in result.warnings:
             if "全文结构化提取失败" in warning:
@@ -1536,7 +1549,7 @@ def _deep_read_needs_processing(result: PaperReadResult) -> bool:
 
     # 中文说明：下载、转换失败已经是这一轮的最终结果；Markdown 已生成或正在等待
     # embedding 时则返回真，让恢复流程从现有文件继续。
-    return result.full_text.status not in {"indexed", "download_failed", "parse_failed", "no_url"}
+    return result.full_text.status not in _FULL_TEXT_COMPLETED_STATUSES | {"download_failed", "parse_failed", "no_url"}
 
 
 async def _run_one_paper_task(
@@ -1847,10 +1860,16 @@ async def _read_one_paper(
     full_text.chunk_count = len(chunk_build.chunks)
     result.full_text = full_text
 
-    # 中文说明：摘要模型已经为这篇论文调用过一次。这里不再把全文交给模型提取，
-    # 以保证每篇论文只调用一次模型；后续分析直接使用全部论文已有的结构化摘要，
-    # 需要正文细节时会从下面建立的向量索引中检索。
+    # 中文说明：摘要模型已经为这篇论文调用过一次。全文阶段只保存正文分块，
+    # 后续写作需要正文细节时会直接从 chunks.json 读取，不再额外生成结构化提取结果。
     result.extraction = empty_extraction()
+
+    if not ENABLE_FULL_TEXT_EMBEDDING:
+        # 中文说明：async_build_chunks_file 已经把分块内容写到论文缓存目录的 chunks.json。
+        # 关闭开关后到这里就结束，既不要求 embedding 配置，也不发起任何向量服务请求。
+        full_text.status = "chunks_saved"
+        full_text.reason = ""
+        return result
 
     _set_paper_runtime_status(
         paper_runtime_statuses,
@@ -1877,20 +1896,6 @@ async def _read_one_paper(
             details=_embedding_error_details(result, stage="embedding_config", message=full_text.reason),
         )
     try:
-        def report_embedding_usage(usage: JsonObject) -> None:
-            """把全文向量化模型返回的真实 token 用量写入当前论文卡片。"""
-
-            paper_usage["input_tokens"] += int(usage.get("input_tokens") or 0)
-            paper_usage["output_tokens"] += int(usage.get("output_tokens") or 0)
-            _report_progress(
-                reporter,
-                paper,
-                "saving_chunks",
-                completed_counter.current(),
-                total_paper_count,
-                **paper_usage,
-            )
-
         index_result = await async_index_chunk_file(
             paper,
             chunks_path=chunk_build.chunks_path,
@@ -1899,7 +1904,6 @@ async def _read_one_paper(
             collection_name=config.vector_store_collection,
             embedding_connection=embedding_connection,
             runtime_resources=runtime_resources,
-            usage_callback=report_embedding_usage,
         )
     except RuntimeError as exc:
         full_text.reason = f"全文已转成 Markdown，但 embedding 服务不可用：{exc}"
@@ -2234,7 +2238,7 @@ def _infer_deep_read_reserved(result: PaperReadResult | None) -> bool:
     if result is None:
         return False
     full_text = result.full_text
-    return bool(full_text.source_path or full_text.markdown_path or full_text.status in {"downloaded", "markdown_ready", "indexed", "download_failed", "parse_failed"})
+    return bool(full_text.source_path or full_text.markdown_path or full_text.status in _FULL_TEXT_COMPLETED_STATUSES | {"downloaded", "markdown_ready", "download_failed", "parse_failed"})
 
 
 def _build_resume_checkpoint(

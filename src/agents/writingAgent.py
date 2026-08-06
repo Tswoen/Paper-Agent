@@ -180,7 +180,6 @@ class WritingAgent(BaseAgent):
             response = await self.context.llm.provider.chat(
                 _abstract_messages(topic=topic, sections=sections, word_count=word_count),
                 temperature=0.2,
-                max_tokens=1800,
                 reasoning_effort="medium",
             )
         except Exception as exc:
@@ -218,7 +217,6 @@ class WritingAgent(BaseAgent):
         response = await self.context.llm.provider.chat(
             _write_messages(state),
             temperature=0.2,
-            max_tokens=5000,
             reasoning_effort="medium",
         )
         _notify_section_usage(state, response)
@@ -318,7 +316,6 @@ class WritingAgent(BaseAgent):
         response = await self.context.llm.provider.chat(
             _review_messages(state),
             temperature=0,
-            max_tokens=1200,
             reasoning_effort="medium",
         )
         _notify_section_usage(state, response)

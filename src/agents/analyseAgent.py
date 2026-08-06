@@ -65,7 +65,6 @@ class AnalyseAgent(BaseAgent):
             response = await self.context.llm.provider.chat(
                 _subtopic_messages(topic=topic, group=group),
                 temperature=0.2,
-                # max_tokens=4000,
                 reasoning_effort="medium",
             )
         except Exception as exc:
