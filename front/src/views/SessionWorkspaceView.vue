@@ -16,7 +16,7 @@ import { ApiRequestError, cancelSessionRun, createSession, fetchSessionThread, s
 import SessionComposer from "../components/session/SessionComposer.vue";
 import SessionTimeline from "../components/session/SessionTimeline.vue";
 import StatusPill from "../components/StatusPill.vue";
-import { createRandomId } from "../lib/random-id";
+import { createReadableId } from "../lib/random-id";
 import { SessionStreamAggregator } from "../lib/session-stream-aggregator";
 import { pushToast } from "../stores/notifications";
 import type {
@@ -259,7 +259,7 @@ async function submitTopic() {
 
   try {
     const sessionKey = await ensureActiveSession();
-    const turnId = createRandomId("turn");
+    const turnId = createReadableId();
     aggregator.addOptimisticUserMessage(submittedContent, turnId);
     syncSnapshot();
     const accepted = await startSessionRun(sessionKey, {
@@ -287,7 +287,7 @@ async function resumeLatestCheckpoint() {
   sending.value = true;
   const content = "继续上次失败的位置";
   try {
-    const turnId = createRandomId("turn");
+    const turnId = createReadableId();
     aggregator.addOptimisticUserMessage(content, turnId);
     syncSnapshot();
     const accepted = await startSessionRun(selectedSessionKey.value, {

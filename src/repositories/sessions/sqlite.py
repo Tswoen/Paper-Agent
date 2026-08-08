@@ -13,6 +13,7 @@ from typing import Any
 from src.models.sessions import SessionRecord, utc_now
 from src.services.sessions import SessionError
 from src.utils import get_logger
+from src.utils.readable_id import create_readable_id
 
 from .base import JsonObject, SessionRepository
 
@@ -528,7 +529,8 @@ class SQLiteSessionRepository(SessionRepository):
     def create(self, title: str = "New chat", workspace_scope: JsonObject | None = None) -> SessionRecord:
         """创建新的会话记录。"""
 
-        key = uuid.uuid4().hex
+        # 会话编号会出现在数据库、日志和本地目录中，因此保留创建时间，方便人工排查。
+        key = create_readable_id()
         now = utc_now()
         self.backend.create_session(
             session_id=key,
@@ -716,7 +718,7 @@ class SQLiteSessionRepository(SessionRepository):
         """把初始会话列表导入持久化后端。"""
 
         for item in initial:
-            key = str(item.get("key") or uuid.uuid4().hex)
+            key = str(item.get("key") or create_readable_id())
             created_at = str(item.get("created_at") or utc_now())
             updated_at = str(item.get("updated_at") or created_at)
             workspace_scope = copy.deepcopy(item.get("workspace_scope"))

@@ -3,13 +3,13 @@ from __future__ import annotations
 import asyncio
 import copy
 import inspect
-import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from src.models.sessions import utc_now
 from src.repositories.sessions.base import SessionRepository
 from src.utils import get_logger, logging_context
+from src.utils.readable_id import create_readable_id
 
 
 JsonObject = dict[str, Any]
@@ -111,7 +111,8 @@ def submit_message(
     # 中文注释：先确认会话存在，避免把消息误写到不存在的会话里。
     repo.get(session_key)
 
-    turn_id = str(body.get("turn_id") or uuid.uuid4().hex)
+    # 调用方没有提供回合编号时，在这里补上带创建时间的编号，方便从日志定位本次提交。
+    turn_id = str(body.get("turn_id") or create_readable_id())
     media = list(body.get("media") or [])
     started_at = utc_now()
     events: list[JsonObject] = []

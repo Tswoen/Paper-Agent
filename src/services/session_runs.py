@@ -14,6 +14,7 @@ from src.models.sessions import SessionRecord, utc_now
 from src.repositories.sessions.base import SessionRepository
 from src.services.sessions import AssistantMessageBuffer, MessageHandler, SessionError, invoke_message_handler_async
 from src.utils import get_logger, logging_context
+from src.utils.readable_id import create_readable_id
 
 
 JsonObject = dict[str, Any]
@@ -207,7 +208,8 @@ class SessionRunService:
         if record.run_started_at or record.status == "running":
             raise SessionError("session is already running", 409)
 
-        turn_id = str(body.get("turn_id") or uuid.uuid4().hex)
+        # 前端通常会传入回合编号；其他调用方未传时，后端也按统一的人类可读格式生成。
+        turn_id = str(body.get("turn_id") or create_readable_id())
         run_id = str(body.get("run_id") or f"run_{uuid.uuid4().hex}")
         media = list(body.get("media") or [])
         started_at = utc_now()
