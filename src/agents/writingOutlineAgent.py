@@ -12,6 +12,20 @@ from .contracts import JsonObject
 from .Prompts import WRITING_OUTLINE_AGENT_SYSTEM_PROMPT
 
 
+# 中文说明：evidence-map 只能引用这八个全局分析字段。把字段集中放在这里，
+# 可以保证大纲生成、兜底大纲和正文写作使用同一套名称。
+OVERALL_ANALYSIS_FIELDS = (
+    "领域整体研究概况",
+    "领域全域共性研究共识",
+    "领域核心研究争议与矛盾体系",
+    "领域系统性研究空白与局限",
+    "领域研究时序演化脉络",
+    "领域技术与研究方法迭代脉络",
+    "各子主题横向差异对比分析",
+    "领域整体总结与研究展望",
+)
+
+
 class WritingOutlineAgent(BaseAgent):
     """根据分析结果生成论文写作大纲的 Agent。
 
@@ -153,19 +167,9 @@ def _compact_overall_analysis(overall_analysis: JsonObject) -> JsonObject:
 
     # 中文说明：综合分析节点的结果固定为这八个字段。
     # 这里明确列出字段名，避免把执行信息或其他无关内容误当成写作证据。
-    fields = (
-        "领域整体研究概况",
-        "领域全域共性研究共识",
-        "领域核心研究争议与矛盾体系",
-        "领域系统性研究空白与局限",
-        "领域研究时序演化脉络",
-        "领域技术与研究方法迭代脉络",
-        "各子主题横向差异对比分析",
-        "领域整体总结与研究展望",
-    )
     return {
         field: str(overall_analysis.get(field) or "").strip()
-        for field in fields
+        for field in OVERALL_ANALYSIS_FIELDS
     }
 
 
@@ -270,7 +274,7 @@ def _normalize_sections(value: Any) -> JsonObject:
         sections[section_key] = {
             "title": section_title,
             "task": section_task,
-            "evidence-map": _list_value(section.get("evidence-map")),
+            "evidence-map": _normalize_evidence_map(section.get("evidence-map")),
             "ref-sections": _list_value(section.get("ref-sections")),
             "word-count": _positive_int(section.get("word-count"), default=800),
         }
@@ -302,6 +306,17 @@ def _list_value(value: Any) -> list[Any]:
     if value in (None, ""):
         return []
     return [value]
+
+
+def _normalize_evidence_map(value: Any) -> list[str]:
+    """只保留全局分析中存在的字段名，避免无效内容进入正文写作。"""
+
+    fields: list[str] = []
+    for item in _list_value(value):
+        field = str(item or "").strip()
+        if field in OVERALL_ANALYSIS_FIELDS and field not in fields:
+            fields.append(field)
+    return fields
 
 
 def _positive_int(value: Any, *, default: int) -> int:

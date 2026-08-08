@@ -53,7 +53,7 @@ def index_markdown_chunks(
 ) -> ChunkIndexResult:
     """同步兼容入口，把 Markdown 切分后写入向量库。
 
-    中文注释：新阅读节点会优先走 chunks.json 入库；这个函数保留给旧调用方。
+    中文注释：新阅读节点会优先走 chunk.json 入库；这个函数保留给旧调用方。
     chunk_size 和 chunk_overlap 是旧参数，当前按页切分策略暂时不会使用它们。
     """
 
@@ -96,7 +96,7 @@ async def async_index_markdown_chunks(
 ) -> ChunkIndexResult:
     """异步兼容入口，把 Markdown 临时按页切分后写入向量库。
 
-    中文注释：主流程现在会先生成 chunks.json，再调用 async_index_chunk_file。
+    中文注释：主流程现在会先生成 chunk.json，再调用 async_index_chunk_file。
     这里继续存在，是为了让旧代码或脚本还能直接传 Markdown。
     """
 
@@ -127,15 +127,15 @@ async def async_index_chunk_file(
     runtime_resources: WorkflowRuntimeResources | None = None,
     usage_callback: Callable[[dict[str, int]], None] | None = None,
 ) -> ChunkIndexResult:
-    """把 chunks.json 写入向量库。
+    """把 chunk.json 写入向量库。
 
-    中文注释：全文提取和向量化都使用同一个 chunks.json，所以提取结果里的
+    中文注释：全文提取和向量化都使用同一个 chunk.json，所以提取结果里的
     [chunkId] 可以准确对应到向量库里的同一段正文。
     """
 
     chunks = await asyncio.to_thread(load_chunks_file, chunks_path)
     if not chunks:
-        raise ValueError("chunks.json 中没有可写入向量库的正文片段")
+        raise ValueError("chunk.json 中没有可写入向量库的正文片段")
     return await _index_chunks(
         paper,
         chunks=chunks,

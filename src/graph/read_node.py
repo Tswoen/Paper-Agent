@@ -20,15 +20,15 @@ from src.paper_retrieval.download import async_download_paper_fulltext
 from src.paper_retrieval.models import PaperDocument
 from src.repositories.sessions.base import SessionRepository
 from src.utils.read_utils.chunkers import async_build_chunks_file
-from src.utils.read_utils.extraction import empty_extraction
+from src.utils.read_utils.extraction import async_extract_paper_from_chunks, empty_extraction, extraction_payload
 
 
-# 中文说明：全文切分后默认只保留 chunks.json，不调用向量嵌入服务。
+# 中文说明：全文切分后默认只保留 chunk.json，不调用向量嵌入服务。
 # 以后需要恢复向量检索时，只需把这里改成 True；无需改动全文下载、转换和切分流程。
 ENABLE_FULL_TEXT_EMBEDDING = False
 
 # 中文说明：这两种状态都表示全文处理已经结束。indexed 表示已写入向量库，
-# chunks_saved 表示只保存了切分后的 chunks.json。
+# chunks_saved 表示只保存了切分后的 chunk.json。
 _FULL_TEXT_COMPLETED_STATUSES = frozenset({"indexed", "chunks_saved"})
 
 
@@ -1549,7 +1549,11 @@ def _deep_read_needs_processing(result: PaperReadResult) -> bool:
 
     # 中文说明：下载、转换失败已经是这一轮的最终结果；Markdown 已生成或正在等待
     # embedding 时则返回真，让恢复流程从现有文件继续。
-    return result.full_text.status not in _FULL_TEXT_COMPLETED_STATUSES | {"download_failed", "parse_failed", "no_url"}
+    if result.full_text.status in _FULL_TEXT_COMPLETED_STATUSES:
+        # 中文注释：旧流程可能只生成了切块文件，没有完成全文结构化摘要。只有笔记
+        # 明确标记为 full_text 后，才把这篇精读论文视为全部完成。
+        return result.note.evidence_level != "full_text"
+    return result.full_text.status not in {"download_failed", "parse_failed", "no_url"}
 
 
 async def _run_one_paper_task(
@@ -1860,12 +1864,46 @@ async def _read_one_paper(
     full_text.chunk_count = len(chunk_build.chunks)
     result.full_text = full_text
 
-    # 中文说明：摘要模型已经为这篇论文调用过一次。全文阶段只保存正文分块，
-    # 后续写作需要正文细节时会直接从 chunks.json 读取，不再额外生成结构化提取结果。
-    result.extraction = empty_extraction()
+    _set_paper_runtime_status(
+        paper_runtime_statuses,
+        paper,
+        status="running",
+        current_stage="extracting_full_text",
+        result=result,
+        error_message="",
+    )
+    _report_progress(
+        reporter,
+        paper,
+        "extracting_full_text",
+        completed_counter.current(),
+        total_paper_count,
+        paper_position=item.position,
+    )
+    if llm is None:
+        raise ReadModelUnavailableError("未配置可用的阅读模型，无法生成全文结构化摘要")
+    try:
+        extraction_record = await async_extract_paper_from_chunks(
+            paper,
+            chunks_path=chunk_build.chunks_path,
+            llm=llm,
+            runtime_resources=runtime_resources,
+        )
+    except RuntimeError as exc:
+        # 中文注释：这里的运行错误来自全文摘要模型调用。暂停后保留已下载、转换和
+        # 切分的文件，用户修好模型配置后可直接从 chunk.json 继续处理。
+        raise ReadModelUnavailableError(f"全文结构化摘要模型不可用：{exc}") from exc
+    except ValueError as exc:
+        # 中文注释：模型返回的 JSON 或引用不合格时，正文块仍可用于后续人工核对和
+        # 写作，因此保留摘要阶段结果并记录提醒，而不是丢弃整篇论文。
+        result.extraction = empty_extraction()
+        result.warnings.append(f"全文结构化摘要生成失败：{exc}")
+    else:
+        result.extraction = extraction_payload(extraction_record)
+        result.note = _full_text_note_from_extraction(result.extraction)
 
     if not ENABLE_FULL_TEXT_EMBEDDING:
-        # 中文说明：async_build_chunks_file 已经把分块内容写到论文缓存目录的 chunks.json。
+        # 中文说明：async_build_chunks_file 已经把分块内容写到论文缓存目录的 chunk.json。
         # 关闭开关后到这里就结束，既不要求 embedding 配置，也不发起任何向量服务请求。
         full_text.status = "chunks_saved"
         full_text.reason = ""
@@ -1934,6 +1972,29 @@ async def _read_one_paper(
     full_text.chunk_count = index_result.chunk_count
     result.full_text = full_text
     return result
+
+
+def _full_text_note_from_extraction(extraction: JsonObject) -> ReadNote:
+    """把精读后的结构化摘要同步到阅读笔记，供界面直接展示。"""
+
+    # 中文注释：粗读论文继续使用摘要模型生成的笔记；只有真正完成全文精读的论文
+    # 才会走到这里。因此界面中的精读摘要会自然带有 [chunkId]，粗读摘要不会混入它。
+    research_topic = str(extraction.get("research_topic") or "").strip()
+    research_object = str(extraction.get("research_object") or "").strip()
+    methods = str(extraction.get("methods") or "").strip()
+    conclusions = str(extraction.get("conclusions") or "").strip()
+    contributions = str(extraction.get("contributions") or "").strip()
+    limitations = str(extraction.get("limitations") or "").strip()
+    return ReadNote(
+        main_question=research_topic,
+        methods=[methods] if methods else [],
+        datasets=[research_object] if research_object else [],
+        contributions=[contributions] if contributions else [],
+        limitations=[limitations] if limitations else [],
+        main_results=[conclusions] if conclusions else [],
+        short_summary=conclusions or research_topic,
+        evidence_level="full_text",
+    )
 
 
 async def _build_abstract_note(

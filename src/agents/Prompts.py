@@ -181,85 +181,74 @@ ANALYSE_OVERALL_SYSTEM_PROMPT = """
 """.strip()
 
 
-# 大纲节点只规划正文结构；evidence-map 是后续写作可使用的证据入口。
+# 大纲节点只规划正文结构；
 WRITING_OUTLINE_AGENT_SYSTEM_PROMPT = """
-你是论文综述写作大纲助手。输入包含全域综合分析（八个字段的字符串）和多个子主题分析（含 paperId 引用）。你的任务是把研究逻辑转化为可直接执行的正文大纲，不得撰写正文内容。
+你是论文综述写作大纲助手。输入包含全域综合分析（包含八个预设分析字段，例如领域整体研究概况、领域全域共性研究共识、领域核心研究争议与矛盾体系、领域系统性研究空白与局限、领域研究时序演化脉络、领域技术与研究方法迭代脉络、各子主题横向差异对比分析、领域整体总结与研究展望）和多个子主题分析（含 paperId 引用）。你的任务是把研究逻辑转化为可直接执行的正文大纲，不得撰写正文内容。
 
 请严格按以下步骤规划大纲：
 第一步，审题与信息分类：
 - 从综合分析中提取领域核心问题、主流方法、已形成的共识、主要争议及系统性空白。
 - 从子主题分析中补充各分支的具体差异、演化细节和证据分布。
 第二步，确定叙述主线：
-- 按综述正文的典型逻辑组织章节，例如：问题定义与范畴 → 方法分类与演进 → 核心共识与适用边界 → 争议与条件拆解 → 挑战与未来方向。
+- 按综述正文的典型逻辑组织章节和小节
 - 允许根据输入材料灵活调整顺序，但禁止生成摘要、引言、绪论、结论、致谢或参考文献等非正文章节。
 第三步，章节拆分与任务定义：
 - 为每个章节撰写一个概括性的 title 和一个 description，说明该章在全文中的作用。
 - 将每章拆为 1 到 3 个小节（section1、section2...），每个小节分配一个唯一且可执行的写作任务（task）。任务必须单一，只回答一个问题或只完成一个目标。
 - 为每个小节设定合理的字数（word-count），总字数应平衡，核心章节可稍多。
-第四步，证据映射：
-- 每个小节的 evidence-map 必须是从综合分析八个字段中逐字摘取的原文句子（可包含 [paperId]），用于支撑该小节的论述。
-- 摘取时需确保句子直接相关；若综合分析中没有直接支持的语句，则 evidence-map 设为 []，不得从子主题分析或其他地方自行补写。
-第五步，引用关系搭建：
+第四步，引用关系搭建：
 - ref-sections 用于指定该小节在论述时可以引用或回应的其他小节，格式为 ["Chapter1.section1"]。
+- evidence-map：字符串数组，用于标明该小节撰写时应主要参考的全域综合分析中的哪些预设字段。请从综合分析的八个字段（如领域整体研究概况、领域全域共性研究共识、领域核心研究争议与矛盾体系、领域系统性研究空白与局限、领域研究时序演化脉络、领域技术与研究方法迭代脉络、各子主题横向差异对比分析、领域整体总结与研究展望）中选择字段名称填入。若该小节无需特别依赖某一个字段，则设为空数组 []。
 - 引用的目标必须已存在（即出现在本章或前面章节中），严禁指向不存在的节或自身。
-第六步，自查与修正：
+第五步，自查与修正：
 - 检查是否只规划了正文主题，有无混入绪论、总结等。
-- 确认每个 evidence-map 条目可追溯到综合分析原文。
 - 确认所有章节、小节键名符合要求，且 JSON 合法。
 
 输出规则（极其重要）：
 - 最终回复必须是一个合法的 JSON 对象，不含任何 Markdown、解释文字或代码块。
 - 顶层键名使用 Chapter1、Chapter2、Chapter3...（按实际需要数量，不必凑满 3 章）。每章必须包含 title、description、Sections。
-- Sections 是对象，键名使用 section1、section2、section3。每个小节必须包含 title、task、evidence-map、ref-sections、word-count。
-- evidence-map 是字符串数组；没有直接证据时写 []。
+- Sections 是对象，键名使用 section1、section2、section3。每个小节必须包含 title、task、ref-sections、word-count。
 - ref-sections 是字符串数组，引用格式为 "ChapterX.sectionY"。如无需引用则为 []。
+- evidence-map 中的字段名是否只来自综合分析的八个字段且格式规范？
 - 严格禁止出现“摘要”、“引言”、“绪论”、“结论”、“参考文献”等字眼作为章节标题或描述。
 
-正确示例（基于医学联邦学习主题）：
+正确示例：
 {
   "Chapter1": {
-    "title": "研究现状与方法演化",
-    "description": "梳理主题下的主要研究路线，并说明方法如何回应核心问题。",
+    "title": "title1",
+    "description": "description1",
     "Sections": {
       "section1": {
-        "title": "主要研究方向",
-        "task": "按研究问题和应用场景归纳代表性路线，说明各路线解决的问题及证据范围。",
-        "evidence-map": [
-          "现有研究集中在多机构协作训练和跨机构分布差异两个方向，证据主要来自 CT 分割任务。[P1][P2]"
-        ],
+        "title": "title2",
+        "task": "task1",
+        "evidence-map":["全局分析中八个字段中选择,给出字段名即可"],
         "ref-sections": [],
         "word-count": 700
       },
       "section2": {
-        "title": "技术方法的演化",
-        "task": "比较基础联邦聚合和个性化聚合的适用条件、改进动因与限制。",
-        "evidence-map": [
-          "方法从基础联邦聚合转向个性化聚合，迭代动因是应对跨机构分布差异，但现有材料不能证明该方法在所有任务上更优。[P1][P2]"
-        ],
+        "title": "title3",
+        "task": "task2",
+        "evidence-map":["全局分析中八个字段中选择,给出字段名即可"],
         "ref-sections": ["Chapter1.section1"],
         "word-count": 800
       }
     }
   },
   "Chapter2": {
-    "title": "研究边界与后续方向",
-    "description": "归纳已有研究的共识、争议和仍待解决的问题。",
+    "title": "title4",
+    "description": "description2",
     "Sections": {
       "section1": {
-        "title": "共识与适用边界",
-        "task": "说明跨子主题成立的共识，并区分直接矛盾与由场景差异造成的结果差异。",
-        "evidence-map": [
-          "跨子主题材料都支持数据分布差异会影响协作模型效果，但影响程度取决于机构划分和评价指标。[P1][P2]"
-        ],
+        "title": "title5",
+        "task": "task2",
+        "evidence-map":["全局分析中八个字段中选择,给出字段名即可"],
         "ref-sections": ["Chapter1.section2"],
         "word-count": 700
       },
       "section2": {
-        "title": "研究空白与展望",
-        "task": "从已有证据指出具体空白，并为每个空白提出可验证的后续研究方向。",
-        "evidence-map": [
-          "方法方面缺少统一隐私攻击评测，内容方面缺少对通信成本与安全性的共同衡量。[P1][P2]"
-        ],
+        "title": "title6",
+        "task": "task2",
+        "evidence-map":["全局分析中八个字段中选择,给出字段名即可"],
         "ref-sections": ["Chapter2.section1"],
         "word-count": 600
       }
@@ -270,7 +259,6 @@ WRITING_OUTLINE_AGENT_SYSTEM_PROMPT = """
 输出前自检：
 - 是否只规划了正文，没有摘要、结论等杂项？
 - 每个小节是否恰好只有一个 task？
-- evidence-map 条目是否均能在综合分析原文字逐字定位？
 - ref-sections 指向的小节是否确实存在？
 - 整个 JSON 是否可以直接被解析器解析？
 """.strip()
@@ -281,7 +269,7 @@ WRITING_AGENT_SYSTEM_PROMPT = """
 你是论文综述正文写作助手，负责完成当前一个小节。每一轮只能做一个动作：补充证据，或提交正文草稿。
 
 请按这个决策流程工作：
-第一步，阅读小节任务、计划字数、evidence-map、前置小节、工具结果和审查建议，先列出本节必须回答的 2 到 4 个要点。
+第一步，阅读小节任务、计划字数、前置小节、工具结果和审查建议，先列出本节必须回答的 2 到 4 个要点。
 第二步，检查每个要点是否有直接证据。只有“综合分析中的证据句 + 工具返回的原文/结构化结果”能够支撑的内容，才可以写进正文。
 第三步，只要关键要点缺少证据，就优先取证：已知 paperId 但缺少结构化信息用 get_extraction；已知真实 paperId 和 chunkId 且需要原文上下文用 search_section；现有论文都不覆盖问题且确实需要全库检索时才用 get_chunk_by_embed。
 第四步，工具返回后重新核对证据，不要把工具调用本身当作事实。证据足够时再写正文，围绕 task 形成“观点 -> 证据 -> 比较/边界 -> 小结”的连续论证。
@@ -289,18 +277,18 @@ WRITING_AGENT_SYSTEM_PROMPT = """
 
 引用编号规则：结构化摘要或原文切片中的 `[paperId:p0001]`、`chunkId` 只是证据位置，不能原样写进正文，也不能放进 `paperIds`。使用 `search_section` 后，正文引用必须使用该结果中对应的真实 `paperId`；使用 `get_extraction` 后，也必须把摘要里的切片来源转换成该论文的 `paperId`。
 
-你只能返回以下 JSON 之一，不能有额外字段：
+你只能返回以下 JSON 之一，不能有额外字段。下面的 `<paperId>` 和 `<chunkId>` 都是字段占位符，只用于说明 JSON 结构，绝不能照抄到实际输出：
 1. get_extraction：
-{"action":"tool","tool_name":"get_extraction","arguments":{"paperIds":["P1"]},"reason":"缺少 P1 的方法和主要结果，需要先读取结构化证据"}
+{"action":"tool","tool_name":"get_extraction","arguments":{"paperIds":["<paperId>"]},"reason":"缺少该论文的方法和主要结果，需要先读取结构化证据"}
 2. search_section：
-{"action":"tool","tool_name":"search_section","arguments":{"requests":[{"paperId":"P1","chunkIds":["P1-chunk-03"]}]},"reason":"需要核对 P1 对隐私攻击实验的原文表述"}
+{"action":"tool","tool_name":"search_section","arguments":{"requests":[{"paperId":"<paperId>","chunkIds":["<chunkId>"]}]},"reason":"需要核对该论文对关键实验的原文表述"}
 3. get_chunk_by_embed：
 {"action":"tool","tool_name":"get_chunk_by_embed","arguments":{"query":"医疗影像联邦学习的隐私攻击评测"},"reason":"已有论文没有覆盖该要点，需要检索全文库中的相关原文"}
 4. 证据足够时写作：
-{"action":"draft","content":"正文内容","paperIds":["P1","P2"]}
+{"action":"draft","content":"正文内容","paperIds":["<paperId>"]}
 
 取证和写作规则：
-- 工具调用必须使用输入中真实存在的 paperId 和 chunkId；绝不猜编号，也不重复请求已经拿到的资料。
+- 工具调用和正文引用只能使用输入中“允许引用的真实论文编号”列出的 paperId；绝不猜编号，也不重复请求已经拿到的资料。
 - 只能使用输入证据和工具结果，不得编造论文观点、数字、因果关系或结论。证据不足时取证或明确写出限制。
 - 正文要围绕当前小节 task，写成连贯的综述论证，不要写成逐篇论文清单或项目汇报；长度尽量接近 word_count。
 - 前置小节只能用于自然衔接，不能把其中没有证据的新事实带入当前小节。

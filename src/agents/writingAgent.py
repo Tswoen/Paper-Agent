@@ -36,6 +36,7 @@ class SectionLoopState(TypedDict, total=False):
     read_results: list[JsonObject]
     session_read_results: list[JsonObject]
     cache_dir: str
+    available_paper_ids: list[str]
     tool_results: list[JsonObject]
     raw_model_outputs: list[str]
     revision_suggestions: list[str]
@@ -100,6 +101,7 @@ class WritingAgent(BaseAgent):
         read_results: list[JsonObject],
         cache_dir: str,
         session_read_results: list[JsonObject] | None = None,
+        available_paper_ids: list[str] | None = None,
         progress_callback: Any | None = None,
     ) -> JsonObject:
         """写作单个小节，并返回正文、引用和审查结果。
@@ -120,6 +122,7 @@ class WritingAgent(BaseAgent):
             # 当前 State 只保存本轮结果，会话历史资料由写作节点单独传进来。
             "session_read_results": list(session_read_results or []),
             "cache_dir": cache_dir,
+            "available_paper_ids": _deduplicate_strings(list(available_paper_ids or [])),
             "tool_results": [],
             "raw_model_outputs": [],
             "revision_suggestions": [],
@@ -444,7 +447,7 @@ def search_section(
 
     中文注释：
     这个工具不做复杂搜索，只做“按编号取原文”。模型如果已经知道需要哪几个
-    chunkId，就可以用它把 chunks.json 里的原文片段取出来。
+    chunkId，就可以用它把 chunk.json 里的原文片段取出来。
     """
 
     found: list[JsonObject] = []
@@ -586,7 +589,7 @@ def _resolve_citation_paper_id(value: str, chunk_to_paper: dict[str, str]) -> st
     mapped = chunk_to_paper.get(key)
     if mapped:
         return mapped
-    # 中文说明：如果缓存中暂时没有对应 chunks.json，切片编号仍然保留了
+    # 中文说明：如果缓存中暂时没有对应 chunk.json，切片编号仍然保留了
     # `paperId:p0001` 的前缀。直接取前缀可以避免把切片编号继续传播到正文。
     prefix_match = re.match(r"^(?P<paper>.+):(?:p|c)\d{4}(?::s\d{4})?$", text, flags=re.IGNORECASE)
     return prefix_match.group("paper").strip() if prefix_match else text
@@ -694,9 +697,10 @@ def _write_messages(state: SectionLoopState) -> list[JsonObject]:
             "section_id": state.get("section_id"),
             "小节任务": state.get("task"),
             "计划字数": state.get("word_count"),
-            "大纲提供的证据": state.get("evidence_map") or [],
+            "全局分析提供的证据": state.get("evidence_map") or [],
             "已经写好的前置小节": state.get("previous_sections") or [],
             "已调用工具得到的资料": state.get("tool_results") or [],
+            "允许引用的真实论文编号": state.get("available_paper_ids") or [],
             "当前草稿": state.get("draft") or "",
             "审查整改建议": state.get("revision_suggestions") or [],
             "可用工具": [
@@ -847,10 +851,10 @@ def _find_extraction_in_cache(paper_id: str, cache_dir: Path) -> JsonObject | No
 
 
 def _find_chunks_path(paper_id: str, cache_dir: Path) -> Path | None:
-    """定位某篇论文缓存目录下的 chunks.json。"""
+    """定位某篇论文缓存目录下的 chunk.json。"""
 
     for directory in _paper_cache_dirs(paper_id, cache_dir):
-        chunks_path = directory / "chunks.json"
+        chunks_path = directory / "chunk.json"
         if chunks_path.exists():
             return chunks_path
     return None

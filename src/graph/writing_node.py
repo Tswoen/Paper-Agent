@@ -11,6 +11,7 @@ from src.agents.writingAgent import (
     build_writing_agent,
     load_writing_agent_llm,
 )
+from src.agents.writingOutlineAgent import OVERALL_ANALYSIS_FIELDS
 from src.graph.runtime import WorkflowRuntimeContext
 from src.graph.state_models import JsonObject, State
 from src.llm import ProviderSnapshot, SystemConfig
@@ -41,15 +42,22 @@ def run_writing_node():
         outline = dict(state.get("writing_outline") or {})
         if not outline:
             raise ValueError("写作节点缺少写作大纲，无法知道要写哪些小节")
+        overall_analysis = dict(dict(state.get("analysis_report") or {}).get("overall_analysis") or {})
 
         reporter = _resolve_reporter(state)
         llm = _resolve_llm(state)
         agent = build_writing_agent(llm)
+        search_results = list(state.get("search_results") or [])
         read_results = list(state.get("read_results") or [])
         # State 可能只带有本轮阅读结果，因此额外读取同一会话历史轮次的论文笔记。
         # 这样从已有会话恢复写作时，也能找到没有进入本轮 State 的论文摘要。
         session_read_results = await asyncio.to_thread(_load_session_read_results, state)
         cache_dir = SystemConfig.load().read.paper_cache_dir
+        available_paper_ids = _collect_available_paper_ids(
+            search_results=search_results,
+            read_results=read_results,
+            session_read_results=session_read_results,
+        )
         section_tasks = _flatten_outline(outline)
         written_sections: list[JsonObject] = []
 
@@ -96,15 +104,20 @@ def run_writing_node():
                 requested_refs=list(section_task.get("ref_sections") or []),
                 written_sections=written_sections,
             )
+            section_evidence = _resolve_section_evidence(
+                evidence_fields=list(section_task.get("evidence_map") or []),
+                overall_analysis=overall_analysis,
+            )
             section_result = await agent.async_write_section(
                 section_id=str(section_task["section_id"]),
                 task=str(section_task.get("task") or ""),
-                evidence_map=list(section_task.get("evidence_map") or []),
+                evidence_map=section_evidence,
                 previous_sections=previous_sections,
                 word_count=int(section_task.get("word_count") or 800),
                 read_results=read_results,
                 cache_dir=cache_dir,
                 session_read_results=session_read_results,
+                available_paper_ids=available_paper_ids,
                 progress_callback=report_section_phase,
             )
             section_result.update(
@@ -147,14 +160,30 @@ def run_writing_node():
 
         # 中文说明：引用顺序以正文里 paperId 第一次出现的位置为准，
         # 这样最后的参考文献编号和正文阅读顺序一致。
-        cited_paper_ids = _extract_paper_ids_from_sections(written_sections)
+        candidate_paper_ids = _extract_paper_ids_from_sections(written_sections)
         paper_metadata = _collect_paper_metadata(
-            cited_paper_ids,
-            search_results=list(state.get("search_results") or []),
+            candidate_paper_ids,
+            search_results=search_results,
             read_results=read_results,
             session_read_results=session_read_results,
             cache_dir=Path(str(cache_dir)),
         )
+        valid_paper_id_keys = {
+            paper_id
+            for paper_id, metadata in paper_metadata.items()
+            if _has_reference_metadata(metadata)
+        }
+        unknown_paper_ids = [
+            paper_id
+            for paper_id in candidate_paper_ids
+            if paper_id.lower() not in valid_paper_id_keys
+        ]
+        # 中文说明：模型偶尔会把 P1 这类临时编号当成真实论文编号。
+        # 这些编号在检索和阅读结果里找不到题名、作者等资料，不能出现在报告中，
+        # 否则会被误排成一条看似正规的参考文献。
+        written_sections = _remove_unknown_paper_citations(written_sections, unknown_paper_ids)
+        abstract = _remove_unknown_citation_markers(abstract, unknown_paper_ids)
+        cited_paper_ids = _extract_paper_ids_from_sections(written_sections)
         references = _build_references(cited_paper_ids, paper_metadata)
         if reporter is not None:
             # 中文说明：摘要生成结束后发送完成状态，避免摘要卡一直停留在“处理中”。
@@ -202,6 +231,7 @@ def run_writing_node():
             "section_count": len(written_sections),
             "abstract_status": abstract_status,
             "reference_count": len(references),
+            "ignored_unknown_paper_ids": unknown_paper_ids,
             "used_llm": isinstance(llm, ProviderSnapshot),
             "message": "正文、摘要和参考文献已完成",
         }
@@ -324,6 +354,25 @@ def _resolve_previous_sections(*, requested_refs: list[Any], written_sections: l
             )
             seen.add(section_id)
     return resolved
+
+
+def _resolve_section_evidence(*, evidence_fields: list[Any], overall_analysis: JsonObject) -> list[JsonObject]:
+    """按 evidence-map 指定的字段，从全局分析中取出当前小节可用的证据。"""
+
+    evidence: list[JsonObject] = []
+    used_fields: set[str] = set()
+    for item in evidence_fields:
+        field = str(item or "").strip()
+        # 中文说明：大纲由模型生成，先核对字段名，避免把标题或其他说明误当成证据。
+        if field not in OVERALL_ANALYSIS_FIELDS or field in used_fields:
+            continue
+        content = str(overall_analysis.get(field) or "").strip()
+        # 中文说明：空字段不能支撑正文，因此不传给写作 Agent；它会按原有流程补充论文证据。
+        if not content:
+            continue
+        evidence.append({"全局分析字段": field, "内容": content})
+        used_fields.add(field)
+    return evidence
 
 
 def _build_writing_report(
@@ -498,6 +547,90 @@ def _collect_paper_metadata(
     return metadata_by_id
 
 
+def _collect_available_paper_ids(
+    *,
+    search_results: list[Any],
+    read_results: list[JsonObject],
+    session_read_results: list[JsonObject],
+) -> list[str]:
+    """从当前可用的结构化论文资料中收集真实论文编号。"""
+
+    # 中文说明：这里只读取检索和阅读节点已经保存的 paperId，
+    # 不从模型写出的正文里猜编号，避免把 P1 之类的虚构内容再次传回模型。
+    paper_ids: list[str] = []
+    for payload in [*search_results, *read_results, *session_read_results]:
+        if isinstance(payload, PaperDocument):
+            paper = payload.to_dict()
+        elif isinstance(payload, dict):
+            paper = dict(payload.get("paper") or payload)
+        else:
+            continue
+        paper_id = str(paper.get("paperId") or paper.get("id") or "").strip()
+        if paper_id:
+            paper_ids.append(paper_id)
+    seen: set[str] = set()
+    unique_paper_ids: list[str] = []
+    for paper_id in paper_ids:
+        key = paper_id.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_paper_ids.append(paper_id)
+    return unique_paper_ids
+
+
+def _has_reference_metadata(paper: JsonObject) -> bool:
+    """判断论文资料是否至少包含可展示的题名。"""
+
+    # 中文说明：只有编号而没有题名时，旧逻辑会把编号本身当成题名，
+    # 生成 P1[J] 这样的错误条目。因此题名是生成参考文献的最低条件。
+    return bool(str(paper.get("title") or "").strip())
+
+
+def _remove_unknown_paper_citations(
+    sections: list[JsonObject],
+    unknown_paper_ids: list[str],
+) -> list[JsonObject]:
+    """删除小节中没有真实论文资料支撑的引用标记。"""
+
+    if not unknown_paper_ids:
+        return [dict(section) for section in sections]
+
+    unknown_keys = {paper_id.lower() for paper_id in unknown_paper_ids}
+    cleaned_sections: list[JsonObject] = []
+    for section in sections:
+        cleaned = dict(section)
+        cleaned["content"] = _remove_unknown_citation_markers(
+            str(cleaned.get("content") or ""),
+            unknown_paper_ids,
+        )
+        # 中文说明：正文和 cited_paper_ids 必须同步清理。
+        # 只清正文会让参考文献仍然收集到错误编号；只清列表又会留下错误标记。
+        cleaned["cited_paper_ids"] = [
+            paper_id
+            for paper_id in list(cleaned.get("cited_paper_ids") or [])
+            if str(paper_id or "").strip().lower() not in unknown_keys
+        ]
+        cleaned_sections.append(cleaned)
+    return cleaned_sections
+
+
+def _remove_unknown_citation_markers(content: str, unknown_paper_ids: list[str]) -> str:
+    """从一段文字中删除形如 [P1] 的未知引用标记。"""
+
+    if not content or not unknown_paper_ids:
+        return content
+
+    unknown_keys = {paper_id.lower() for paper_id in unknown_paper_ids}
+    citation_pattern = re.compile(r"\[([^\[\]\r\n]+)\]")
+
+    def replace(match: re.Match[str]) -> str:
+        paper_id = match.group(1).strip().strip('"').strip("'")
+        return "" if paper_id.lower() in unknown_keys else match.group(0)
+
+    return citation_pattern.sub(replace, content)
+
+
 def _paper_metadata_dirs(cache_dir: Path, paper_id: str) -> list[Path]:
     """定位某个 paperId 可能对应的缓存目录。"""
 
@@ -515,11 +648,15 @@ def _build_references(paper_ids: list[str], metadata_by_id: dict[str, JsonObject
     """按正文首次引用顺序生成 GB/T 7714 参考文献条目。"""
 
     references: list[JsonObject] = []
-    for index, paper_id in enumerate(paper_ids, start=1):
+    for paper_id in paper_ids:
         metadata = dict(metadata_by_id.get(paper_id.lower()) or {})
+        # 中文说明：这里再检查一次，防止以后其他调用方漏掉前面的清理步骤。
+        # 没有题名的资料不生成参考文献，不能用 paperId 代替论文题名。
+        if not _has_reference_metadata(metadata):
+            continue
         references.append(
             {
-                "index": index,
+                "index": len(references) + 1,
                 "paperId": paper_id,
                 "citation": _format_gbt7714_reference(paper_id, metadata),
                 "metadata": metadata,

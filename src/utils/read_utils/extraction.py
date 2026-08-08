@@ -14,6 +14,8 @@ from src.utils.read_utils.chunkers import TextChunk, load_chunks_file
 
 JsonObject = dict[str, Any]
 
+_CHUNK_CITATION_PATTERN = re.compile(r"\[([^\[\]]+)\]")
+
 
 EXTRACTION_SCHEMA: JsonObject = {
     "type": "object",
@@ -62,17 +64,18 @@ async def async_extract_paper_from_chunks(
     llm: ProviderSnapshot,
     runtime_resources: Any = None,
 ) -> JsonObject:
-    """从 chunks.json 提取论文的结构化信息，并写入 extraction.json。
+    """从 chunk.json 提取论文的结构化信息，并写入 extraction.json。
 
-    中文注释：这里不重新解析 PDF，只读取已经缓存好的 chunks.json。模型必须按
+    中文注释：这里不重新解析 PDF，只读取已经缓存好的 chunk.json。模型必须按
     固定 JSON 字段回答；回答不合格时会抛错，让阅读节点记录失败原因。
     """
 
     chunks = await asyncio.to_thread(load_chunks_file, chunks_path)
     if not chunks:
-        raise ValueError("chunks.json 中没有可用于全文提取的正文片段")
+        raise ValueError("chunk.json 中没有可用于全文提取的正文片段")
     output_path = chunks_path.parent / "extraction.json"
-    cached = await asyncio.to_thread(_load_cached_extraction, output_path)
+    valid_chunk_ids = {chunk.chunk_id for chunk in chunks}
+    cached = await asyncio.to_thread(_load_cached_extraction, output_path, valid_chunk_ids)
     if cached is not None:
         return cached
     response = await _call_model(
@@ -86,13 +89,13 @@ async def async_extract_paper_from_chunks(
     payload = _parse_json_response(response)
     if payload is None:
         raise ValueError("全文提取模型没有返回合法 JSON")
-    extraction = _validate_extraction(payload)
+    extraction = _validate_extraction(payload, valid_chunk_ids=valid_chunk_ids)
     record: JsonObject = {
-        "schema_version": 1,
+        "schema_version": 2,
         "paperId": paper.paperId or paper.id,
         "schema": EXTRACTION_SCHEMA,
         "extraction": extraction,
-        "chunks_used": [chunk.chunk_id for chunk in chunks],
+        "chunks_used": _citation_ids_from_extraction(extraction),
     }
     await asyncio.to_thread(
         output_path.write_text,
@@ -117,7 +120,7 @@ async def async_write_failed_extraction(
 
     chunks = await asyncio.to_thread(load_chunks_file, chunks_path)
     record: JsonObject = {
-        "schema_version": 1,
+        "schema_version": 2,
         "paperId": paper.paperId or paper.id,
         "schema": EXTRACTION_SCHEMA,
         "extraction": empty_extraction(),
@@ -172,47 +175,36 @@ async def _call_model(
     """
 
     semaphore = getattr(runtime_resources, "read_model_semaphore", None) if runtime_resources is not None else None
-    if semaphore is None:
-        return await llm.provider.chat(messages, temperature=0)
-    async with semaphore:
-        return await llm.provider.chat(messages, temperature=0)
+    try:
+        if semaphore is None:
+            return await llm.provider.chat(messages, temperature=0)
+        async with semaphore:
+            return await llm.provider.chat(messages, temperature=0)
+    except Exception as exc:
+        # 中文注释：把连接、鉴权等调用问题统一交给阅读节点处理，使它能保存当前
+        # 论文已经生成的 Markdown 和 chunk.json，等模型恢复后再继续。
+        raise RuntimeError(f"全文提取模型调用失败：{exc}") from exc
 
 
 def _extraction_messages(paper: PaperDocument, chunks: list[TextChunk]) -> list[JsonObject]:
     """构造全文提取提示词。
 
-    中文注释：为了避免一次塞入太多内容，这里按顺序截取一个有限长度的上下文。
-    每段前面都带 chunk_id，模型引用来源时只能使用这些编号。
+    中文注释：精读必须阅读同一篇论文的全部正文块，不能只截取开头的一部分。
+    发送给模型的每个块只保留 chunkId 和 content，避免页码、相邻块等无关字段
+    干扰模型，也减少请求内容。
     """
 
-    context_parts: list[str] = []
-    used_length = 0
-    max_chars = 30000
-    for chunk in chunks:
-        text = f"[{chunk.chunk_id}]\n{chunk.content.strip()}"
-        if used_length + len(text) > max_chars:
-            break
-        context_parts.append(text)
-        used_length += len(text)
-    payload = {
-        "论文": {
-            "paperId": paper.paperId or paper.id,
-            "title": paper.title,
-            "year": paper.year,
-            "authors": paper.authors,
-        },
-        "JSON Schema": EXTRACTION_SCHEMA,
-        "chunks": "\n\n".join(context_parts),
-    }
+    del paper
+    payload = {"chunks": [{"chunkId": chunk.chunk_id, "content": chunk.content.strip()} for chunk in chunks]}
     instruction = """你是论文全文阅读助手。只能依据用户提供的 chunks 内容回答，不能猜论文没有写明的信息。
 请严格返回一个 JSON 对象，不要返回 Markdown，不要返回解释文字。
-JSON 字段必须完全符合用户给出的 JSON Schema。
-每个非空字段都必须在句末或判断后标注来源 chunkId，格式如 [paper:p0003]。
+JSON 必须且仅包含 research_topic、research_object、methods、conclusions、contributions、limitations 六个字符串字段。
+每个非空字段都必须在句末或判断后标注来源 chunkId，格式如 [chunkId]，并且只能引用输入中真实存在的 chunkId。
 如果全文没有明确说明某个字段，请把该字段写成空字符串。"""
     return [{"role": "system", "content": instruction}, {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]
 
 
-def _load_cached_extraction(output_path: Path) -> JsonObject | None:
+def _load_cached_extraction(output_path: Path, valid_chunk_ids: set[str]) -> JsonObject | None:
     """读取已经存在的 extraction.json。"""
 
     try:
@@ -221,11 +213,15 @@ def _load_cached_extraction(output_path: Path) -> JsonObject | None:
         return None
     if not isinstance(payload, dict):
         return None
+    if payload.get("schema_version") != 2:
+        return None
+    if payload.get("status") == "failed":
+        return None
     extraction = payload.get("extraction")
     if not isinstance(extraction, dict):
         return None
     try:
-        _validate_extraction(extraction)
+        _validate_extraction(extraction, valid_chunk_ids=valid_chunk_ids)
     except ValueError:
         return None
     return payload
@@ -244,11 +240,12 @@ def _parse_json_response(response: LLMResponse) -> JsonObject | None:
     return payload if isinstance(payload, dict) else None
 
 
-def _validate_extraction(payload: JsonObject) -> JsonObject:
+def _validate_extraction(payload: JsonObject, *, valid_chunk_ids: set[str]) -> JsonObject:
     """检查全文提取结果是否符合固定字段和字符串类型。
 
     中文注释：项目暂时不额外引入 jsonschema 依赖，所以这里用手写校验完成当前
-    Schema 的严格检查：字段不能多、不能少，每个值都必须是字符串。
+    Schema 的严格检查：字段不能多、不能少，每个值都必须是字符串。非空内容还必须
+    引用输入里真实存在的 chunkId，防止模型给出无法核对的结论。
     """
 
     required = list(EXTRACTION_SCHEMA["required"])
@@ -265,5 +262,32 @@ def _validate_extraction(payload: JsonObject) -> JsonObject:
         value = payload.get(key)
         if not isinstance(value, str):
             raise ValueError(f"全文提取字段 {key} 必须是字符串")
-        result[key] = value.strip()
+        text = value.strip()
+        if text:
+            cited_chunk_ids = _chunk_citation_ids(text)
+            if not cited_chunk_ids:
+                raise ValueError(f"全文提取字段 {key} 缺少 chunkId 引用")
+            unknown_chunk_ids = sorted(set(cited_chunk_ids) - valid_chunk_ids)
+            if unknown_chunk_ids:
+                raise ValueError(f"全文提取字段 {key} 引用了不存在的 chunkId：{', '.join(unknown_chunk_ids)}")
+        result[key] = text
     return result
+
+
+def _chunk_citation_ids(text: str) -> list[str]:
+    """从摘要文本中按出现顺序读取 [chunkId] 引用。"""
+
+    return [value.strip() for value in _CHUNK_CITATION_PATTERN.findall(text) if value.strip()]
+
+
+def _citation_ids_from_extraction(extraction: JsonObject) -> list[str]:
+    """整理结构化摘要实际用到的 chunkId，供后续写作按编号查找原文。"""
+
+    cited_chunk_ids: list[str] = []
+    for value in extraction.values():
+        if not isinstance(value, str):
+            continue
+        for chunk_id in _chunk_citation_ids(value):
+            if chunk_id not in cited_chunk_ids:
+                cited_chunk_ids.append(chunk_id)
+    return cited_chunk_ids

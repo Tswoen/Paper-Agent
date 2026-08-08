@@ -4,7 +4,12 @@ import asyncio
 import json
 from typing import Any, cast
 
-from src.agents.writingOutlineAgent import WritingOutlineAgent, build_writing_outline_agent, load_writing_outline_agent_llm
+from src.agents.writingOutlineAgent import (
+    OVERALL_ANALYSIS_FIELDS,
+    WritingOutlineAgent,
+    build_writing_outline_agent,
+    load_writing_outline_agent_llm,
+)
 from src.graph.runtime import WorkflowRuntimeContext
 from src.graph.state_models import JsonObject, State
 from src.llm import ProviderSnapshot
@@ -151,8 +156,8 @@ def _fallback_outline(*, topic: str, analysis_report: JsonObject) -> JsonObject:
     后续用户可以拿到一个字段完整的对象，前端和下一步节点也不会因为空值出错。
     """
 
-    subtopic_analyses = [item for item in list(analysis_report.get("subtopic_analyses") or []) if isinstance(item, dict)]
     topic_text = topic or str(analysis_report.get("topic") or "当前主题")
+    overall_analysis = dict(analysis_report.get("overall_analysis") or {})
 
     # 中文说明：兜底结构从正文第一章开始，不再放摘要、引言和参考文献。
     # 每个章节和小节都写出独立标题，前端展示和后续正文写作都可以直接使用。
@@ -160,7 +165,19 @@ def _fallback_outline(*, topic: str, analysis_report: JsonObject) -> JsonObject:
         "Chapter1": {
             "title": "相关研究现状",
             "description": f"围绕《{topic_text}》梳理已有研究的主要方向、代表性发现及其适用范围。",
-            "Sections": _research_status_sections(subtopic_analyses),
+            "Sections": {
+                "section1": {
+                    "title": "总体研究现状",
+                    "task": "梳理该领域的研究范围、核心问题、主要方向和总体发展状态。",
+                    "evidence-map": _available_evidence_fields(
+                        overall_analysis,
+                        "领域整体研究概况",
+                        "各子主题横向差异对比分析",
+                    ),
+                    "ref-sections": [],
+                    "word-count": 1000,
+                }
+            },
         },
         "Chapter2": {
             "title": "研究方法与技术演进",
@@ -169,14 +186,14 @@ def _fallback_outline(*, topic: str, analysis_report: JsonObject) -> JsonObject:
                 "section1": {
                     "title": "方法与技术路线",
                     "task": "归纳各研究使用的方法和技术路线，说明它们分别解决了哪些问题。",
-                    "evidence-map": _evidence_from_field(subtopic_analyses, "技术方法栈演变"),
+                    "evidence-map": _available_evidence_fields(overall_analysis, "领域技术与研究方法迭代脉络"),
                     "ref-sections": ["Chapter1"],
                     "word-count": 900,
                 },
                 "section2": {
                     "title": "研究时序演化",
                     "task": "按照研究发展顺序梳理关键变化，说明研究重点如何从早期问题逐步转向当前问题。",
-                    "evidence-map": _evidence_from_field(subtopic_analyses, "时间线演化"),
+                    "evidence-map": _available_evidence_fields(overall_analysis, "领域研究时序演化脉络"),
                     "ref-sections": ["Chapter1"],
                     "word-count": 800,
                 },
@@ -189,14 +206,22 @@ def _fallback_outline(*, topic: str, analysis_report: JsonObject) -> JsonObject:
                 "section1": {
                     "title": "研究共识与核心争议",
                     "task": "归纳不同研究之间的一致点和分歧点，说明争议来自方法、数据还是研究对象差异。",
-                    "evidence-map": _evidence_from_field(subtopic_analyses, "矛盾点"),
+                    "evidence-map": _available_evidence_fields(
+                        overall_analysis,
+                        "领域全域共性研究共识",
+                        "领域核心研究争议与矛盾体系",
+                    ),
                     "ref-sections": ["Chapter2"],
                     "word-count": 900,
                 },
                 "section2": {
                     "title": "研究空白与后续方向",
                     "task": "总结仍然缺少研究的问题，并提出与这些空白对应的后续研究方向。",
-                    "evidence-map": _evidence_from_field(subtopic_analyses, "研究空白"),
+                    "evidence-map": _available_evidence_fields(
+                        overall_analysis,
+                        "领域系统性研究空白与局限",
+                        "领域整体总结与研究展望",
+                    ),
                     "ref-sections": ["Chapter3.section1"],
                     "word-count": 800,
                 },
@@ -206,57 +231,14 @@ def _fallback_outline(*, topic: str, analysis_report: JsonObject) -> JsonObject:
     return outline
 
 
-def _research_status_sections(subtopic_analyses: list[JsonObject]) -> JsonObject:
-    """把每个子主题变成正文第一章的一个小节。"""
+def _available_evidence_fields(overall_analysis: JsonObject, *fields: str) -> list[str]:
+    """只保留当前全局分析中确实有内容的字段名。"""
 
-    if not subtopic_analyses:
-        return {
-            "section1": {
-                "title": "总体研究现状",
-                "task": "根据总体分析梳理已有研究现状，并保留后续补充论文证据的位置。",
-                "evidence-map": [],
-                "ref-sections": [],
-                "word-count": 1000,
-            }
-        }
-
-    sections: JsonObject = {}
-    for index, item in enumerate(subtopic_analyses, start=1):
-        subtopic = str(item.get("subtopic") or f"子主题{index}").strip()
-        sections[f"section{index}"] = {
-            "title": subtopic,
-            "task": f"围绕“{subtopic}”梳理已有研究现状，先写主要结论，再写支撑这些结论的论文证据。",
-            "evidence-map": _section_evidence(item),
-            "ref-sections": [],
-            "word-count": 800,
-        }
-    return sections
-
-
-def _section_evidence(item: JsonObject) -> list[Any]:
-    """整理单个子主题能用的证据。"""
-
-    evidence: list[Any] = []
-    summary = str(item.get("研究现状") or "").strip()
-    if summary:
-        evidence.append(summary)
-    paper_ids = item.get("paperIds")
-    if isinstance(paper_ids, list) and paper_ids:
-        evidence.append({"paperIds": paper_ids})
-    return evidence
-
-
-def _evidence_from_field(subtopic_analyses: list[JsonObject], field: str) -> list[Any]:
-    """从子主题分析中提取某一类证据，比如矛盾点或研究空白。"""
-
-    evidence: list[Any] = []
-    for item in subtopic_analyses:
-        value = item.get(field)
-        if isinstance(value, list):
-            evidence.extend(value)
-        elif value:
-            evidence.append(value)
-    return evidence
+    return [
+        field
+        for field in fields
+        if field in OVERALL_ANALYSIS_FIELDS and str(overall_analysis.get(field) or "").strip()
+    ]
 
 
 def _resolve_llm(state: State) -> ProviderSnapshot | None:
