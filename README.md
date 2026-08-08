@@ -17,6 +17,12 @@
 </div>
 
 ---
+## 会话工作台展示
+<img width="1881" height="941" alt="image" src="https://github.com/user-attachments/assets/a88a2823-9724-4a7a-aee4-fafbfef068a6" />
+<img width="1877" height="939" alt="image" src="https://github.com/user-attachments/assets/570b5bbf-83b0-468d-a7a6-dba22cc4a2ad" />
+## 系统配置展示
+<img width="1506" height="750" alt="image" src="https://github.com/user-attachments/assets/e312fc8b-d84e-46f5-86df-5202d2197dfe" />
+<img width="1509" height="659" alt="image" src="https://github.com/user-attachments/assets/137b8845-1ddb-4ad5-a310-a2100e88da61" />
 
 ## 项目简介
 
