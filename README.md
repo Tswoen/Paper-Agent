@@ -10,8 +10,6 @@
 [![LangGraph](https://img.shields.io/badge/Workflow-LangGraph-1C3C3C?logo=langchain&logoColor=white)](https://langchain-ai.github.io/langgraph/)
 [![uv](https://img.shields.io/badge/Package%20Manager-uv-DE5FE9?logo=astral&logoColor=white)](https://docs.astral.sh/uv/)
 
-[快速开始](#快速开始) · [工作流](#工作流) · [模型配置](#模型配置) · [参与贡献](#参与贡献)
-
 </div>
 
 ---
@@ -20,7 +18,6 @@
 
 Paper-Agent 2.0 是相对旧版 1.x 的一次**全新重写**。它保留了旧版「检索 → 阅读 → 分析 → 写作」的多智能体核心思路，但在工程实现上做了全面升级：
 
-- **工作流引擎**改为 LangGraph 编排，状态、节点和恢复逻辑更清晰；
 - **前端**改为 Vue 3 + TypeScript + Vite，交互更现代、响应更快；
 - **包管理**统一使用 `uv`，一条命令即可完成 Python 依赖安装；
 - **论文来源**从单一 arXiv 扩展到 arXiv、OpenAlex、Semantic Scholar 三源检索；
