@@ -83,8 +83,6 @@ def make_provider(
             # provider 配置里显式写了超时时间时优先生效；调用方传入的 timeout_s 作为兜底。
             "timeout_s": provider_config.timeout_s or timeout_s,
             "max_retries": provider_config.max_retries,
-            "retry_initial_delay_s": provider_config.retry_initial_delay_s,
-            "retry_max_delay_s": provider_config.retry_max_delay_s,
             "max_concurrency": provider_config.max_concurrency,
             "include_stream_usage": provider_config.include_stream_usage,
         }
@@ -107,8 +105,6 @@ def make_provider(
         # provider 配置里显式写了超时时间时优先生效；调用方传入的 timeout_s 作为兜底。
         "timeout_s": provider_config.timeout_s or timeout_s,
         "max_retries": provider_config.max_retries,
-        "retry_initial_delay_s": provider_config.retry_initial_delay_s,
-        "retry_max_delay_s": provider_config.retry_max_delay_s,
         "max_concurrency": provider_config.max_concurrency,
         "include_stream_usage": provider_config.include_stream_usage,
     }
