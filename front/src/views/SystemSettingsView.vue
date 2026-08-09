@@ -676,7 +676,7 @@ function handleError(error: unknown, title: string) {
           <RefreshCw :size="16" :class="{ spinning: refreshing }" />
           重新加载
         </button>
-        <a class="button ghost-link" href="/docs" target="_blank" rel="noreferrer">
+        <a class="button ghost-link" href="http://127.0.0.1:8000/docs" target="_blank" rel="noreferrer">
           API 文档
           <ArrowUpRight :size="16" />
         </a>
