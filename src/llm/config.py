@@ -27,8 +27,6 @@ class ProviderConfig:
     # 统一放在 provider 配置里，业务节点就不用到处写超时、重试和并发限制。
     timeout_s: float | None = None
     max_retries: int | None = None
-    retry_initial_delay_s: float | None = None
-    retry_max_delay_s: float | None = None
     max_concurrency: int | None = None
     include_stream_usage: bool | None = None
 
@@ -221,8 +219,6 @@ class ModelConfig:
             extra_body=provider_config.extra_body,
             timeout_s=provider_config.timeout_s,
             max_retries=provider_config.max_retries,
-            retry_initial_delay_s=provider_config.retry_initial_delay_s,
-            retry_max_delay_s=provider_config.retry_max_delay_s,
             max_concurrency=provider_config.max_concurrency,
             include_stream_usage=provider_config.include_stream_usage,
         )
@@ -258,8 +254,6 @@ class ModelConfig:
             extra_body=provider_config.extra_body,
             timeout_s=provider_config.timeout_s,
             max_retries=provider_config.max_retries,
-            retry_initial_delay_s=provider_config.retry_initial_delay_s,
-            retry_max_delay_s=provider_config.retry_max_delay_s,
             max_concurrency=provider_config.max_concurrency,
             include_stream_usage=provider_config.include_stream_usage,
         )
@@ -284,8 +278,6 @@ def _provider_from_dict(name: str, value: Mapping[str, Any]) -> ProviderConfig:
         # 兼容前端常用的 camelCase，也兼容配置文件里的 snake_case。
         timeout_s=_optional_float(value.get("timeout_s", value.get("timeoutS"))),
         max_retries=_optional_int(value.get("max_retries", value.get("maxRetries"))),
-        retry_initial_delay_s=_optional_float(value.get("retry_initial_delay_s", value.get("retryInitialDelayS"))),
-        retry_max_delay_s=_optional_float(value.get("retry_max_delay_s", value.get("retryMaxDelayS"))),
         max_concurrency=_optional_int(value.get("max_concurrency", value.get("maxConcurrency"))),
         include_stream_usage=_optional_bool(value.get("include_stream_usage", value.get("includeStreamUsage"))),
     )

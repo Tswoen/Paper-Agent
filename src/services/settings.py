@@ -111,8 +111,6 @@ def update_provider_settings(repo: SettingsRepository, name: str, patch: JsonObj
     # 支持两种命名，是为了让配置文件和前端表单都能自然传值。
     _apply_optional_provider_field(provider, patch, "timeout_s", "timeoutS")
     _apply_optional_provider_field(provider, patch, "max_retries", "maxRetries")
-    _apply_optional_provider_field(provider, patch, "retry_initial_delay_s", "retryInitialDelayS")
-    _apply_optional_provider_field(provider, patch, "retry_max_delay_s", "retryMaxDelayS")
     _apply_optional_provider_field(provider, patch, "max_concurrency", "maxConcurrency")
     _apply_optional_provider_field(provider, patch, "include_stream_usage", "includeStreamUsage")
     repo.save(data)
@@ -587,8 +585,6 @@ def _provider_items(config: ModelConfig) -> list[JsonObject]:
             "extra_body": provider_config.extra_body,
             "timeout_s": provider_config.timeout_s,
             "max_retries": provider_config.max_retries,
-            "retry_initial_delay_s": provider_config.retry_initial_delay_s,
-            "retry_max_delay_s": provider_config.retry_max_delay_s,
             "max_concurrency": provider_config.max_concurrency,
             "include_stream_usage": provider_config.include_stream_usage,
         }
