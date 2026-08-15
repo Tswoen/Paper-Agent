@@ -40,6 +40,12 @@ export function saveProvider(
   });
 }
 
+export function deleteProvider(name: string): Promise<SettingsPayload> {
+  return request<SettingsPayload>(`/api/settings/providers/${encodeURIComponent(name)}`, {
+    method: "DELETE",
+  });
+}
+
 export function saveAgent(
   name: string,
   payload: JsonObject,

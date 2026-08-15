@@ -216,6 +216,17 @@ a {
   color: white;
 }
 
+/* 中文注释：删除类操作统一用红色描边和文字，避免误点后无法挽回。 */
+.button.danger {
+  border-color: rgba(190, 62, 62, 0.32);
+  color: #c93a3a;
+  background: rgba(255, 255, 255, 0.78);
+}
+
+.button.danger:hover {
+  background: rgba(201, 58, 58, 0.08);
+}
+
 .button.secondary,
 .button.tertiary,
 .button.ghost-link,
