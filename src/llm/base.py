@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import random
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Mapping as MappingABC
@@ -241,8 +242,6 @@ class LLMProvider(ABC):
         client: Any | None = None,
         timeout_s: float = 60,
         max_retries: int | None = None,
-        retry_initial_delay_s: float | None = None,
-        retry_max_delay_s: float | None = None,
         max_concurrency: int | None = None,
         include_stream_usage: bool | None = None,
     ):
@@ -258,8 +257,6 @@ class LLMProvider(ABC):
             client: 可选外部注入 SDK client，常用于测试或自定义 transport。
             timeout_s: 请求超时时间，单位秒。
             max_retries: 最大重试次数；None 时使用默认 3 次。
-            retry_initial_delay_s: 第一次重试前等待多久；None 时使用 1 秒。
-            retry_max_delay_s: 重试等待的最大秒数，避免一直睡太久。
             max_concurrency: 当前 provider 实例允许同时进行多少个真实请求。
             include_stream_usage: 流式请求是否尝试要求供应商返回 token 用量。
 
@@ -276,8 +273,6 @@ class LLMProvider(ABC):
         self.timeout_s = float(max(1, timeout_s))
         # 运行控制统一放在基类，业务节点只负责调用 provider，不需要自己写重试和限流。
         self.max_retries = max(1, int(max_retries or 3))
-        self.retry_initial_delay_s = max(0.0, float(retry_initial_delay_s if retry_initial_delay_s is not None else 1.0))
-        self.retry_max_delay_s = max(self.retry_initial_delay_s, float(retry_max_delay_s if retry_max_delay_s is not None else 10.0))
         self.max_concurrency = max(1, int(max_concurrency or 2))
         self.include_stream_usage = True if include_stream_usage is None else bool(include_stream_usage)
         # 中文注释：provider 内部只保留一个“兜底并发保护”。真正的工作流并发上限，
@@ -446,7 +441,7 @@ class LLMProvider(ABC):
                 if last.ok or not self._should_retry(last) or attempt == self.max_retries - 1:
                     self._log_call_result(operation, last, attempts, started_at)
                     return last
-                await asyncio.sleep(self._retry_delay(last, attempt))
+                await asyncio.sleep(self._retry_delay(attempts))
         self._log_call_result(operation, last, attempts, started_at)
         return last
 
@@ -470,17 +465,18 @@ class LLMProvider(ABC):
                 if last.ok or not self._should_retry(last) or attempt == self.max_retries - 1:
                     self._log_call_result(operation, last, attempts, started_at)
                     return last
-                await asyncio.sleep(self._retry_delay(last, attempt))
+                await asyncio.sleep(self._retry_delay(attempts))
         self._log_call_result(operation, last, attempts, started_at)
         return last
 
-    def _retry_delay(self, response: LLMResponse | EmbeddingResponse, attempt: int) -> float:
-        """计算下一次重试前等待多久，优先尊重服务端 Retry-After。"""
+    def _retry_delay(self, attempt: int) -> float:
+        """按固定公式计算第几次重试前的等待时间，返回值单位为秒。"""
 
-        if response.error_retry_after_s is not None:
-            return min(max(0.0, response.error_retry_after_s), self.retry_max_delay_s)
-        delay = self.retry_initial_delay_s * (2 ** attempt)
-        return min(delay, self.retry_max_delay_s)
+        # 第 1 次重试从 500 毫秒开始，每次翻倍；超过 32000 毫秒后保持上限不再增长。
+        base_delay_ms = min(500 * (2 ** (attempt - 1)), 32000)
+        # 在基础等待时间上额外加入 0% 到 25% 的随机时间，避免多个请求同时再次发起。
+        jitter_ms = random.uniform(0, base_delay_ms * 0.25)
+        return (base_delay_ms + jitter_ms) / 1000
 
     def _log_call_result(self, operation: str, response: LLMResponse | EmbeddingResponse, attempts: int, started_at: float) -> None:
         """记录一次 provider 调用摘要，避免把完整模型内容写进日志。"""
