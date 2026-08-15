@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Request
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import FileResponse, StreamingResponse
 
 from src.repositories.sessions.base import SessionRepository
 from src.services.session_runs import SessionRunService, encode_sse
@@ -53,6 +54,25 @@ def create_sessions_router(
         """读取指定会话的完整线程快照。"""
 
         return fetch_thread(repo, session_key)
+
+    @router.get("/{session_key}/artifacts/{artifact_id}")
+    async def get_artifact(session_key: str, artifact_id: str) -> FileResponse:
+        """提供指定会话产物文件的预览或下载。
+
+        中文说明：
+        产物文件路径由仓储层做安全校验，只有位于该会话目录内的文件才会被返回；
+        记录不存在、路径越界或文件已被删除时统一返回 404。
+        """
+
+        file_path = repo.read_artifact_path(session_key, artifact_id)
+        if file_path is None:
+            raise HTTPException(status_code=404, detail="artifact not found or unavailable")
+        return FileResponse(
+            file_path,
+            filename=file_path.name,
+            content_disposition_type="inline",
+            media_type=_artifact_media_type(file_path),
+        )
 
     @router.delete("/{session_key}")
     async def remove_session(session_key: str) -> JsonObject:
@@ -121,3 +141,18 @@ async def _json_body(request: Request) -> JsonObject:
     if not isinstance(payload, dict):
         raise ValueError("request body must be a JSON object")
     return payload
+
+
+def _artifact_media_type(file_path: Path) -> str:
+    """根据文件后缀返回适合浏览器预览的媒体类型。
+
+    中文说明：
+    Markdown 和 JSON 可以在新标签页里直接查看，其他类型走通用的二进制下载。
+    """
+
+    suffix = file_path.suffix.lower()
+    if suffix == ".md":
+        return "text/markdown; charset=utf-8"
+    if suffix == ".json":
+        return "application/json; charset=utf-8"
+    return "application/octet-stream"

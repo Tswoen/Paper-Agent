@@ -149,7 +149,7 @@ def create_app(
         extra={
             "title": app.title,
             "has_frontend_dist": (Path("front/dist") / "index.html").exists(),
-            "settings_file": str(_default_settings_path()) if _default_settings_path() else None,
+            "settings_file": str(_default_settings_path()),
         },
     )
     return app
@@ -187,8 +187,13 @@ def _mount_frontend(app: FastAPI) -> None:
         return FileResponse(index_file)
 
 
-def _default_settings_path() -> Path | None:
-    """优先使用真实配置文件；缺失时允许仓库以内存配置启动。"""
+def _default_settings_path() -> Path:
+    """返回本地模型配置文件路径。
 
-    path = Path("config/model.json")
-    return path if path.exists() else None
+    中文说明：
+    即使文件还不存在也返回固定路径，这样设置页保存时会自动创建
+    config/model.json 并落盘；如果这里返回 None，保存只会写进内存，
+    重启后配置就丢了。
+    """
+
+    return Path("config/model.json")

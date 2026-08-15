@@ -176,6 +176,24 @@ function formatArtifactSize(size: number) {
   return `${(size / 1024 / 1024).toFixed(1)} MB`;
 }
 
+/** 拼接产物文件的下载/预览地址，会话还没确定时返回 "#"，避免生成无效链接。 */
+function artifactUrlFor(artifactId: string) {
+  if (!selectedSessionKey.value || !artifactId) return "#";
+  return `/api/sessions/${encodeURIComponent(selectedSessionKey.value)}/artifacts/${encodeURIComponent(artifactId)}`;
+}
+
+/** 取当前会话最后一条非空的助手回复，它就是工作流生成的完整 Markdown 论文。 */
+const finalResultMarkdown = computed(() => {
+  const messages = timelineSnapshot.value?.messages ?? [];
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i];
+    if (message.role === "assistant" && message.content.trim()) {
+      return message.content;
+    }
+  }
+  return "";
+});
+
 watch(
   () => props.selectedKey,
   async (sessionKey) => {
@@ -547,6 +565,11 @@ function handleError(error: unknown, title: string) {
             @resume="resumeLatestCheckpoint"
           />
 
+          <section v-if="finalResultMarkdown" class="session-final-result">
+            <div class="session-final-result-head"><h3>最终结果</h3></div>
+            <pre class="session-final-result-body">{{ finalResultMarkdown }}</pre>
+          </section>
+
           <div v-else-if="threadLoading" class="session-empty session-workbench-loading">
             <LoaderCircle class="spinning" :size="18" />
             <span>正在准备会话工作台…</span>
@@ -600,10 +623,17 @@ function handleError(error: unknown, title: string) {
         <section class="insight-card insight-output-card">
           <div class="insight-card-heading"><h2>输出结果</h2><PackageOpen :size="16" /></div>
           <template v-if="finalArtifacts.length">
-            <div v-for="artifact in finalArtifacts" :key="artifact.id" class="insight-artifact">
+            <a
+              v-for="artifact in finalArtifacts"
+              :key="artifact.id"
+              :href="artifactUrlFor(artifact.id)"
+              target="_blank"
+              rel="noreferrer"
+              class="insight-artifact"
+            >
               <span class="insight-artifact-icon"><FileDown :size="16" /></span>
-              <span><strong>{{ artifact.name }}</strong><small>{{ formatArtifactSize(artifact.size) }}</small></span>
-            </div>
+              <span><strong>{{ artifact.name }}</strong><small>{{ formatArtifactSize(artifact.size) }} · 点击打开</small></span>
+            </a>
           </template>
           <div v-else class="insight-no-output"><PackageOpen :size="18" /><span>任务完成后会显示最终论文</span></div>
         </section>

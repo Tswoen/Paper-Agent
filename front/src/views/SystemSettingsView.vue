@@ -9,10 +9,12 @@ import {
   Save,
   SearchCheck,
   ShieldCheck,
+  Trash2,
 } from "lucide-vue-next";
 import { computed, onMounted, reactive, ref, watch } from "vue";
 
 import {
+  deleteProvider,
   getProviderModels,
   getSettings,
   saveAgent,
@@ -61,11 +63,14 @@ type EmbeddingDraft = {
 const loading = ref(true);
 const refreshing = ref(false);
 const savingProvider = ref(false);
+const deletingProvider = ref(false);
 const savingAgent = ref(false);
 const savingEmbedding = ref(false);
 const showApiKey = ref(false);
 // 控制右侧是否处于新增状态，新增时显示空白表单，已有 Provider 则显示配置详情。
 const isCreatingProvider = ref(false);
+const isCreatingAgent = ref(false);
+const isCreatingEmbedding = ref(false);
 const selectedProviderName = ref("");
 const editingAgentName = ref("");
 const editingEmbeddingName = ref("");
@@ -379,9 +384,40 @@ async function createProvider() {
   }
 }
 
+async function deleteCurrentProvider() {
+  const name = selectedProviderName.value;
+  if (!name) {
+    return;
+  }
+  const confirmed = window.confirm(
+    `确定删除 Provider「${name}」吗？\n引用它的智能体和嵌入模型也会一起被删除。`,
+  );
+  if (!confirmed) {
+    return;
+  }
+  deletingProvider.value = true;
+  try {
+    settings.value = await deleteProvider(name);
+    invalidateProviderDerivedState(name);
+    // 删完后退出编辑态，让列表选中第一个剩下的 Provider。
+    isCreatingProvider.value = false;
+    selectedProviderName.value = providers.value[0]?.name ?? "";
+    primeEditors();
+    pushToast({
+      tone: "success",
+      title: "Provider 已删除",
+      description: `${name} 及其相关配置已从当前配置中移除。`,
+    });
+  } catch (error) {
+    handleError(error, "删除 Provider 失败");
+  } finally {
+    deletingProvider.value = false;
+  }
+}
+
 async function submitAgent() {
   if (!agentDraft.name) {
-    return;
+    return false;
   }
   savingAgent.value = true;
   try {
@@ -399,8 +435,10 @@ async function submitAgent() {
       title: "智能体配置已保存",
       description: `${agentDraft.name} 已写回后端配置文件。`,
     });
+    return true;
   } catch (error) {
     handleError(error, "保存智能体失败");
+    return false;
   } finally {
     savingAgent.value = false;
   }
@@ -408,7 +446,7 @@ async function submitAgent() {
 
 async function submitEmbedding() {
   if (!embeddingDraft.name) {
-    return;
+    return false;
   }
   savingEmbedding.value = true;
   try {
@@ -426,11 +464,95 @@ async function submitEmbedding() {
       title: "嵌入模型已保存",
       description: `${embeddingDraft.name} 的向量配置已更新。`,
     });
+    return true;
   } catch (error) {
     handleError(error, "保存嵌入模型失败");
+    return false;
   } finally {
     savingEmbedding.value = false;
   }
+}
+
+// 中文注释：下面四个函数负责“新增智能体 / 新增嵌入模型”的进入与取消，
+// 和 Provider 的新增流程保持同一套交互：先显示空白表单，保存成功后退出新增态。
+function startCreatingAgent() {
+  isCreatingAgent.value = true;
+  editingAgentName.value = "";
+  agentDraft.name = "";
+  agentDraft.label = "";
+  agentDraft.provider = providers.value[0]?.name ?? "";
+  agentDraft.model_name = "";
+  agentDraft.temperature = toInputString(settings.value?.defaults.llm.temperature ?? null);
+  agentDraft.reasoning_effort = "none";
+}
+
+function cancelCreatingAgent() {
+  isCreatingAgent.value = false;
+  editingAgentName.value = agents.value[0]?.name ?? "";
+}
+
+function startCreatingEmbedding() {
+  isCreatingEmbedding.value = true;
+  editingEmbeddingName.value = "";
+  embeddingDraft.name = "";
+  embeddingDraft.label = "";
+  embeddingDraft.provider = providers.value[0]?.name ?? "";
+  embeddingDraft.model_name = "";
+  embeddingDraft.dimensions = toInputString(settings.value?.defaults.embedding.dimensions ?? null);
+  embeddingDraft.batch_size = toInputString(settings.value?.defaults.embedding.batch_size ?? null);
+}
+
+function cancelCreatingEmbedding() {
+  isCreatingEmbedding.value = false;
+  editingEmbeddingName.value = embeddings.value[0]?.name ?? "";
+}
+
+function selectAgentForEdit(name: string) {
+  isCreatingAgent.value = false;
+  editingAgentName.value = name;
+}
+
+function selectEmbeddingForEdit(name: string) {
+  isCreatingEmbedding.value = false;
+  editingEmbeddingName.value = name;
+}
+
+async function createAgent() {
+  const name = agentDraft.name.trim();
+  if (!name) {
+    pushToast({
+      tone: "error",
+      title: "缺少参数",
+      description: "请填写智能体名称（例如 default_agent）。",
+    });
+    return;
+  }
+  const saved = await submitAgent();
+  if (!saved) {
+    return;
+  }
+  isCreatingAgent.value = false;
+  editingAgentName.value = name;
+  primeEditors();
+}
+
+async function createEmbedding() {
+  const name = embeddingDraft.name.trim();
+  if (!name) {
+    pushToast({
+      tone: "error",
+      title: "缺少参数",
+      description: "请填写嵌入模型配置名称（例如 default_embedding）。",
+    });
+    return;
+  }
+  const saved = await submitEmbedding();
+  if (!saved) {
+    return;
+  }
+  isCreatingEmbedding.value = false;
+  editingEmbeddingName.value = name;
+  primeEditors();
 }
 
 async function fetchModels(providerName: string, toneTitle = "模型目录已同步") {
@@ -785,6 +907,15 @@ function handleError(error: unknown, title: string) {
                     <Save :size="16" />
                     保存 Provider
                   </button>
+                  <button
+                    class="button danger"
+                    type="button"
+                    :disabled="deletingProvider"
+                    @click="deleteCurrentProvider"
+                  >
+                    <Trash2 :size="16" />
+                    删除 Provider
+                  </button>
                 </template>
               </div>
             </div>
@@ -911,7 +1042,13 @@ function handleError(error: unknown, title: string) {
             <h2>智能体配置</h2>
             <p>以表格管理大量智能体，并为每个智能体提供独立的连通性测试入口。</p>
           </div>
-          <StatusPill tone="neutral" :label="`${agents.length} agents`" />
+          <div class="heading-meta">
+            <StatusPill tone="neutral" :label="`${agents.length} agents`" />
+            <button class="button secondary" type="button" @click="startCreatingAgent">
+              <Plus :size="15" />
+              新增智能体
+            </button>
+          </div>
         </div>
 
         <div class="table-card">
@@ -948,7 +1085,7 @@ function handleError(error: unknown, title: string) {
                   </button>
                 </td>
                 <td class="align-right">
-                  <button class="button secondary compact" type="button" @click="editingAgentName = agent.name">
+                  <button class="button secondary compact" type="button" @click="selectAgentForEdit(agent.name)">
                     编辑
                   </button>
                 </td>
@@ -957,19 +1094,42 @@ function handleError(error: unknown, title: string) {
           </table>
         </div>
 
-        <div v-if="editingAgent" class="editor-card">
+        <div v-if="isCreatingAgent || editingAgent" class="editor-card">
           <div class="editor-head">
             <div>
-              <h3>编辑智能体</h3>
-              <p>{{ editingAgent.name }} 的运行时模型配置</p>
+              <h3>{{ isCreatingAgent ? "新增智能体" : "编辑智能体" }}</h3>
+              <p v-if="isCreatingAgent">填写后保存，将创建新的智能体配置。</p>
+              <p v-else>{{ editingAgent?.name }} 的运行时模型配置</p>
             </div>
-            <button class="button primary" type="button" :disabled="savingAgent" @click="submitAgent">
-              <Save :size="16" />
-              保存智能体
-            </button>
+            <div class="provider-toolbar">
+              <template v-if="isCreatingAgent">
+                <button class="button secondary" type="button" @click="cancelCreatingAgent">
+                  取消
+                </button>
+                <button class="button primary" type="button" :disabled="savingAgent" @click="createAgent">
+                  <Save :size="16" />
+                  创建智能体
+                </button>
+              </template>
+              <template v-else>
+                <button class="button primary" type="button" :disabled="savingAgent" @click="submitAgent">
+                  <Save :size="16" />
+                  保存智能体
+                </button>
+              </template>
+            </div>
           </div>
 
           <div class="form-grid">
+            <label v-if="isCreatingAgent" class="field-group">
+              <span>智能体名称</span>
+              <input
+                v-model="agentDraft.name"
+                class="field"
+                type="text"
+                placeholder="例如 default_agent"
+              />
+            </label>
             <label class="field-group">
               <span>显示名称</span>
               <input v-model="agentDraft.label" class="field" type="text" />
@@ -1035,7 +1195,13 @@ function handleError(error: unknown, title: string) {
             <h2>嵌入模型配置</h2>
             <p>向量化配置与智能体独立管理，适合检索、索引和召回链路。</p>
           </div>
-          <StatusPill tone="neutral" :label="`${embeddings.length} profiles`" />
+          <div class="heading-meta">
+            <StatusPill tone="neutral" :label="`${embeddings.length} profiles`" />
+            <button class="button secondary" type="button" @click="startCreatingEmbedding">
+              <Plus :size="15" />
+              新增嵌入模型
+            </button>
+          </div>
         </div>
 
         <div class="table-card">
@@ -1072,7 +1238,7 @@ function handleError(error: unknown, title: string) {
                   </button>
                 </td>
                 <td class="align-right">
-                  <button class="button secondary compact" type="button" @click="editingEmbeddingName = item.name">
+                  <button class="button secondary compact" type="button" @click="selectEmbeddingForEdit(item.name)">
                     编辑
                   </button>
                 </td>
@@ -1081,19 +1247,42 @@ function handleError(error: unknown, title: string) {
           </table>
         </div>
 
-        <div v-if="editingEmbedding" class="editor-card">
+        <div v-if="isCreatingEmbedding || editingEmbedding" class="editor-card">
           <div class="editor-head">
             <div>
-              <h3>编辑嵌入配置</h3>
-              <p>{{ editingEmbedding.name }} 的向量模型参数</p>
+              <h3>{{ isCreatingEmbedding ? "新增嵌入配置" : "编辑嵌入配置" }}</h3>
+              <p v-if="isCreatingEmbedding">填写后保存，将创建新的嵌入模型配置。</p>
+              <p v-else>{{ editingEmbedding?.name }} 的向量模型参数</p>
             </div>
-            <button class="button primary" type="button" :disabled="savingEmbedding" @click="submitEmbedding">
-              <Save :size="16" />
-              保存嵌入配置
-            </button>
+            <div class="provider-toolbar">
+              <template v-if="isCreatingEmbedding">
+                <button class="button secondary" type="button" @click="cancelCreatingEmbedding">
+                  取消
+                </button>
+                <button class="button primary" type="button" :disabled="savingEmbedding" @click="createEmbedding">
+                  <Save :size="16" />
+                  创建嵌入配置
+                </button>
+              </template>
+              <template v-else>
+                <button class="button primary" type="button" :disabled="savingEmbedding" @click="submitEmbedding">
+                  <Save :size="16" />
+                  保存嵌入配置
+                </button>
+              </template>
+            </div>
           </div>
 
           <div class="form-grid">
+            <label v-if="isCreatingEmbedding" class="field-group">
+              <span>配置名称</span>
+              <input
+                v-model="embeddingDraft.name"
+                class="field"
+                type="text"
+                placeholder="例如 default_embedding"
+              />
+            </label>
             <label class="field-group">
               <span>显示名称</span>
               <input v-model="embeddingDraft.label" class="field" type="text" />

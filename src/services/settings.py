@@ -7,7 +7,14 @@ from time import perf_counter
 from typing import Any
 
 from src.llm import make_provider
-from src.llm.config import AgentConfig, EmbeddingProfile, ModelConfig, ProviderConfig
+from src.llm.config import (
+    AgentConfig,
+    EmbeddingProfile,
+    ModelConfig,
+    ProviderConfig,
+    _embedding_profiles_from_dict,
+    _provider_from_dict,
+)
 from src.llm.registry import PROVIDERS, ProviderSpec, match_provider_backend
 from src.repositories.settings.json import SettingsRepository
 
@@ -26,24 +33,53 @@ class SettingsError(Exception):
 
 
 def settings_payload(repo: SettingsRepository, agent_name: str | None = None) -> JsonObject:
-    """返回给前端的完整设置快照。"""
+    """返回给前端的完整设置快照。
+
+    中文说明：
+    配置不完整时（例如只保存了 Provider、还没有 default_agent），页面仍然要展示
+    已经保存的部分：Provider 和嵌入模型照常返回，智能体列表留空。这样设置页
+    永远不会因为“还没配完”而打不开，用户可以在网页里逐步补全配置。
+    """
 
     data = _normalized_config(repo.load())
-    config = ModelConfig.from_dict(data, repo.system())
-    resolved_agent_name = _resolve_agent_name(config, agent_name)
-    active_agent = config.resolve_agent(resolved_agent_name)
-    provider_config = config.providers.get(active_agent.provider, ProviderConfig())
+    system = repo.system()
+    try:
+        config = ModelConfig.from_dict(data, system)
+    except ValueError:
+        # default_agent 缺失时 from_dict 会拒绝构建；但 Provider 和嵌入模型
+        # 不依赖 default_agent，单独解析出来用于展示，智能体部分暂时留空。
+        config = ModelConfig(
+            providers={
+                name: _provider_from_dict(name, value)
+                for name, value in (data.get("providers") or {}).items()
+            },
+            agents={},
+            embedding_profiles=_embedding_profiles_from_dict(data, system),
+            system=system,
+        )
+
+    try:
+        resolved_agent_name = _resolve_agent_name(config, agent_name)
+        active_agent = config.resolve_agent(resolved_agent_name)
+        provider_config = config.providers.get(active_agent.provider, ProviderConfig())
+        agent_payload = _agent_payload(resolved_agent_name, active_agent, provider_config)
+        agent_items = _agent_items(config)
+    except (ValueError, SettingsError):
+        # 还没有 default_agent 时智能体没有可展示内容，先留空。
+        agent_payload = None
+        resolved_agent_name = ""
+        agent_items = []
 
     return {
-        "agent": _agent_payload(resolved_agent_name, active_agent, provider_config),
+        "agent": agent_payload,
         "active_agent": resolved_agent_name,
-        "agents": _agent_items(config),
+        "agents": agent_items,
         "providers": _provider_items(config),
         "provider_types": _provider_type_items(),
         "embedding_profiles": _embedding_items(config),
         "defaults": {
-            "llm": _dataclass_like(config.system.llm),
-            "embedding": _dataclass_like(config.system.embedding),
+            "llm": _dataclass_like(system.llm),
+            "embedding": _dataclass_like(system.embedding),
         },
         # 中文注释：当前实现保存后下一轮请求即可生效，不需要进程重启。
         "requires_restart": False,
@@ -113,6 +149,30 @@ def update_provider_settings(repo: SettingsRepository, name: str, patch: JsonObj
     _apply_optional_provider_field(provider, patch, "max_retries", "maxRetries")
     _apply_optional_provider_field(provider, patch, "max_concurrency", "maxConcurrency")
     _apply_optional_provider_field(provider, patch, "include_stream_usage", "includeStreamUsage")
+    repo.save(data)
+    return settings_payload(repo)
+
+
+def delete_provider_settings(repo: SettingsRepository, name: str) -> JsonObject:
+    """删除一个 provider 配置，并清理引用它的智能体和嵌入模型。
+
+    中文说明：
+    如果某个智能体或嵌入模型还引用着被删的 Provider，配置里会留下悬空引用，
+    之后跑任务时会报“找不到 Provider”的怪错，所以删除时一起清掉。
+    """
+
+    data = _normalized_config(repo.load())
+    if name not in _providers(data):
+        raise SettingsError(f"unknown provider: {name}", 404)
+
+    del _providers(data)[name]
+    agents = _agents(data)
+    for agent_name in [n for n, a in agents.items() if a.get("provider") == name]:
+        del agents[agent_name]
+    profiles = _embedding_profiles(data)
+    for profile_name in [n for n, p in profiles.items() if p.get("provider") == name]:
+        del profiles[profile_name]
+
     repo.save(data)
     return settings_payload(repo)
 
@@ -660,6 +720,13 @@ def _validate_provider_for_save(data: JsonObject, provider: str | None) -> None:
 
     if not provider or provider == "auto":
         return
+    if "default_agent" not in (data.get("agents") or {}):
+        # 中文注释：default_agent 是所有节点运行时的默认兜底档位，必须先存在。
+        # 这里提前给一个能看懂的中文提示，避免用户拿到让人摸不着头脑的英文报错。
+        raise SettingsError(
+            "系统要求先存在名为 default_agent 的智能体（所有节点运行必需的默认档位），"
+            "请先把智能体名称填成 default_agent 再保存"
+        )
     config = ModelConfig.from_dict(data)
     if provider not in config.providers:
         raise SettingsError(f"unknown provider: {provider}", 404)

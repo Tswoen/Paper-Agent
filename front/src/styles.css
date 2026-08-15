@@ -216,6 +216,17 @@ a {
   color: white;
 }
 
+/* 中文注释：删除类操作统一用红色描边和文字，避免误点后无法挽回。 */
+.button.danger {
+  border-color: rgba(190, 62, 62, 0.32);
+  color: #c93a3a;
+  background: rgba(255, 255, 255, 0.78);
+}
+
+.button.danger:hover {
+  background: rgba(201, 58, 58, 0.08);
+}
+
 .button.secondary,
 .button.tertiary,
 .button.ghost-link,
@@ -2576,6 +2587,50 @@ body {
   gap: 7px;
   color: #99a4b6;
   font-size: 0.63rem;
+}
+
+/* 中文注释：产物卡片现在是一个可点击的链接，去掉默认下划线并补充悬停反馈。 */
+.insight-artifact {
+  text-decoration: none;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.insight-artifact:hover {
+  border-color: #c7d2fe;
+  background: #f7f9ff;
+}
+
+/* 中文注释：最终结果卡片，超长论文内容在卡片内部滚动，不会撑乱整体布局。 */
+.session-final-result {
+  border: 1px solid #edf0f5;
+  border-radius: 12px;
+  background: #ffffff;
+}
+
+.session-final-result-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid #edf0f5;
+}
+
+.session-final-result-head h3 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.session-final-result-body {
+  margin: 0;
+  padding: 18px;
+  max-height: 60vh;
+  overflow-y: auto;
+  font-size: 0.85rem;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #354158;
 }
 
 @media (max-width: 980px) {

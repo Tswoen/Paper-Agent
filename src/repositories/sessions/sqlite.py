@@ -662,6 +662,35 @@ class SQLiteSessionRepository(SessionRepository):
         )
         return artifact_record
 
+    def read_artifact_path(self, key: str, artifact_id: str) -> Path | None:
+        """根据产物编号返回安全的产物文件路径。
+
+        中文说明：
+        先按 id 找到产物记录，再把记录里保存的路径做一次安全校验：路径解析后
+        必须仍然位于当前会话目录内，并且文件确实存在，否则返回 None。这样即使
+        历史数据里存了越界路径或被删除的文件，下载接口也不会把它读出去。
+        """
+
+        session = self.get(key)
+        artifact = next(
+            (item for item in session.artifacts if str(item.get("id") or "") == artifact_id),
+            None,
+        )
+        if artifact is None:
+            return None
+        raw_path = str(artifact.get("path") or "").strip()
+        if not raw_path:
+            return None
+        session_dir = (self.backend.sessions_dir / key).resolve()
+        resolved = Path(raw_path).resolve(strict=False)
+        if not resolved.is_relative_to(session_dir) or not resolved.is_file():
+            logger.warning(
+                "产物文件路径校验未通过，拒绝提供下载",
+                extra={"session_key": key, "artifact_id": artifact_id, "artifact_path": raw_path},
+            )
+            return None
+        return resolved
+
     def set_workspace_scope(self, key: str, workspace_scope: JsonObject | None) -> JsonObject:
         """更新会话的工作区范围信息。"""
 
