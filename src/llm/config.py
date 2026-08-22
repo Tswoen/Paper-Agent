@@ -62,6 +62,14 @@ class ReadDefaults:
     chunk_overlap: int = 150
     vector_store_path: str = "data/vector_store"
     vector_store_collection: str = "papers"
+    # 全文提取后是否再回读原文做证据验证。
+    verify_enabled: bool = True
+    # 验证不通过时最多重提几次（重提次数越多越慢，本地资源充足也建议保持较小的值）。
+    verify_max_retries: int = 1
+    # 验证时原文最多保留的字符数，防止超长论文撑爆模型上下文。
+    verify_max_chars: int = 120000
+    # 可选字段：原文确实没写也不算提取错误。
+    verify_optional_fields: tuple[str, ...] = ("limitations",)
 
 
 @dataclass(slots=True)
@@ -75,12 +83,33 @@ class PaperRetrievalConfig:
 
 
 @dataclass(slots=True)
+class SearchDefaults:
+    """保存搜索节点的语义过滤与候选池参数。
+
+    中文说明：这些参数只控制“多搜一些再筛出最相关的”，不是限制系统最多
+    处理多少篇。候选池放大后，仍会按用户请求的 max_results 截断最终结果。
+    """
+
+    # 是否在关键词打分之后，再调用大模型做一轮语义相关性过滤。
+    semantic_filter_enabled: bool = True
+    # 每次交给大模型判断的论文数量，分批避免单次请求过大。
+    filter_batch_size: int = 20
+    # 候选池大小 = min(max, max(min, 目标数 × 倍数))。
+    candidate_pool_min: int = 20
+    candidate_pool_multiplier: int = 5
+    candidate_pool_max: int = 60
+    # arXiv 主查询返回 0 篇时，用安全查询重试的上限。
+    arxiv_query_retry_limit: int = 1
+
+
+@dataclass(slots=True)
 class SystemConfig:
     """从 config/system.yaml 读取的系统默认值。"""
 
     llm: LLMDefaults = field(default_factory=LLMDefaults)
     embedding: EmbeddingDefaults = field(default_factory=EmbeddingDefaults)
     paper_retrieval: PaperRetrievalConfig = field(default_factory=PaperRetrievalConfig)
+    search: SearchDefaults = field(default_factory=SearchDefaults)
     read: ReadDefaults = field(default_factory=ReadDefaults)
 
     @classmethod
@@ -96,7 +125,9 @@ class SystemConfig:
         llm = dict(defaults.get("llm") or {})
         embedding = dict(defaults.get("embedding") or {})
         paper_retrieval = dict((data or {}).get("paper_retrieval") or {})
+        search = dict((data or {}).get("search") or {})
         read = dict((data or {}).get("read") or {})
+        semantic_enabled = _optional_bool(search.get("semantic_filter_enabled"))
         return cls(
             llm=LLMDefaults(
                 temperature=llm.get("temperature", 0.7),
@@ -114,6 +145,14 @@ class SystemConfig:
                 openalex_api_key=_optional_text(paper_retrieval.get("openalex_api_key")),
                 semantic_scholar_api_key=_optional_text(paper_retrieval.get("semantic_scholar_api_key")),
             ),
+            search=SearchDefaults(
+                semantic_filter_enabled=True if semantic_enabled is None else semantic_enabled,
+                filter_batch_size=_read_positive_int(search.get("filter_batch_size"), 20),
+                candidate_pool_min=_read_positive_int(search.get("candidate_pool_min"), 20),
+                candidate_pool_multiplier=_read_positive_int(search.get("candidate_pool_multiplier"), 5),
+                candidate_pool_max=_read_positive_int(search.get("candidate_pool_max"), 60),
+                arxiv_query_retry_limit=_read_non_negative_int(search.get("arxiv_query_retry_limit"), 1),
+            ),
             read=ReadDefaults(
                 agent_name=str(read.get("agent_name") or "default_agent"),
                 paper_cache_dir=str(read.get("paper_cache_dir") or "data/paper_cache"),
@@ -124,6 +163,10 @@ class SystemConfig:
                 chunk_overlap=_read_non_negative_int(read.get("chunk_overlap"), 150),
                 vector_store_path=str(read.get("vector_store_path") or "data/vector_store"),
                 vector_store_collection=str(read.get("vector_store_collection") or "papers"),
+                verify_enabled=_optional_bool(read.get("verify_enabled")) is not False,
+                verify_max_retries=_read_non_negative_int(read.get("verify_max_retries"), 1),
+                verify_max_chars=_read_positive_int(read.get("verify_max_chars"), 120000),
+                verify_optional_fields=_string_tuple(read.get("verify_optional_fields"), default=("limitations",)),
             ),
         )
 
@@ -416,6 +459,18 @@ def _optional_text(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _string_tuple(value: Any, *, default: tuple[str, ...]) -> tuple[str, ...]:
+    """把配置里的字符串列表整理成元组，没有或格式错误时使用默认值。"""
+
+    if isinstance(value, str):
+        items = [item.strip() for item in value.split(",") if item.strip()]
+    elif isinstance(value, (list, tuple)):
+        items = [str(item).strip() for item in value if str(item).strip()]
+    else:
+        return default
+    return tuple(items) if items else default
 
 
 def _read_positive_int(value: Any, default: int, *, maximum: int | None = None) -> int:

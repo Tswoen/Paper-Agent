@@ -148,6 +148,12 @@ _STAGE_DISPLAY: dict[tuple[str, str], RuntimeStageDisplay] = {
         show_content="排序和筛选已完成",
         status="completed",
     ),
+    ("search", "filtering_results"): RuntimeStageDisplay(
+        "filtering_results",
+        "语义筛选论文",
+        show_content="已按语义筛选出相关论文",
+        status="completed",
+    ),
     ("search", "artifact_ready"): RuntimeStageDisplay(
         "save_search_artifact",
         "保存检索产物",
@@ -165,6 +171,7 @@ _STAGE_DISPLAY: dict[tuple[str, str], RuntimeStageDisplay] = {
     ("read", "reading_abstract"): RuntimeStageDisplay("reading_abstract", "阅读论文摘要"),
     ("read", "downloading_full_text"): RuntimeStageDisplay("downloading_full_text", "下载论文全文"),
     ("read", "converting_markdown"): RuntimeStageDisplay("converting_markdown", "转换 Markdown"),
+    ("read", "verifying_full_text"): RuntimeStageDisplay("verifying_full_text", "核实论文提取结果"),
     ("read", "saving_chunks"): RuntimeStageDisplay("saving_chunks", "建立全文索引"),
     ("read", "paper_completed"): RuntimeStageDisplay(
         "paper_completed",

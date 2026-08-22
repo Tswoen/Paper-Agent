@@ -68,7 +68,11 @@ class SearchPersistenceSink:
         topic: str,
         intent: SearchIntent,
         raw_papers: list[PaperDocument],
-        scored_papers: list[JsonObject],
+        # DEPRECATED: 2026-08-22
+        # 原因：关键词打分逻辑已下线，不再产出打分明细。
+        # 替代方案：search_ranked_results.json 只保留最终入选论文。
+        # 计划移除：语义过滤稳定运行一段时间后清理。
+        # scored_papers: list[JsonObject],
         selected_papers: list[PaperDocument],
         search_summary: JsonObject,
         search_output: JsonObject,
@@ -117,7 +121,8 @@ class SearchPersistenceSink:
             payload={
                 "turn_id": self.turn_id,
                 "topic": topic,
-                "scored_papers": list(scored_papers),
+                # DEPRECATED: 2026-08-22 随关键词打分下线，产物里不再保存打分明细。
+                # "scored_papers": list(scored_papers),
                 "selected_papers": [_paper_to_dict(paper) for paper in selected_papers],
                 "created_at": now,
             },

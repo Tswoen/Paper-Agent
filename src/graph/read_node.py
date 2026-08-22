@@ -21,6 +21,7 @@ from src.paper_retrieval.models import PaperDocument
 from src.repositories.sessions.base import SessionRepository
 from src.utils.read_utils.chunkers import async_build_chunks_file
 from src.utils.read_utils.extraction import async_extract_paper_from_chunks, empty_extraction, extraction_payload
+from src.utils.read_utils.verify_extraction import async_verify_extraction
 
 
 # 中文说明：全文切分后默认只保留 chunk.json，不调用向量嵌入服务。
@@ -536,6 +537,7 @@ def _restore_read_results(state: State, papers: list[PaperDocument], checkpoint:
                 relevance=_read_relevance_from_payload(item.get("relevance")),
                 full_text=_full_text_from_payload(item.get("full_text")),
                 extraction=_json_object(item.get("extraction")),
+                verification=_json_object(item.get("verification")),
                 warnings=_string_list(item.get("warnings")),
             )
         )
@@ -666,6 +668,7 @@ def _read_result_from_payload(value: Any, papers: list[PaperDocument]) -> PaperR
         relevance=_read_relevance_from_payload(value.get("relevance")),
         full_text=_full_text_from_payload(value.get("full_text")),
         extraction=_json_object(value.get("extraction")),
+        verification=_json_object(value.get("verification")),
         warnings=_string_list(value.get("warnings")),
     )
 
@@ -1081,6 +1084,9 @@ def _build_summary(results: list[PaperReadResult], deep_read_count: int) -> Json
         "fulltext_downloaded": sum(bool(item.full_text.source_path) for item in results),
         "extraction_succeeded": sum(bool(item.extraction and any(str(value).strip() for value in item.extraction.values())) for item in results),
         "vectorized": sum(item.full_text.status == "indexed" for item in results),
+        # 中文说明：这里的统计只反映“是否跑过验证”，与验证结果好坏分开看。
+        "verified_paper_count": sum(bool(item.verification and item.verification.get("status") == "completed") for item in results),
+        "verification_failed_paper_count": sum(bool(item.verification and not item.verification.get("passed")) for item in results),
         "errors": _read_errors(results),
     }
     return {
@@ -1883,11 +1889,15 @@ async def _read_one_paper(
     if llm is None:
         raise ReadModelUnavailableError("未配置可用的阅读模型，无法生成全文结构化摘要")
     try:
-        extraction_record = await async_extract_paper_from_chunks(
+        # 中文注释：先提取全文结构化信息，再回读原文做证据验证；验证不通过的
+        # 字段会反馈给模型重提，最多按配置重试几次。模型不可用仍会抛错走恢复现场。
+        extraction_record, verification = await _extract_and_verify(
             paper,
             chunks_path=chunk_build.chunks_path,
+            markdown_path=markdown_path,
             llm=llm,
             runtime_resources=runtime_resources,
+            config=config,
         )
     except RuntimeError as exc:
         # 中文注释：这里的运行错误来自全文摘要模型调用。暂停后保留已下载、转换和
@@ -1901,6 +1911,25 @@ async def _read_one_paper(
     else:
         result.extraction = extraction_payload(extraction_record)
         result.note = _full_text_note_from_extraction(result.extraction)
+        result.verification = verification
+        if verification:
+            _report_progress(
+                reporter,
+                paper,
+                "verifying_full_text",
+                completed_counter.current(),
+                total_paper_count,
+                paper_position=item.position,
+                verify_status=str(verification.get("status") or ""),
+                verify_passed=bool(verification.get("passed")),
+            )
+            if verification.get("status") == "failed_after_retries" and not verification.get("passed"):
+                failed_fields = [
+                    str(item.get("field") or "")
+                    for item in verification.get("items", [])
+                    if not item.get("verified")
+                ]
+                result.warnings.append(f"全文结构化信息经核查未通过：{'、'.join(failed_fields)}")
 
     if not ENABLE_FULL_TEXT_EMBEDDING:
         # 中文说明：async_build_chunks_file 已经把分块内容写到论文缓存目录的 chunk.json。
@@ -1995,6 +2024,74 @@ def _full_text_note_from_extraction(extraction: JsonObject) -> ReadNote:
         short_summary=conclusions or research_topic,
         evidence_level="full_text",
     )
+
+
+async def _extract_and_verify(
+    paper: PaperDocument,
+    *,
+    chunks_path: Path,
+    markdown_path: Path,
+    llm: ProviderSnapshot,
+    runtime_resources: WorkflowRuntimeResources | None,
+    config: Any,
+) -> tuple[JsonObject, JsonObject]:
+    """提取全文结构化信息，再回读原文做证据验证，验证不通过会按配置重提。
+
+    返回 (extraction_record, verification) 两个结果：
+    - extraction_record：和原来一样是 extraction.json 的记录；
+    - verification：证据验证结论，启用验证时才非空。
+
+    中文注释：第一次提取用缓存，验证不通过后的重提才强制重新提取，并把
+    上次没通过核查的字段反馈给模型，让它针对性地修正。
+    """
+
+    verify_enabled = bool(getattr(config, "verify_enabled", True))
+    max_retries = int(getattr(config, "verify_max_retries", 1))
+    optional_fields = tuple(getattr(config, "verify_optional_fields", ("limitations",)))
+    max_chars = int(getattr(config, "verify_max_chars", 120000))
+
+    feedback: str | None = None
+    extraction_record: JsonObject | None = None
+    verification: JsonObject = {}
+    for attempt in range(max_retries + 1):
+        extraction_record = await async_extract_paper_from_chunks(
+            paper,
+            chunks_path=chunks_path,
+            llm=llm,
+            runtime_resources=runtime_resources,
+            force=attempt > 0,
+            feedback=feedback,
+        )
+        if not verify_enabled:
+            return extraction_record, {}
+        extraction = extraction_payload(extraction_record)
+        verification = await async_verify_extraction(
+            paper,
+            extraction=extraction,
+            markdown_path=markdown_path,
+            llm=llm,
+            runtime_resources=runtime_resources,
+            optional_fields=optional_fields,
+            max_chars=max_chars,
+        )
+        if verification.get("status") != "completed":
+            # 验证不可用（例如模型调用失败），本轮先不重试，保留一次提取结果。
+            break
+        failed_fields = [
+            str(item.get("field") or "")
+            for item in verification.get("items", [])
+            if not item.get("verified") and item.get("field") not in optional_fields
+        ]
+        if not failed_fields:
+            break
+        if attempt >= max_retries:
+            # 重试次数用完了仍没通过，把状态标出来，让阅读节点能提示用户。
+            verification = dict(verification)
+            verification["status"] = "failed_after_retries"
+            break
+        # 把没通过核查的字段反馈给模型，下一轮提取时针对性地修正。
+        feedback = "以下字段未通过核查：" + "、".join(failed_fields)
+    return extraction_record, verification
 
 
 async def _build_abstract_note(
@@ -2357,6 +2454,7 @@ def _report_progress(reporter: Any, paper: PaperDocument, stage: str, completed:
         "converting_markdown": "正在转换 Markdown",
         "chunking_full_text": "正在切分全文内容",
         "extracting_full_text": "正在提取论文结构化信息",
+        "verifying_full_text": "正在核实论文提取结果",
         "saving_chunks": "正在写入全文索引",
         "paper_completed": "论文阅读完成",
         "paper_artifact_ready": "单篇阅读结果已保存",

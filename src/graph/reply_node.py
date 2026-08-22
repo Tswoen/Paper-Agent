@@ -134,7 +134,8 @@ def run_compose_reply_node():
         return State(
             request=state["request"],
             search_results=papers,
-            search_scores=list(state.get("search_scores") or []),
+            # DEPRECATED: 2026-08-22 随关键词打分下线，回复节点不再透传打分明细。
+            # search_scores=list(state.get("search_scores") or []),
             search_summary=summary,
             search_artifact_refs=artifact_refs,
             read_results=read_results,

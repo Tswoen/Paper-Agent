@@ -148,7 +148,8 @@ def _build_initial_state(
     initial_state = State(
         request=request,
         search_results=[],
-        search_scores=[],
+        # DEPRECATED: 2026-08-22 随关键词打分下线，初始状态不再准备打分明细字段。
+        # search_scores=[],
         search_summary={},
         search_output={},
         search_artifact_refs=[],

@@ -107,6 +107,9 @@ class PaperReadResult:
     relevance: ReadRelevance = field(default_factory=ReadRelevance)
     full_text: FullTextStatus = field(default_factory=FullTextStatus)
     extraction: JsonObject = field(default_factory=dict)
+    # 中文说明：保存“全文提取结果的证据验证”结论，例如每个字段是否忠于原文、
+    # 对应的原文引用和失败原因。没有启用验证时保持空字典。
+    verification: JsonObject = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
 
     def to_dict(self) -> JsonObject:
@@ -118,5 +121,6 @@ class PaperReadResult:
             "relevance": self.relevance.to_dict(),
             "full_text": self.full_text.to_dict(),
             "extraction": dict(self.extraction),
+            "verification": dict(self.verification),
             "warnings": list(self.warnings),
         }

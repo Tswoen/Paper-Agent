@@ -14,6 +14,7 @@ import {
 import { computed, onMounted, reactive, ref, watch } from "vue";
 
 import {
+  deleteAgent,
   deleteProvider,
   getProviderModels,
   getSettings,
@@ -65,6 +66,8 @@ const refreshing = ref(false);
 const savingProvider = ref(false);
 const deletingProvider = ref(false);
 const savingAgent = ref(false);
+// 记录当前正在删除的智能体名称，避免同一次操作里重复点击。
+const deletingAgentName = ref("");
 const savingEmbedding = ref(false);
 const showApiKey = ref(false);
 // 控制右侧是否处于新增状态，新增时显示空白表单，已有 Provider 则显示配置详情。
@@ -510,6 +513,45 @@ function cancelCreatingEmbedding() {
 function selectAgentForEdit(name: string) {
   isCreatingAgent.value = false;
   editingAgentName.value = name;
+}
+
+async function deleteAgentFromList(agent: AgentItem) {
+  const name = agent.name;
+  // default_agent 是系统运行必需的默认档位，前端直接拦截，避免不必要的请求。
+  if (agent.is_default) {
+    pushToast({
+      tone: "error",
+      title: "不能删除",
+      description: "default_agent 是系统运行必需的默认档位（所有节点都用它兜底），不能删除。",
+    });
+    return;
+  }
+  const confirmed = window.confirm(`确定删除智能体「${name}」吗？`);
+  if (!confirmed) {
+    return;
+  }
+  deletingAgentName.value = name;
+  try {
+    settings.value = await deleteAgent(name);
+    // 删掉的是正在编辑的智能体时，退出编辑态，避免表单里残留已不存在的名称。
+    if (editingAgentName.value === name) {
+      editingAgentName.value = "";
+    }
+    if (isCreatingAgent.value) {
+      isCreatingAgent.value = false;
+    }
+    invalidateConnectivity("agent", name);
+    primeEditors();
+    pushToast({
+      tone: "success",
+      title: "智能体已删除",
+      description: `${name} 已从当前配置中移除。`,
+    });
+  } catch (error) {
+    handleError(error, "删除智能体失败");
+  } finally {
+    deletingAgentName.value = "";
+  }
 }
 
 function selectEmbeddingForEdit(name: string) {
@@ -1085,9 +1127,21 @@ function handleError(error: unknown, title: string) {
                   </button>
                 </td>
                 <td class="align-right">
-                  <button class="button secondary compact" type="button" @click="selectAgentForEdit(agent.name)">
-                    编辑
-                  </button>
+                  <div class="row-actions">
+                    <button class="button secondary compact" type="button" @click="selectAgentForEdit(agent.name)">
+                      编辑
+                    </button>
+                    <button
+                      class="button danger compact"
+                      type="button"
+                      :disabled="agent.is_default || deletingAgentName === agent.name"
+                      :title="agent.is_default ? 'default_agent 是系统运行必需的默认档位，不能删除' : '删除该智能体'"
+                      @click="deleteAgentFromList(agent)"
+                    >
+                      <Trash2 :size="14" />
+                      删除
+                    </button>
+                  </div>
                 </td>
               </tr>
             </tbody>

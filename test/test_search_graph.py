@@ -148,8 +148,12 @@ class GraphTest(unittest.TestCase):
         self.assertGreaterEqual(len(result.papers), 1)
         self.assertEqual(result.state["current_step"], "reply")
         self.assertIn("agent", result.diagnostics)
-        self.assertIn("search_scores", result.state)
-        self.assertGreaterEqual(len(result.state["search_scores"]), 1)
+        # DEPRECATED: 2026-08-22
+        # 原因：关键词打分逻辑已下线，状态里不再有 search_scores 字段。
+        # 替代方案：改用 search_results 检查最终论文产出（见上方 assertGreaterEqual(len(result.papers), 1)）。
+        # 计划移除：语义过滤稳定运行一段时间后清理。
+        # self.assertIn("search_scores", result.state)
+        # self.assertGreaterEqual(len(result.state["search_scores"]), 1)
 
     def test_run_graph_executes_each_requested_source_with_full_limit(self):
         """验证搜索节点会把多来源请求收口到一次异步服务调用里。"""

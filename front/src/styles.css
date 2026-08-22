@@ -821,6 +821,12 @@ a {
   text-align: right;
 }
 
+.row-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .editor-card {
   margin-top: 16px;
 }

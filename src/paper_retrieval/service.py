@@ -216,14 +216,17 @@ class PaperSearchService:
         # 中文说明：论文检索密钥与模型密钥分开保存在 system.yaml 中。
         # 每次新建检索服务都会重新读取配置，修改密钥后无需改业务代码。
         retrieval_config = SystemConfig.load().paper_retrieval
+        search_config = SystemConfig.load().search
         openalex = OpenAlexPaperConnector(api_key=retrieval_config.openalex_api_key)
         semantic = SemanticScholarPaperConnector(api_key=retrieval_config.semantic_scholar_api_key)
-        arxiv = ArxivPaperConnector()
+        arxiv = ArxivPaperConnector(query_retry_limit=search_config.arxiv_query_retry_limit)
+        # 中文说明：arxiv 放在注册表最前，空 source 多源检索时，合并去重会优先
+        # 保留 arxiv 返回的论文，避免 openalex 等镜像源抢先把重复论文标记成自己。
         return {
+            "arxiv": arxiv,
             "openalex": openalex,
             "semantic_scholar": semantic,
             "semantic": semantic,
-            "arxiv": arxiv,
         }
 
     def _select_connectors(

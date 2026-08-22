@@ -63,11 +63,16 @@ async def async_extract_paper_from_chunks(
     chunks_path: Path,
     llm: ProviderSnapshot,
     runtime_resources: Any = None,
+    force: bool = False,
+    feedback: str | None = None,
 ) -> JsonObject:
     """从 chunk.json 提取论文的结构化信息，并写入 extraction.json。
 
     中文注释：这里不重新解析 PDF，只读取已经缓存好的 chunk.json。模型必须按
     固定 JSON 字段回答；回答不合格时会抛错，让阅读节点记录失败原因。
+
+    force=True 时跳过已缓存的 extraction.json，强制重新提取；
+    feedback 会把上一次“哪些字段没通过核查”的提示追加给模型，让它自我修正。
     """
 
     chunks = await asyncio.to_thread(load_chunks_file, chunks_path)
@@ -76,11 +81,11 @@ async def async_extract_paper_from_chunks(
     output_path = chunks_path.parent / "extraction.json"
     valid_chunk_ids = {chunk.chunk_id for chunk in chunks}
     cached = await asyncio.to_thread(_load_cached_extraction, output_path, valid_chunk_ids)
-    if cached is not None:
+    if cached is not None and not force:
         return cached
     response = await _call_model(
         llm,
-        _extraction_messages(paper, chunks),
+        _extraction_messages(paper, chunks, feedback=feedback),
         runtime_resources=runtime_resources,
     )
     if not response.ok:
@@ -186,12 +191,15 @@ async def _call_model(
         raise RuntimeError(f"全文提取模型调用失败：{exc}") from exc
 
 
-def _extraction_messages(paper: PaperDocument, chunks: list[TextChunk]) -> list[JsonObject]:
+def _extraction_messages(paper: PaperDocument, chunks: list[TextChunk], *, feedback: str | None = None) -> list[JsonObject]:
     """构造全文提取提示词。
 
     中文注释：精读必须阅读同一篇论文的全部正文块，不能只截取开头的一部分。
     发送给模型的每个块只保留 chunkId 和 content，避免页码、相邻块等无关字段
     干扰模型，也减少请求内容。
+
+    feedback 是上一次提取结果没通过核查时的反馈，会追加到指令末尾，
+    提示模型这次要修正哪些字段。
     """
 
     del paper
@@ -201,6 +209,8 @@ def _extraction_messages(paper: PaperDocument, chunks: list[TextChunk]) -> list[
 JSON 必须且仅包含 research_topic、research_object、methods、conclusions、contributions、limitations 六个字符串字段。
 每个非空字段都必须在句末或判断后标注来源 chunkId，格式如 [chunkId]，并且只能引用输入中真实存在的 chunkId。
 如果全文没有明确说明某个字段，请把该字段写成空字符串。"""
+    if feedback:
+        instruction += f"\n\n上一次提取结果未通过核查，请重点修正以下问题：{feedback}"
     return [{"role": "system", "content": instruction}, {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]
 
 
