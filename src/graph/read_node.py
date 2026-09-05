@@ -1,14 +1,22 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn, cast
 
+from src.agents.Prompts import READ_DEEP_READ_SELECTION_PROMPT
 from src.agents.readAgent import ReadAgentModelUnavailableError, build_read_agent, load_read_agent_llm
 from src.utils.read_utils.read_fulltext import async_convert_fulltext_to_markdown
-from src.models.read_models import FullTextStatus, PaperReadResult, ReadNote, ReadRelevance, calculate_relevance_score, normalize_match_levels
+# DEPRECATED: 2026-09-07
+# 原因：三维等级 + 评分表退役，相关性判断改为模型直接输出二元 {relevant, reason}。
+# 替代方案：改用 READ_RELEVANCE_STATUSES 判断精读名额状态。
+# 计划移除：阅读阶段持续过滤机制稳定运行一段时间后清理
+# from src.models.read_models import FullTextStatus, PaperReadResult, ReadNote, ReadRelevance, calculate_relevance_score, normalize_match_levels
+from src.models.read_models import FullTextStatus, PaperReadResult, ReadNote, ReadRelevance, READ_RELEVANCE_STATUSES
 from src.repositories.node_persistence.read_persistence import ReadPersistenceSink
 from src.repositories.chroma.read_vector_store import EmbeddingConnection, async_index_chunk_file, async_index_markdown_chunks
 from src.graph.checkpoint_halt import halt_with_checkpoint
@@ -386,11 +394,15 @@ async def _run_read_node_async(state: State) -> State:
             completed=len(results),
             deep_read_paper_count=summary["deep_read_paper_count"],
             deep_read_papers=summary["deep_read_papers"],
+            discarded_paper_count=summary["discarded_paper_count"],
             indexed_paper_count=summary["indexed_paper_count"],
         )
+    # 中文注释：软丢弃的论文不进下游——汇总和产物里保留完整记录（含丢弃理由），
+    # 但写回 state 的 read_results 只包含未被丢弃的论文，分析/写作节点自然收窄。
+    kept_results = [result for result in results if not result.relevance.discarded]
     updated = dict(state)
     updated.update(
-        read_results=[result.to_dict() for result in results],
+        read_results=[result.to_dict() for result in kept_results],
         read_summary=summary,
         read_artifact_refs=artifact_refs,
         read_paper_statuses=_ordered_paper_runtime_statuses(papers, paper_runtime_statuses),
@@ -756,15 +768,25 @@ def _read_note_from_payload(value: Any) -> ReadNote:
 
 
 def _read_relevance_from_payload(value: Any) -> ReadRelevance:
-    """把 checkpoint 中的相关性 JSON 恢复为 ReadRelevance。"""
+    """把 checkpoint 中的相关性 JSON 恢复为 ReadRelevance。
+
+    中文注释：新版结构是 {relevant, reason, discarded, uncertain, status}。
+    relevant 缺失时按"拿不准判有关"保底；旧版 checkpoint 里的 match_levels
+    和 score 字段不再解析，统一按默认值恢复。
+    """
 
     payload = value if isinstance(value, dict) else {}
-    status = _text_value(payload.get("status")) or "not_eligible"
-    if status not in {"not_eligible", "selected_for_deep_read", "not_selected_due_to_limit"}:
-        status = "not_eligible"
+    relevant = payload.get("relevant")
+    if not isinstance(relevant, bool):
+        relevant = True
+    status = _text_value(payload.get("status")) or "pending"
+    if status not in READ_RELEVANCE_STATUSES:
+        status = "pending"
     return ReadRelevance(
-        score=_score_value(payload.get("score")),
-        match_levels=normalize_match_levels(payload.get("match_levels")),
+        relevant=relevant,
+        reason=_text_value(payload.get("reason")),
+        discarded=bool(payload.get("discarded")),
+        uncertain=bool(payload.get("uncertain")),
         status=status,
     )
 
@@ -857,8 +879,8 @@ def _legacy_read_one_paper(
     note, relevance, warnings = _legacy_build_abstract_note(paper, topic=topic, constraints=constraints, llm=llm)
     result = PaperReadResult(paper=paper, note=note, relevance=relevance, warnings=warnings)
     # 这个旧同步入口仅保留给独立调试使用，主流程不会调用它。
-    # 只要核心研究问题不匹配，就不会进入全文处理。
-    should_deep_read = relevance.match_levels.get("research_question") != "not_match"
+    # 新版判断改为二元 relevant：模型判无关就不进入全文处理。
+    should_deep_read = relevance.relevant
     if not should_deep_read:
         result.full_text = FullTextStatus(status="not_requested", reason="当前论文只保留摘要笔记")
         return result, False
@@ -965,14 +987,19 @@ def _legacy_build_abstract_note(
         raise ReadModelUnavailableError(str(exc)) from exc
 
 
-def _deep_read_limit(constraints: JsonObject, total: int) -> int:
-    """读取用户可选的精读数量限制，未提供时允许处理全部高相关论文。"""
+# 中文说明：全文精读预算的默认值。相关论文不超过这个数时全部精读（零新增调用）；
+# 超过时触发一次批量比较选择。用户可通过 constraints 的 deep_read_limit 覆盖。
+DEFAULT_DEEP_READ_LIMIT = 10
 
-    raw = constraints.get("deep_read_limit", constraints.get("max_deep_read", total))
+
+def _deep_read_limit(constraints: JsonObject, total: int) -> int:
+    """读取用户可选的精读数量限制，未提供时默认最多精读 10 篇。"""
+
+    raw = constraints.get("deep_read_limit", constraints.get("max_deep_read", DEFAULT_DEEP_READ_LIMIT))
     try:
         return max(0, min(int(raw), total))
     except (TypeError, ValueError):
-        return total
+        return min(DEFAULT_DEEP_READ_LIMIT, total)
 
 
 def _deduplicate_papers(papers: list[PaperDocument]) -> list[PaperDocument]:
@@ -1080,7 +1107,7 @@ def _build_summary(results: list[PaperReadResult], deep_read_count: int) -> Json
 
     global_statistics = {
         "total_papers_received": len(results),
-        "passed_abstract_filter": sum(item.relevance.status != "not_eligible" for item in results),
+        "passed_abstract_filter": sum(not item.relevance.discarded for item in results),
         "fulltext_downloaded": sum(bool(item.full_text.source_path) for item in results),
         "extraction_succeeded": sum(bool(item.extraction and any(str(value).strip() for value in item.extraction.values())) for item in results),
         "vectorized": sum(item.full_text.status == "indexed" for item in results),
@@ -1092,7 +1119,7 @@ def _build_summary(results: list[PaperReadResult], deep_read_count: int) -> Json
     return {
         "total_paper_count": len(results),
         "deep_read_attempt_count": deep_read_count,
-        "deep_read_candidate_count": sum(item.relevance.status != "not_eligible" for item in results),
+        "deep_read_candidate_count": sum(not item.relevance.discarded for item in results),
         # 中文说明：只要被统一排序选中，就保留在精读清单中；下载、解析或建立
         # 向量索引失败不会改变它已经获得全文名额这一事实。
         "deep_read_paper_count": sum(item.relevance.status == "selected_for_deep_read" for item in results),
@@ -1101,9 +1128,20 @@ def _build_summary(results: list[PaperReadResult], deep_read_count: int) -> Json
             for item in results
             if item.relevance.status == "selected_for_deep_read"
         ],
+        # 中文说明：软丢弃清单单独汇总，方便审计"哪些论文被 AI 判无关、为什么"。
+        "discarded_paper_count": sum(item.relevance.discarded for item in results),
+        "discarded_papers": [
+            {
+                "paperId": item.paper.paperId or item.paper.id,
+                "title": item.paper.title,
+                "reason": item.relevance.reason,
+            }
+            for item in results
+            if item.relevance.discarded
+        ],
+        "uncertain_paper_count": sum(item.relevance.uncertain for item in results),
         "indexed_paper_count": sum(item.full_text.status == "indexed" for item in results),
         "failed_fulltext_count": sum(item.full_text.status in {"download_failed", "parse_failed"} for item in results),
-        "not_eligible_paper_count": sum(item.relevance.status == "not_eligible" for item in results),
         "subtopics": _read_subtopics(results),
         "global_statistics": global_statistics,
     }
@@ -1167,16 +1205,20 @@ def _deep_read_paper_item(result: PaperReadResult) -> JsonObject:
         "paperId": result.paper.paperId or result.paper.id,
         "title": result.paper.title,
         "year": result.paper.year,
-        "relevance_score": result.relevance.score,
-        "match_levels": dict(result.relevance.match_levels),
+        "relevance_reason": result.relevance.reason,
+        "uncertain": result.relevance.uncertain,
         "selection_status": result.relevance.status,
         "full_text_status": result.full_text.status,
     }
 
 
 def _paper_completion_runtime_status(result: PaperReadResult) -> str:
-    """根据单篇论文结果判断卡片最终显示完成还是失败。"""
+    """根据单篇论文结果判断卡片最终显示完成、丢弃还是失败。"""
 
+    # 中文注释：软丢弃优先判断——被 AI 判无关的论文卡片显示"已丢弃"，
+    # 不算失败（判断本身是正常业务结果），也不算完成（没有进入下游）。
+    if result.relevance.discarded:
+        return "discarded"
     # 中文注释：下载、转换、索引失败不再让整批阅读中断，
     # 但对这篇论文来说确实有阶段失败，所以卡片用 failed 更醒目。
     if result.full_text.status in {"download_failed", "no_url", "parse_failed"}:
@@ -1191,6 +1233,9 @@ def _paper_completion_runtime_status(result: PaperReadResult) -> str:
 def _paper_completion_message(result: PaperReadResult) -> str:
     """把单篇论文最终结果整理成用户能看懂的一句话。"""
 
+    # 中文注释：丢弃卡片直接展示 AI 给出的判断理由，方便用户核对是否误杀。
+    if result.relevance.discarded:
+        return f"已丢弃：{result.relevance.reason}" if result.relevance.reason else "已丢弃：判定与主题无关"
     status = result.full_text.status
     if status in {"download_failed", "no_url"}:
         return "全文下载失败，已保留摘要阅读结果"
@@ -1208,6 +1253,9 @@ def _paper_completion_message(result: PaperReadResult) -> str:
 def _paper_completion_error_message(result: PaperReadResult) -> str:
     """提取单篇论文最终失败原因，没有失败时返回空字符串。"""
 
+    # 中文注释：软丢弃不是错误，不产生 error 信息。
+    if result.relevance.discarded:
+        return ""
     if result.full_text.status in {"download_failed", "no_url", "parse_failed"}:
         return result.full_text.reason or result.full_text.status
     if result.full_text.reason and result.full_text.status not in _FULL_TEXT_COMPLETED_STATUSES | {"not_requested"}:
@@ -1223,6 +1271,9 @@ def _read_errors(results: list[PaperReadResult]) -> list[JsonObject]:
 
     errors: list[JsonObject] = []
     for result in results:
+        # 中文注释：被软丢弃的论文不算错误，跳过统计。
+        if result.relevance.discarded:
+            continue
         paper_id = result.paper.paperId or result.paper.id
         status = result.full_text.status
         if status in {"download_failed", "no_url"}:
@@ -1305,11 +1356,13 @@ async def _process_papers_concurrently(
         selected_count=0,
     )
 
-    selected_paper_ids = _assign_deep_read_selection(
+    selected_paper_ids = await _assign_deep_read_selection(
         papers,
         results_by_paper_id,
         paper_runtime_statuses,
         deep_read_limit,
+        topic=topic,
+        llm=llm,
     )
 
     # 没有获得全文名额的论文到这里已经完成，立即保存其结构化摘要。
@@ -1500,40 +1553,86 @@ async def _finalize_paper_result(
     _set_paper_runtime_status(
         paper_runtime_statuses,
         result.paper,
-        status="failed" if save_error or completion_status == "failed" else "completed",
+        # 中文注释：软丢弃的论文卡片状态保持 discarded，不伪装成 completed；
+        # 保存出错或阶段失败才是 failed，其余为 completed。
+        status=(
+            "failed"
+            if save_error or completion_status == "failed"
+            else "discarded"
+            if completion_status == "discarded"
+            else "completed"
+        ),
         current_stage="paper_artifact_ready",
         result=result,
         error_message=save_error or completion_error,
     )
 
 
-def _assign_deep_read_selection(
+# 中文说明：保底回捞阈值——判相关的论文少于这个数时，从软丢弃池按顺序回捞，
+# 避免窄主题下因误判导致最终报告空壳。
+MIN_USABLE_PAPERS = 3
+
+
+async def _assign_deep_read_selection(
     papers: list[PaperDocument],
     results_by_paper_id: dict[str, PaperReadResult],
     paper_runtime_statuses: dict[str, JsonObject],
     deep_read_limit: int,
+    *,
+    topic: str,
+    llm: ProviderSnapshot | None,
 ) -> set[str]:
-    """按固定分数和稳定排序规则，为全部论文统一分配全文名额。"""
+    """摘要阅读后统一分配去留与全文精读名额。
+
+    中文注释：新版不再按分数排序，而是三步：
+    1. 模型判无关（relevant=False）→ 软丢弃（标记 discarded，不进下游，笔记照常落盘）；
+    2. 判相关的论文少于保底数量 → 从丢弃池按候选池顺序回捞，标注"相关性存疑"；
+    3. 相关论文超过精读预算 → 触发一次批量比较，由模型在同一上下文里挑出精读对象；
+       不超过预算则全部精读，零新增调用。
+    """
 
     candidates: list[tuple[int, PaperReadResult]] = []
+    discarded_items: list[tuple[int, PaperReadResult]] = []
     for position, paper in enumerate(papers, start=1):
         result = results_by_paper_id[paper.id]
-        # 中文说明：无论模型是否漏字段，先把三个维度补齐，再由固定表计算 0 到 100 分。
-        result.relevance.match_levels = normalize_match_levels(result.relevance.match_levels)
-        result.relevance.score = calculate_relevance_score(result.relevance.match_levels)
-        if result.relevance.match_levels["research_question"] == "not_match":
-            result.relevance.status = "not_eligible"
-            result.full_text = FullTextStatus(status="not_requested", reason="核心研究问题不匹配，不参与全文精读")
+        if not result.relevance.relevant:
+            # 软丢弃：只标记，不删除对象；note.json 会带 discarded 字段照常落盘。
+            result.relevance.discarded = True
+            result.relevance.status = "discarded"
+            result.full_text = FullTextStatus(status="not_requested", reason="判定与主题无关，已丢弃")
+            discarded_items.append((position, result))
             continue
         candidates.append((position, result))
 
-    # 中文说明：position 保留检索节点的原始顺序；位置也相同的极少数情况再按论文编号排序。
-    candidates.sort(key=lambda item: (-item[1].relevance.score, item[0], item[1].paper.id))
-    selected_paper_ids = {result.paper.id for _, result in candidates[:deep_read_limit]}
+    # 保底回捞：可用论文太少时按候选池顺序从丢弃池捞回，标注存疑。
+    if len(candidates) < MIN_USABLE_PAPERS and discarded_items:
+        for position, result in list(discarded_items):
+            if len(candidates) >= MIN_USABLE_PAPERS:
+                break
+            discarded_items.remove((position, result))
+            result.relevance.discarded = False
+            result.relevance.uncertain = True
+            result.relevance.status = "pending"
+            result.relevance.reason = f"{result.relevance.reason}；回捞保留，相关性存疑"
+            result.full_text = FullTextStatus(status="not_requested", reason="")
+            candidates.append((position, result))
+
+    # 精读名额分配：预算内全取；超预算时一次批量比较选择。
+    candidate_ids = [result.paper.id for _, result in candidates]
+    if len(candidates) <= deep_read_limit:
+        selected_paper_ids = set(candidate_ids)
+    else:
+        selected_paper_ids = await _select_deep_read_by_llm(
+            topic=topic,
+            candidates=[result for _, result in candidates],
+            limit=deep_read_limit,
+            llm=llm,
+        )
+        # 模型比较失败时 _select_deep_read_by_llm 已回退为池内顺序取前 N。
     for _, result in candidates:
         if result.paper.id not in selected_paper_ids:
             result.relevance.status = "not_selected_due_to_limit"
-            result.full_text = FullTextStatus(status="not_requested", reason="全文精读名额已分配给总分更高的论文")
+            result.full_text = FullTextStatus(status="not_requested", reason="全文精读名额已分配给更贴近主题的论文")
             continue
         result.relevance.status = "selected_for_deep_read"
         current = dict(paper_runtime_statuses.get(result.paper.id) or {})
@@ -1548,6 +1647,73 @@ def _assign_deep_read_selection(
                 deep_read_reserved=True,
             )
     return selected_paper_ids
+
+
+async def _select_deep_read_by_llm(
+    *,
+    topic: str,
+    candidates: list[PaperReadResult],
+    limit: int,
+    llm: ProviderSnapshot | None,
+) -> set[str]:
+    """相关论文超出精读预算时，让模型在同一上下文里比较并挑出精读对象。
+
+    中文注释：这是"一次批量比较"而不是"逐篇打分"——所有候选放进同一个请求，
+    模型可以直接对比它们的相对价值。任何环节失败都回退为按候选池顺序取前 N 篇，
+    保证精读流程不会因为比较调用出错而中断。
+    """
+
+    fallback_ids = {result.paper.id for result in candidates[:limit]}
+    if llm is None:
+        return fallback_ids
+    lines = []
+    for index, result in enumerate(candidates):
+        summary = (result.note.short_summary or "").strip() or (result.paper.abstract or "").strip()[:150]
+        lines.append(f"[{index}] {result.paper.title}\n    {summary}")
+    user_prompt = (
+        f"用户研究主题：{topic}\n\n"
+        f"精读名额：{limit}\n\n以下是全部相关论文的编号、标题和摘要要点：\n\n" + "\n".join(lines)
+    )
+    messages: list[JsonObject] = [
+        {"role": "system", "content": READ_DEEP_READ_SELECTION_PROMPT},
+        {"role": "user", "content": user_prompt},
+    ]
+    try:
+        content = await _call_read_llm(llm.provider, messages)
+    except Exception:
+        # 比较调用失败时按池内顺序回退，宁可按原排序精读，也不中断流程。
+        return fallback_ids
+    match = re.search(r"\{[\s\S]*\}", content)
+    if not match:
+        return fallback_ids
+    try:
+        payload = json.loads(match.group())
+    except json.JSONDecodeError:
+        return fallback_ids
+    selected_indices = payload.get("selected") if isinstance(payload, dict) else None
+    if not isinstance(selected_indices, list):
+        return fallback_ids
+    selected_ids = {
+        candidates[index].paper.id
+        for index in selected_indices
+        if isinstance(index, int) and 0 <= index < len(candidates)
+    }
+    if not selected_ids:
+        return fallback_ids
+    return set(list(selected_ids)[:limit])
+
+
+async def _call_read_llm(provider: Any, messages: list[JsonObject]) -> str:
+    """调用阅读侧模型并取回文本内容，优先走异步 chat 接口。"""
+
+    chat = getattr(provider, "chat", None)
+    if callable(chat):
+        result = chat(messages, temperature=0)
+        if inspect.isawaitable(result):
+            result = await result
+        return getattr(result, "content", "") or ""
+    result = await asyncio.to_thread(provider.chat_with_retry, messages, temperature=0)
+    return getattr(result, "content", "") or ""
 
 
 def _deep_read_needs_processing(result: PaperReadResult) -> bool:
@@ -1891,8 +2057,11 @@ async def _read_one_paper(
     try:
         # 中文注释：先提取全文结构化信息，再回读原文做证据验证；验证不通过的
         # 字段会反馈给模型重提，最多按配置重试几次。模型不可用仍会抛错走恢复现场。
+        # 提取提示词里同时要求模型判断全文是否真的与主题相关，明显无关时返回
+        # irrelevant 标记，这里就地止损，跳过后续提取核查（只中断本篇）。
         extraction_record, verification = await _extract_and_verify(
             paper,
+            topic=topic,
             chunks_path=chunk_build.chunks_path,
             markdown_path=markdown_path,
             llm=llm,
@@ -1909,6 +2078,17 @@ async def _read_one_paper(
         result.extraction = empty_extraction()
         result.warnings.append(f"全文结构化摘要生成失败：{exc}")
     else:
+        if isinstance(extraction_record, dict) and extraction_record.get("status") == "irrelevant":
+            # 中文注释：⑤ 全文止损——提取模型通读全文后判定与主题无关，
+            # 本篇直接软丢弃，跳过核查；其他论文的精读照常进行，不做级联停批。
+            reason = str(extraction_record.get("reason") or "全文判定与主题无关")
+            result.relevance.relevant = False
+            result.relevance.discarded = True
+            result.relevance.reason = f"全文阶段：{reason}"
+            result.relevance.status = "discarded"
+            result.full_text.status = "chunks_saved"
+            result.full_text.reason = ""
+            return result
         result.extraction = extraction_payload(extraction_record)
         result.note = _full_text_note_from_extraction(result.extraction)
         result.verification = verification
@@ -2029,6 +2209,7 @@ def _full_text_note_from_extraction(extraction: JsonObject) -> ReadNote:
 async def _extract_and_verify(
     paper: PaperDocument,
     *,
+    topic: str,
     chunks_path: Path,
     markdown_path: Path,
     llm: ProviderSnapshot,
@@ -2038,7 +2219,8 @@ async def _extract_and_verify(
     """提取全文结构化信息，再回读原文做证据验证，验证不通过会按配置重提。
 
     返回 (extraction_record, verification) 两个结果：
-    - extraction_record：和原来一样是 extraction.json 的记录；
+    - extraction_record：和原来一样是 extraction.json 的记录；模型通读全文后
+      判定与主题无关时，返回带 status="irrelevant" 的记录，调用方据此止损；
     - verification：证据验证结论，启用验证时才非空。
 
     中文注释：第一次提取用缓存，验证不通过后的重提才强制重新提取，并把
@@ -2058,10 +2240,14 @@ async def _extract_and_verify(
             paper,
             chunks_path=chunks_path,
             llm=llm,
+            topic=topic,
             runtime_resources=runtime_resources,
             force=attempt > 0,
             feedback=feedback,
         )
+        # 中文注释：全文阶段止损判定优先于核查——无关论文不再浪费核查调用。
+        if isinstance(extraction_record, dict) and extraction_record.get("status") == "irrelevant":
+            return extraction_record, {}
         if not verify_enabled:
             return extraction_record, {}
         extraction = extraction_payload(extraction_record)
@@ -2212,7 +2398,9 @@ def _restore_paper_runtime_statuses(
             **statuses.get(result.paper.id, _default_paper_runtime_status(result.paper)),
             "paper_id": result.paper.id,
             "paper_title": result.paper.title,
-            "status": "completed",
+            # 中文注释：恢复时按论文实际完成状态回填，被软丢弃的论文保持 discarded，
+            # 不能统一标成 completed，否则前端卡片和后续判断都会出错。
+            "status": _paper_completion_runtime_status(result),
             "current_stage": "paper_completed",
             "source_path": result.full_text.source_path,
             "markdown_path": result.full_text.markdown_path,

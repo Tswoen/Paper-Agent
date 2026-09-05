@@ -289,8 +289,9 @@ def _paper_analysis_input(item: JsonObject) -> JsonObject:
             "evidence_level": note.get("evidence_level") or "",
         },
         "relevance": {
-            "match_levels": dict(relevance.get("match_levels") or {}),
-            "score": relevance.get("score", 0),
+            # 中文说明：新版相关性结构是二元判断 {relevant, reason}，不再有分数和三维等级。
+            "relevant": relevance.get("relevant", True),
+            "reason": relevance.get("reason") or "",
             "status": relevance.get("status") or "",
         },
         "full_text_status": full_text.get("status") or "",

@@ -289,8 +289,14 @@ def _load_session_read_results(state: State) -> list[JsonObject]:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError):
             continue
-        if isinstance(payload, dict):
-            results.append(payload)
+        if not isinstance(payload, dict):
+            continue
+        # 中文注释：被软丢弃的论文笔记照常落盘用于审计，但写作节点不能引用它们，
+        # 否则前面丢弃的无关论文会从这里"复活"进入正文和参考文献。
+        relevance = payload.get("relevance")
+        if isinstance(relevance, dict) and relevance.get("discarded"):
+            continue
+        results.append(payload)
     return results
 
 

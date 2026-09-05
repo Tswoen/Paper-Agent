@@ -284,7 +284,9 @@ _STAGE_DISPLAY: dict[tuple[str, str], RuntimeStageDisplay] = {
     ),
 }
 
-_DONE_STATUSES = {"completed", "failed", "cancelled", "skipped"}
+# 中文说明：discarded 表示论文被 AI 判定与主题无关而软丢弃，是终态之一，
+# 卡片显示"已丢弃"并携带丢弃理由。
+_DONE_STATUSES = {"completed", "failed", "cancelled", "skipped", "discarded"}
 
 
 @dataclass(slots=True)
@@ -440,8 +442,8 @@ class WorkflowNodeReporter:
         stage = _normalize_stage(extra.get("stage")) or "step"
         stage_display = self._stage_display(stage)
         # 中文注释：阶段默认状态只适合成功场景。
-        # 如果当前已经明确失败或取消，就保留真实状态，避免前端误显示成已完成。
-        if status in {"failed", "cancelled", "skipped"}:
+        # 如果当前已经明确失败、取消或丢弃，就保留真实状态，避免前端误显示成已完成。
+        if status in {"failed", "cancelled", "skipped", "discarded"}:
             resolved_status = status
         else:
             resolved_status = stage_display.status or status

@@ -10,7 +10,12 @@ from typing import Any
 
 from src.llm import ModelConfig, ProviderSnapshot, SystemConfig, make_provider
 from src.llm.base import LLMResponse
-from src.models.read_models import ReadNote, ReadRelevance, normalize_match_levels
+# DEPRECATED: 2026-09-07
+# 原因：三维等级 + 评分表退役，相关性判断改为模型直接输出二元 {relevant, reason}。
+# 替代方案：不再需要 normalize_match_levels。
+# 计划移除：阅读阶段持续过滤机制稳定运行一段时间后清理
+# from src.models.read_models import ReadNote, ReadRelevance, normalize_match_levels
+from src.models.read_models import ReadNote, ReadRelevance
 from src.paper_retrieval.models import PaperDocument
 
 from .base import AgentContext, AgentSpec, BaseAgent
@@ -221,7 +226,11 @@ class ReadAgent(BaseAgent):
         return payload if isinstance(payload, dict) else None
 
     def _note_from_model(self, payload: JsonObject) -> tuple[ReadNote, ReadRelevance, list[str]]:
-        """把模型 JSON 整理成项目内部使用的阅读笔记和相关性判断。"""
+        """把模型 JSON 整理成项目内部使用的阅读笔记和相关性判断。
+
+        中文注释：新版模型只输出二元结论 relevant + reason（三维分析是它的内部思考，
+        不作为字段）。relevant 缺失或格式不对时按"拿不准判有关"处理，宁可多保留。
+        """
 
         note = ReadNote(
             main_question=self._text_value(payload.get("main_question")),
@@ -233,7 +242,16 @@ class ReadAgent(BaseAgent):
             short_summary=self._text_value(payload.get("short_summary"))[:800],
             evidence_level="abstract",
         )
-        relevance = ReadRelevance(match_levels=normalize_match_levels(payload.get("match_levels")))
+        relevant_value = payload.get("relevant")
+        if isinstance(relevant_value, bool):
+            relevant = relevant_value
+        elif isinstance(relevant_value, str):
+            lowered = relevant_value.strip().lower()
+            # 只有明确写了 false 才判无关，其他情况（缺失、乱码）一律按有关保底。
+            relevant = lowered not in {"false", "no", "0"}
+        else:
+            relevant = True
+        relevance = ReadRelevance(relevant=relevant, reason=self._text_value(payload.get("reason"))[:200])
         return note, relevance, []
 
     def _model_unavailable_message(self, response: LLMResponse) -> str:

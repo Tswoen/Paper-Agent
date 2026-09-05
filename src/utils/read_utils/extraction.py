@@ -62,6 +62,7 @@ async def async_extract_paper_from_chunks(
     *,
     chunks_path: Path,
     llm: ProviderSnapshot,
+    topic: str = "",
     runtime_resources: Any = None,
     force: bool = False,
     feedback: str | None = None,
@@ -71,8 +72,12 @@ async def async_extract_paper_from_chunks(
     中文注释：这里不重新解析 PDF，只读取已经缓存好的 chunk.json。模型必须按
     固定 JSON 字段回答；回答不合格时会抛错，让阅读节点记录失败原因。
 
+    topic 是用户的研究主题：提取前模型会先通读全文判断这篇论文是否真的与
+    主题相关，明显无关（例如跨领域同形词）时返回 status="irrelevant" 的记录，
+    阅读节点据此止损，跳过本篇后续提取与核查。
+
     force=True 时跳过已缓存的 extraction.json，强制重新提取；
-    feedback 会把上一次“哪些字段没通过核查”的提示追加给模型，让它自我修正。
+    feedback 会把上一次"哪些字段没通过核查"的提示追加给模型，让它自我修正。
     """
 
     chunks = await asyncio.to_thread(load_chunks_file, chunks_path)
@@ -85,7 +90,7 @@ async def async_extract_paper_from_chunks(
         return cached
     response = await _call_model(
         llm,
-        _extraction_messages(paper, chunks, feedback=feedback),
+        _extraction_messages(paper, chunks, topic=topic, feedback=feedback),
         runtime_resources=runtime_resources,
     )
     if not response.ok:
@@ -94,8 +99,26 @@ async def async_extract_paper_from_chunks(
     payload = _parse_json_response(response)
     if payload is None:
         raise ValueError("全文提取模型没有返回合法 JSON")
+    # 中文注释：⑤ 全文止损——模型通读全文后判定与主题无关，写入 irrelevant 记录，
+    # 不做六字段提取校验，也不进入证据核查。
+    if isinstance(payload.get("irrelevant"), bool) and payload["irrelevant"]:
+        record: JsonObject = {
+            "schema_version": 2,
+            "paperId": paper.paperId or paper.id,
+            "schema": EXTRACTION_SCHEMA,
+            "extraction": empty_extraction(),
+            "chunks_used": [],
+            "status": "irrelevant",
+            "reason": str(payload.get("reason") or "").strip() or "全文判定与主题无关",
+        }
+        await asyncio.to_thread(
+            output_path.write_text,
+            json.dumps(record, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return record
     extraction = _validate_extraction(payload, valid_chunk_ids=valid_chunk_ids)
-    record: JsonObject = {
+    record = {
         "schema_version": 2,
         "paperId": paper.paperId or paper.id,
         "schema": EXTRACTION_SCHEMA,
@@ -191,21 +214,28 @@ async def _call_model(
         raise RuntimeError(f"全文提取模型调用失败：{exc}") from exc
 
 
-def _extraction_messages(paper: PaperDocument, chunks: list[TextChunk], *, feedback: str | None = None) -> list[JsonObject]:
+def _extraction_messages(paper: PaperDocument, chunks: list[TextChunk], *, topic: str = "", feedback: str | None = None) -> list[JsonObject]:
     """构造全文提取提示词。
 
     中文注释：精读必须阅读同一篇论文的全部正文块，不能只截取开头的一部分。
     发送给模型的每个块只保留 chunkId 和 content，避免页码、相邻块等无关字段
     干扰模型，也减少请求内容。
 
+    topic 用于全文止损判断：模型通读后先确认论文真的与主题相关，再开始提取。
     feedback 是上一次提取结果没通过核查时的反馈，会追加到指令末尾，
     提示模型这次要修正哪些字段。
     """
 
     del paper
-    payload = {"chunks": [{"chunkId": chunk.chunk_id, "content": chunk.content.strip()} for chunk in chunks]}
+    payload = {
+        "用户研究主题": topic,
+        "chunks": [{"chunkId": chunk.chunk_id, "content": chunk.content.strip()} for chunk in chunks],
+    }
     instruction = """你是论文全文阅读助手。只能依据用户提供的 chunks 内容回答，不能猜论文没有写明的信息。
-请严格返回一个 JSON 对象，不要返回 Markdown，不要返回解释文字。
+第一步（相关性检查）：通读全文块，判断这篇论文的实际研究对象是否与"用户研究主题"真正相关。
+主题中的产品名、型号、代号必须整体匹配；仅出现相同字符组合但属于不同领域术语的（例如主题是 "Kimi K3" 大模型产品，论文研究的是代数几何的 "K3 surfaces"），判为无关。
+如果论文与主题明显无关，只输出一个 JSON 对象：{"irrelevant": true, "reason": "一句话说明为什么无关"}，不要输出其他字段。
+第二步（提取）：论文与主题相关时，严格返回一个 JSON 对象，不要返回 Markdown，不要返回解释文字。
 JSON 必须且仅包含 research_topic、research_object、methods、conclusions、contributions、limitations 六个字符串字段。
 每个非空字段都必须在句末或判断后标注来源 chunkId，格式如 [chunkId]，并且只能引用输入中真实存在的 chunkId。
 如果全文没有明确说明某个字段，请把该字段写成空字符串。"""
