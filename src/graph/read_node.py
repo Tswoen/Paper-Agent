@@ -2089,9 +2089,18 @@ async def _read_one_paper(
             result.full_text.status = "chunks_saved"
             result.full_text.reason = ""
             return result
-        result.extraction = extraction_payload(extraction_record)
-        result.note = _full_text_note_from_extraction(result.extraction)
-        result.verification = verification
+        if isinstance(extraction_record, dict) and extraction_record.get("status") == "extraction_failed":
+            # 修复：提取格式违规已在 _extract_and_verify 内重试仍未通过。这里保留摘要阶段
+            # 结果、置空全文提取，并把 verification 落成 skipped_extraction_failed（而非空 {}），
+            # 让"核查因提取失败被跳过"可观测。论文不丢弃，继续走分块入库，与旧 ValueError 路径一致。
+            reason = str(extraction_record.get("reason") or "全文提取未通过格式校验")
+            result.extraction = empty_extraction()
+            result.verification = verification
+            result.warnings.append(f"全文结构化摘要生成失败（已重试）：{reason}")
+        else:
+            result.extraction = extraction_payload(extraction_record)
+            result.note = _full_text_note_from_extraction(result.extraction)
+            result.verification = verification
         if verification:
             _report_progress(
                 reporter,
@@ -2236,15 +2245,35 @@ async def _extract_and_verify(
     extraction_record: JsonObject | None = None
     verification: JsonObject = {}
     for attempt in range(max_retries + 1):
-        extraction_record = await async_extract_paper_from_chunks(
-            paper,
-            chunks_path=chunks_path,
-            llm=llm,
-            topic=topic,
-            runtime_resources=runtime_resources,
-            force=attempt > 0,
-            feedback=feedback,
-        )
+        try:
+            extraction_record = await async_extract_paper_from_chunks(
+                paper,
+                chunks_path=chunks_path,
+                llm=llm,
+                topic=topic,
+                runtime_resources=runtime_resources,
+                force=attempt > 0,
+                feedback=feedback,
+            )
+        except ValueError as exc:
+            # 修复：提取阶段的格式违规（缺引用、字段不合规等）以前会直接冒泡到调用方，
+            # 被吞成空 extraction + 一条笼统 warning，重试机制一次都跑不到（见 EVAL_NOTES.md 第六节）。
+            # 现在把它纳入重试：把具体错误通过 feedback 回灌给模型，下一轮针对性修正。
+            # 注意：只捕获 ValueError（格式问题）；RuntimeError（模型不可用）不在此捕获，
+            #       继续冒泡到调用方转 ReadModelUnavailableError，走 checkpoint 中断恢复。
+            if attempt >= max_retries:
+                # 重试耗尽仍不合格：返回结构化失败，让调用方能区分"提取失败"与"核查跳过"，
+                # 不再静默留空 verification。
+                return (
+                    {"status": "extraction_failed", "reason": str(exc)},
+                    {"status": "skipped_extraction_failed", "passed": True, "items": [], "reason": str(exc)},
+                )
+            feedback = (
+                f"上一次提取未通过格式校验：{exc}。"
+                "请为每个非空字段在句末标注输入中真实存在的 [chunkId]，"
+                "并且只输出 research_topic、research_object、methods、conclusions、contributions、limitations 六个字段的 JSON。"
+            )
+            continue
         # 中文注释：全文阶段止损判定优先于核查——无关论文不再浪费核查调用。
         if isinstance(extraction_record, dict) and extraction_record.get("status") == "irrelevant":
             return extraction_record, {}
