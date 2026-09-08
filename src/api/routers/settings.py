@@ -11,6 +11,7 @@ from src.services.settings import (
     async_model_connectivity_payload,
     async_provider_models_payload,
     create_or_update_agent,
+    delete_agent_settings,
     delete_provider_settings,
     settings_payload,
     update_agent_settings,
@@ -80,6 +81,15 @@ def create_settings_router(repo: SettingsRepository) -> APIRouter:
 
         try:
             return create_or_update_agent(repo, name, await _json_body(request))
+        except SettingsError as exc:
+            return _settings_error_response(exc)
+
+    @router.delete("/agents/{name}")
+    async def remove_agent(name: str):
+        """删除一个 agent 配置（default_agent 是运行必需的默认档位，不允许删除）。"""
+
+        try:
+            return delete_agent_settings(repo, name)
         except SettingsError as exc:
             return _settings_error_response(exc)
 

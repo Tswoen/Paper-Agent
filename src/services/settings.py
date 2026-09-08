@@ -177,6 +177,27 @@ def delete_provider_settings(repo: SettingsRepository, name: str) -> JsonObject:
     return settings_payload(repo)
 
 
+def delete_agent_settings(repo: SettingsRepository, name: str) -> JsonObject:
+    """删除一个智能体配置。
+
+    中文说明：
+    default_agent 是所有节点运行时的默认兜底档位，删掉后配置就解析不出来、任务也跑不起来，
+    所以这类智能体不允许删除。其它智能体（比如 luna_agent、solar_agent）删掉后会自动
+    回退到 default_agent，可以放心删除。
+    """
+
+    data = _normalized_config(repo.load())
+    if name not in _agents(data):
+        raise SettingsError(f"unknown agent: {name}", 404)
+    if name == "default_agent":
+        raise SettingsError(
+            "default_agent 是系统运行必需的默认档位（所有节点都用它兜底），不能删除。"
+        )
+    del _agents(data)[name]
+    repo.save(data)
+    return settings_payload(repo)
+
+
 def update_embedding_profile(repo: SettingsRepository, name: str, patch: JsonObject) -> JsonObject:
     """更新嵌入模型配置。"""
 

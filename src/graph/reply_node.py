@@ -84,11 +84,12 @@ def run_compose_reply_node():
                 relevance = dict(result.get("relevance") or {})
                 note = dict(result.get("note") or {})
                 full_text = dict(result.get("full_text") or {})
-                selection_status = relevance.get("status") or "not_eligible"
-                score = relevance.get("score") if relevance.get("score") is not None else "-"
+                selection_status = relevance.get("status") or "pending"
+                # 中文说明：相关性打分已退役，这里改为展示 AI 的一句话判断理由。
+                reason = str(relevance.get("reason") or "").strip() or "-"
                 short_summary = str(note.get("short_summary") or "暂无可用摘要笔记")
                 lines.append(
-                    f"{index}. {paper.title} | 匹配分数 {score} | {selection_status} | 全文状态："
+                    f"{index}. {paper.title} | 判断：{reason} | {selection_status} | 全文状态："
                     f"{full_text.get('status') or 'not_requested'}\n   {short_summary}"
                 )
             assistant_text = "\n".join(lines)
@@ -134,7 +135,8 @@ def run_compose_reply_node():
         return State(
             request=state["request"],
             search_results=papers,
-            search_scores=list(state.get("search_scores") or []),
+            # DEPRECATED: 2026-08-22 随关键词打分下线，回复节点不再透传打分明细。
+            # search_scores=list(state.get("search_scores") or []),
             search_summary=summary,
             search_artifact_refs=artifact_refs,
             read_results=read_results,

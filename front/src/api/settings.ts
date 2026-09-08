@@ -56,6 +56,12 @@ export function saveAgent(
   });
 }
 
+export function deleteAgent(name: string): Promise<SettingsPayload> {
+  return request<SettingsPayload>(`/api/settings/agents/${encodeURIComponent(name)}`, {
+    method: "DELETE",
+  });
+}
+
 export function saveEmbeddingProfile(
   name: string,
   payload: JsonObject,

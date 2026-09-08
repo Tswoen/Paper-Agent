@@ -18,7 +18,11 @@ class State(TypedDict, total=False):
 
     request: ReviewRequest
     search_results: list[PaperDocument]
-    search_scores: list[JsonObject]
+    # DEPRECATED: 2026-08-22
+    # 原因：关键词打分逻辑已下线，状态里不再携带打分明细。
+    # 替代方案：无（打分明细没有下游业务读取）。
+    # 计划移除：语义过滤稳定运行一段时间后清理。
+    # search_scores: list[JsonObject]
     search_summary: JsonObject
     search_output: JsonObject
     search_artifact_refs: list[JsonObject]
@@ -60,10 +64,11 @@ class SearchNodeSink(Protocol):
     def persist(
         self,
         *,
-        topic: str,
+        topic: Any,
         intent: Any,
         raw_papers: list[PaperDocument],
-        scored_papers: list[JsonObject],
+        # DEPRECATED: 2026-08-22 随关键词打分下线，写盘协议不再包含打分明细。
+        # scored_papers: list[JsonObject],
         selected_papers: list[PaperDocument],
         search_summary: JsonObject,
         search_output: JsonObject,
