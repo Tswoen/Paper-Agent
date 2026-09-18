@@ -61,6 +61,14 @@ def create_app(
     config = config or GatewayConfig()
     message_handler = message_handler or build_paper_workflow_message_handler(sessions_repo)
     run_service = SessionRunService(repo=sessions_repo, message_handler=message_handler)
+    # 后台任务句柄只存在于进程内。应用重启后先清理数据库中的孤儿运行标记，
+    # 否则这些会话会永久被 start_run 的并发保护拒绝。
+    recovered_sessions = run_service.recover_interrupted_runs()
+    if recovered_sessions:
+        logger.warning(
+            "应用启动时恢复了中断的后台会话",
+            extra={"recovered_session_count": len(recovered_sessions)},
+        )
 
     app = FastAPI(title="Papers Agents API")
     app.include_router(create_settings_router(settings_repo))
