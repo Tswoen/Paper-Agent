@@ -73,6 +73,17 @@ class SessionRunBroker:
         with self._lock:
             return self._runs.get(run_id)
 
+    def has_active_session(self, session_key: str) -> bool:
+        """判断当前进程是否仍持有指定会话的活动 run。"""
+
+        with self._lock:
+            return any(
+                state.session_key == session_key
+                and not state.closed
+                and (state.task is None or not state.task.done())
+                for state in self._runs.values()
+            )
+
     def cancellation_for(self, run_id: str) -> WorkflowCancellation:
         """返回指定 run 的停止控制对象，供工作流运行时使用。"""
 
@@ -182,6 +193,60 @@ class SessionRunService:
         self.repo = repo
         self.message_handler = message_handler
         self.broker = broker or SessionRunBroker()
+
+    def recover_interrupted_runs(self) -> list[str]:
+        """清理进程重启后遗留的运行标记，并留下可审计的中断事件。
+
+        后台任务只存在于当前 Python 进程内，而 ``run_started_at`` 会持久化到
+        会话仓储。新进程启动时，仓储中仍标记为 running 的会话已经不可能自行
+        完成；若不对账，后续请求会被 ``session is already running`` 永久阻塞。
+
+        该方法会跳过当前 broker 确实持有的活动任务，因此也可以安全地重复调用。
+        非 running 状态只清理异常残留的时间戳，不会覆盖已经完成或取消的结果。
+        """
+
+        recovered: list[str] = []
+        for summary in self.repo.list():
+            session_key = str(summary.get("key") or "").strip()
+            previous_status = str(summary.get("status") or "").strip()
+            run_started_at = summary.get("run_started_at")
+            if not session_key or (previous_status != "running" and not run_started_at):
+                continue
+            if self.broker.has_active_session(session_key):
+                continue
+
+            recovered_at = utc_now()
+            was_running = previous_status == "running"
+            if was_running:
+                self.repo.set_status(session_key, "failed")
+            self.repo.set_run_started_at(session_key, None)
+            self.repo.append_event(
+                session_key,
+                "run_interrupted" if was_running else "run_marker_reconciled",
+                content=(
+                    "后台任务因服务进程中断而停止，可从最近的恢复现场继续执行"
+                    if was_running
+                    else "已清理与会话终态不一致的运行标记"
+                ),
+                metadata={
+                    "status": "failed" if was_running else previous_status,
+                    "previous_status": previous_status,
+                    "run_started_at": run_started_at,
+                    "recovery_status": "process_restarted",
+                    "recovered_at": recovered_at,
+                },
+                created_at=recovered_at,
+            )
+            recovered.append(session_key)
+            logger.warning(
+                "已对账服务重启后遗留的会话运行标记",
+                extra={
+                    "session_key": session_key,
+                    "previous_status": previous_status,
+                    "run_started_at": run_started_at,
+                },
+            )
+        return recovered
 
     async def start_run(self, session_key: str, body: JsonObject | None = None) -> JsonObject:
         """创建一次新的后台运行，并立即返回 SSE 地址。"""
