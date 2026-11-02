@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from pathlib import Path
@@ -17,6 +18,11 @@ from .Prompts import WRITING_ABSTRACT_SYSTEM_PROMPT, WRITING_AGENT_SYSTEM_PROMPT
 
 
 WritingAction = Literal["tool", "draft"]
+
+# 全文库检索工具默认返回的片段数和单个片段的最大展示长度。
+_CHUNK_SEARCH_TOP_K = 5
+_CHUNK_SEARCH_EXCERPT_CHARS = 1200
+_QUERY_TERM_PATTERN = re.compile(r"[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*|[\u4e00-\u9fff]+")
 
 
 class SectionLoopState(TypedDict, total=False):
@@ -283,7 +289,7 @@ class WritingAgent(BaseAgent):
     async def run_tool(self, state: SectionLoopState) -> SectionLoopState:
         """执行模型请求的工具，并把结果放回循环状态。"""
 
-        result = execute_writing_tool(
+        result = await execute_writing_tool(
             tool_name=str(state.get("tool_name") or ""),
             arguments=dict(state.get("tool_arguments") or {}),
             read_results=list(state.get("read_results") or []),
@@ -611,18 +617,227 @@ def _replace_chunk_citations(content: str, chunk_to_paper: dict[str, str]) -> st
     return citation_pattern.sub(replace, content)
 
 
-def get_chunk_by_embed(query: str):
-    """通过向量检索全知识库中的相关 chunk。
+async def get_chunk_by_embed(
+    query: str,
+    *,
+    cache_dir: str | Path = "data/paper_cache",
+    top_k: int = _CHUNK_SEARCH_TOP_K,
+) -> JsonObject:
+    """在全知识库中检索与 query 相关的正文片段。
 
     中文注释：
-    需求明确说这个工具先提供给 Agent，但暂时不实现，所以这里保留 pass。
-    后续接入向量库时，只需要替换这个函数内部逻辑即可。
+    优先使用已配置的 embedding 模型和 Chroma 向量库；如果向量库未建好、
+    embedding 配置不可用或没有命中，则自动回退到本地 chunk.json 的关键词检索。
+    这样默认关闭全文向量化的环境也能正常使用这个写作工具。
     """
 
-    pass
+    clean_query = str(query or "").strip()
+    if not clean_query:
+        return {"query": "", "mode": "none", "results": [], "message": "query is empty"}
+
+    resolved_top_k = max(1, min(int(top_k or _CHUNK_SEARCH_TOP_K), 20))
+    vector_results = await _vector_search_chunks(clean_query, top_k=resolved_top_k)
+    if vector_results:
+        return {"query": clean_query, "mode": "vector", "results": vector_results}
+
+    keyword_results = await asyncio.to_thread(
+        _keyword_search_chunks,
+        clean_query,
+        Path(cache_dir),
+        resolved_top_k,
+    )
+    if keyword_results:
+        return {"query": clean_query, "mode": "keyword", "results": keyword_results}
+
+    return {
+        "query": clean_query,
+        "mode": "none",
+        "results": [],
+        "message": "未找到相关正文片段",
+    }
 
 
-def execute_writing_tool(
+async def _vector_search_chunks(query: str, *, top_k: int) -> list[JsonObject]:
+    """优先走 embedding + Chroma；任何环节不可用时返回空列表交给关键词回退。"""
+
+    model_path = Path("config/model.json")
+    if not model_path.is_file():
+        return []
+    snapshot: ProviderSnapshot | None = None
+    try:
+        system = SystemConfig.load()
+        if not Path(system.read.vector_store_path).is_dir():
+            return []
+        config = ModelConfig.from_dict(
+            json.loads(model_path.read_text(encoding="utf-8")),
+            system,
+        )
+        profile = config.resolve_embedding_profile()
+        snapshot = make_provider(
+            config,
+            embedding_profile_name=config.default_embedding_profile,
+            timeout_s=float(max(1, system.read.connect_timeout_seconds)),
+        )
+        response = await snapshot.provider.embed([query], dimensions=profile.dimensions)
+        if not response.ok or not response.embeddings or not response.embeddings[0]:
+            return []
+        embedding = [float(value) for value in response.embeddings[0]]
+        rows = await asyncio.to_thread(
+            _query_vector_store,
+            system.read.vector_store_path,
+            system.read.vector_store_collection,
+            embedding,
+            top_k,
+        )
+        results: list[JsonObject] = []
+        for row in rows:
+            payload = _vector_result_payload(row)
+            if payload is not None:
+                results.append(payload)
+        return results
+    except Exception:
+        # 工具调用失败不应中断写作循环，直接回退到本地缓存检索。
+        return []
+    finally:
+        if snapshot is not None:
+            try:
+                await snapshot.aclose()
+            except Exception:
+                pass
+
+
+def _query_vector_store(
+    vector_store_path: str | Path,
+    collection_name: str,
+    embedding: list[float],
+    top_k: int,
+) -> list[Any]:
+    """在本地 Chroma 中按向量查询片段，并把连接关闭放在同一线程里。"""
+
+    from src.repositories.chroma.vector_store import make_chroma_store
+
+    store = make_chroma_store(vector_store_path, collection_name)
+    try:
+        return store.query_by_embedding(embedding, top_k=top_k)
+    finally:
+        store.close()
+
+
+def _vector_result_payload(row: Any) -> JsonObject | None:
+    """把 Chroma 查询结果转换成写作 Agent 可读的稳定结构。"""
+
+    metadata = dict(getattr(row, "metadata", {}) or {})
+    content = str(getattr(row, "document", "") or metadata.get("content") or "").strip()
+    if not content:
+        return None
+    return {
+        "paperId": str(metadata.get("paperId") or metadata.get("paper_id") or "").strip(),
+        "chunkId": str(getattr(row, "id", "") or metadata.get("chunk_id") or "").strip(),
+        "title": str(metadata.get("title") or "").strip(),
+        "distance": getattr(row, "distance", None),
+        "content": _clip_excerpt(content, _CHUNK_SEARCH_EXCERPT_CHARS),
+        "source": "vector",
+    }
+
+
+def _keyword_search_chunks(query: str, cache_dir: Path, top_k: int) -> list[JsonObject]:
+    """扫描论文缓存的 chunk.json，用关键词覆盖度做兜底检索。"""
+
+    if not cache_dir.is_dir():
+        return []
+    terms = _query_terms(query)
+    if not terms:
+        return []
+
+    scored: list[tuple[float, TextChunk, str]] = []
+    for paper_dir in cache_dir.iterdir():
+        if not paper_dir.is_dir():
+            continue
+        chunks_path = paper_dir / "chunk.json"
+        if not chunks_path.is_file():
+            continue
+        title = _read_cached_title(paper_dir)
+        for chunk in load_chunks_file(chunks_path):
+            score = _keyword_score(chunk.content, title, terms)
+            if score > 0:
+                scored.append((score, chunk, title))
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    results: list[JsonObject] = []
+    seen: set[str] = set()
+    for score, chunk, title in scored:
+        if chunk.chunk_id in seen:
+            continue
+        seen.add(chunk.chunk_id)
+        results.append(
+            {
+                "paperId": chunk.paperId,
+                "chunkId": chunk.chunk_id,
+                "title": title,
+                "score": round(score, 3),
+                "content": _clip_excerpt(chunk.content, _CHUNK_SEARCH_EXCERPT_CHARS),
+                "source": "keyword",
+            }
+        )
+        if len(results) >= top_k:
+            break
+    return results
+
+
+def _query_terms(query: str) -> list[str]:
+    """把查询拆成英文词和中文 2/3 字片段，并保持原顺序去重。"""
+
+    terms: list[str] = []
+    for raw in _QUERY_TERM_PATTERN.findall(query.lower()):
+        candidates = [raw]
+        if re.fullmatch(r"[\u4e00-\u9fff]+", raw):
+            for size in (2, 3):
+                candidates.extend(raw[index : index + size] for index in range(len(raw) - size + 1))
+        for candidate in candidates:
+            if candidate and candidate not in terms:
+                terms.append(candidate)
+    return terms
+
+
+def _keyword_score(content: str, title: str, terms: list[str]) -> float:
+    """按词频和标题命中给片段打分，分越高越可能是需要的证据。"""
+
+    haystack = str(content or "").lower()
+    title_text = str(title or "").lower()
+    score = 0.0
+    for term in terms:
+        hits = haystack.count(term)
+        if not hits:
+            continue
+        score += 1.0 + min(hits, 3) * 0.5
+        if term in title_text:
+            score += 1.5
+    return score
+
+
+def _read_cached_title(paper_dir: Path) -> str:
+    """从论文缓存元数据里读取标题，读不到时返回空字符串。"""
+
+    try:
+        payload = json.loads((paper_dir / "metadata.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    paper = payload.get("paper") if isinstance(payload.get("paper"), dict) else {}
+    return str(paper.get("title") or payload.get("title") or "").strip()
+
+
+def _clip_excerpt(text: str, limit: int) -> str:
+    """压缩空白并截断过长的正文片段。"""
+
+    compact = " ".join(str(text or "").split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 3].rstrip() + "..."
+
+
+async def execute_writing_tool(
     *,
     tool_name: str,
     arguments: JsonObject,
@@ -651,8 +866,8 @@ def execute_writing_tool(
         return {"tool": tool_name, "arguments": {"requests": requests}, "result": search_section(requests, cache_dir=cache_dir)}
     if tool_name == "get_chunk_by_embed":
         query = str(arguments.get("query") or "").strip()
-        result = get_chunk_by_embed(query)
-        return {"tool": tool_name, "arguments": {"query": query}, "result": result, "message": "get_chunk_by_embed 暂未实现"}
+        result = await get_chunk_by_embed(query, cache_dir=cache_dir)
+        return {"tool": tool_name, "arguments": {"query": query}, "result": result}
     return {"tool": tool_name, "arguments": arguments, "result": None, "message": "未知工具，未执行"}
 
 
@@ -706,7 +921,7 @@ def _write_messages(state: SectionLoopState) -> list[JsonObject]:
             "可用工具": [
                 "get_extraction(List[paperId])：获取论文结构化摘要",
                 "search_section(List[{paperId, List[chunkId]}])：按 chunkId 获取论文原文片段",
-                "get_chunk_by_embed(query)：通过向量检索相关 chunk，当前暂未实现",
+                "get_chunk_by_embed(query)：在全文库中检索相关 chunk（优先向量，未配置时回退关键词）",
             ],
         },
         ensure_ascii=False,
