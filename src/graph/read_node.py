@@ -802,7 +802,7 @@ def _full_text_from_payload(value: Any) -> FullTextStatus:
         source_path=_optional_text(payload.get("source_path")),
         markdown_path=_optional_text(payload.get("markdown_path")),
         page_count=_optional_int(payload.get("page_count")),
-        chunk_count=_score_value(payload.get("chunk_count")),
+        chunk_count=_non_negative_int(payload.get("chunk_count")),
     )
 
 
@@ -1296,11 +1296,11 @@ def _string_list(value: Any) -> list[str]:
     return [item.strip() for item in value if isinstance(item, str) and item.strip()]
 
 
-def _score_value(value: Any) -> int:
-    """把模型相关性分数限制到 0 到 100，异常值统一当作零分。"""
+def _non_negative_int(value: Any) -> int:
+    """把数量字段恢复为非负整数，异常值统一当作零。"""
 
     try:
-        return max(0, min(100, int(value)))
+        return max(0, int(value))
     except (TypeError, ValueError):
         return 0
 
