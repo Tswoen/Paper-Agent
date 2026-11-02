@@ -1,6 +1,9 @@
 import unittest
+from unittest.mock import patch
 
 from src.llm import ModelConfig, StreamCallbacks, make_provider
+from src.llm.openai_compat import OpenAICompatProvider
+from src.llm.registry import PROVIDERS
 
 
 class _Create:
@@ -71,6 +74,25 @@ class LLMAdaptersTest(unittest.IsolatedAsyncioTestCase):
         kwargs = client.calls[0]
         self.assertEqual(kwargs["system"], "be brief")
         self.assertEqual(kwargs["tools"][0]["input_schema"], {"type": "object"})
+
+    def test_openai_compat_disables_sdk_level_retries(self):
+        """SDK 不应在基类重试之上再叠加一套重试。"""
+
+        captured = {}
+
+        class FakeAsyncOpenAI:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        with patch("openai.AsyncOpenAI", FakeAsyncOpenAI):
+            OpenAICompatProvider(
+                spec=PROVIDERS["openai"],
+                model="gpt-4o-mini",
+                api_key="test-key",
+                api_base="https://api.openai.com/v1",
+            )
+
+        self.assertEqual(captured["max_retries"], 0)
 
     def test_anthropic_compat_accepts_custom_base(self):
         config = ModelConfig.from_dict(
