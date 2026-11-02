@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -188,11 +188,27 @@ def _mount_frontend(app: FastAPI) -> None:
     async def front_routes(full_path: str) -> FileResponse:
         """为前端静态文件与 SPA 路由提供统一出口。"""
 
+        # 中文注释：/api 和 /webui 是后端命名空间。未知路径必须返回 404，
+        # 不能回退到 index.html，否则客户端会把 HTML 当成 JSON 响应处理。
+        if _is_backend_path(full_path):
+            raise HTTPException(status_code=404, detail="not found")
         candidate = dist_dir / full_path
         if full_path and candidate.is_file():
             return FileResponse(candidate)
         # 中文注释：未知前端路径统一回退到 index.html，由前端路由系统接管。
         return FileResponse(index_file)
+
+
+def _is_backend_path(path: str) -> bool:
+    """判断请求路径是否属于后端 API 命名空间。"""
+
+    normalized = path.strip("/").lower()
+    return (
+        normalized == "api"
+        or normalized.startswith("api/")
+        or normalized == "webui"
+        or normalized.startswith("webui/")
+    )
 
 
 def _default_settings_path() -> Path:
