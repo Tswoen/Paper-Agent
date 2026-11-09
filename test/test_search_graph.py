@@ -197,10 +197,12 @@ class GraphTest(unittest.TestCase):
             "analysis_report",
             "writing_outline",
             "writing_report",
-            "writing_sections",
         }
 
         self.assertTrue(core_fields <= set(result.state), core_fields - set(result.state))
+        # 中文注释：writing_report["sections"] 是正文唯一权威，State 里不能再有平铺副本。
+        self.assertNotIn("writing_sections", result.state)
+        self.assertTrue(result.state["writing_report"].get("sections"))
 
     def test_final_state_is_json_serializable(self):
         """最终 state 必须是纯 JSON 数据，这是接 Checkpointer 的硬前提。"""
@@ -355,6 +357,17 @@ class GraphTest(unittest.TestCase):
             self.assertIn("search_manifest.json", artifact_names)
             self.assertTrue(completed_search_events)
             self.assertGreaterEqual(len(result.state["search_artifact_refs"]), 1)
+            # 中文注释：事件里的 writing_sections 必须和 report.sections 是同一份数据，
+            # 避免删除 State 字段后事件回放拿到空小节。
+            assistant_events = [
+                event
+                for event in thread["events"]
+                if event["event_type"] == "message"
+                and event["metadata"].get("role") == "assistant"
+            ]
+            self.assertTrue(assistant_events)
+            payload = assistant_events[-1]["metadata"]["metadata"]
+            self.assertEqual(payload["writing_sections"], result.state["writing_report"]["sections"])
 
     def test_read_node_saves_checkpoint_when_model_is_unavailable(self):
         """验证阅读模型不可用时不会走保守摘要，而是保存现场并中断。"""

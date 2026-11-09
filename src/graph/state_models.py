@@ -33,7 +33,6 @@ class State(TypedDict, total=False):
     writing_outline: JsonObject
     writing_outline_report: JsonObject
     writing_outline_artifact_refs: list[JsonObject]
-    writing_sections: list[JsonObject]
     writing_report: JsonObject
     writing_artifact_refs: list[JsonObject]
     diagnostics: JsonObject

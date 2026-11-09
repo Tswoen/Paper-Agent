@@ -29,8 +29,9 @@ def run_compose_reply_node():
         analysis_report = dict(state.get("analysis_report") or {})
         writing_outline = dict(state.get("writing_outline") or {})
         writing_outline_report = dict(state.get("writing_outline_report") or {})
-        writing_sections = list(state.get("writing_sections") or [])
         writing_report = dict(state.get("writing_report") or {})
+        # 中文注释：正文唯一权威是 writing_report["sections"]，State 不再保存平铺副本。
+        sections = list(writing_report.get("sections") or [])
         artifact_refs = list(state.get("search_artifact_refs") or [])
         read_artifact_refs = list(state.get("read_artifact_refs") or [])
         analysis_artifact_refs = list(state.get("analysis_artifact_refs") or [])
@@ -46,7 +47,6 @@ def run_compose_reply_node():
         final_markdown = _build_final_markdown(
             topic=str((state.get("request") or {}).get("topic") or "") if isinstance(state.get("request"), dict) else "",
             writing_report=writing_report,
-            writing_sections=writing_sections,
         )
 
         if reporter is not None:
@@ -78,7 +78,7 @@ def run_compose_reply_node():
                 lines.append(f"写作大纲已生成，共 {len(writing_outline)} 章，可在 writing_outline 字段中查看结构化对象。")
             if writing_report:
                 lines.append(
-                    f"正文写作已完成，共 {len(writing_sections)} 个小节，"
+                    f"正文写作已完成，共 {len(sections)} 个小节，"
                     f"引用 {len(writing_report.get('cited_paper_ids') or [])} 篇论文。"
                 )
                 if writing_report.get("abstract"):
@@ -116,7 +116,8 @@ def run_compose_reply_node():
             "writing_outline": writing_outline,
             "writing_outline_report": writing_outline_report,
             "writing_outline_artifact_refs": writing_outline_artifact_refs,
-            "writing_sections": writing_sections,
+            # 中文说明：事件键保留，值改为从 writing_report.sections 取，避免事件 schema 变化。
+            "writing_sections": sections,
             "writing_report": writing_report,
             "writing_artifact_refs": writing_artifact_refs,
             "final_artifact_refs": final_artifact_refs,
@@ -156,10 +157,10 @@ def _resolve_reporter(runtime: Any):
     return context.sync_port.for_node("compose_reply", "回复整理")
 
 
-def _build_final_markdown(*, topic: str, writing_report: JsonObject, writing_sections: list[JsonObject]) -> str:
+def _build_final_markdown(*, topic: str, writing_report: JsonObject) -> str:
     """把写作节点的全部已完成内容拼成一份可以直接保存的 Markdown 论文。"""
 
-    sections = list(writing_report.get("sections") or writing_sections)
+    sections = list(writing_report.get("sections") or [])
     abstract = str(writing_report.get("abstract") or "").strip()
     references = list(writing_report.get("references") or [])
     blocks: list[str] = []

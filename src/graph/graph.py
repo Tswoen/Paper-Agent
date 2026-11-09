@@ -262,7 +262,6 @@ def _build_initial_state(
         writing_outline={},
         writing_outline_report={},
         writing_outline_artifact_refs=[],
-        writing_sections=[],
         writing_report={},
         writing_artifact_refs=[],
         diagnostics={},

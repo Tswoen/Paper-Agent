@@ -64,6 +64,8 @@ class StateContractTest(unittest.TestCase):
             "final_artifact_refs",
             "search_node_sink",
             "read_paper_statuses",
+            # 阶段 3.1：与 writing_report["sections"] 重复的平铺副本，已删除。
+            "writing_sections",
         }
         self.assertEqual(removed & set(State.__annotations__), set())
 

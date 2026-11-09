@@ -253,9 +253,8 @@ def run_writing_node():
         return cast(
             State,
             {
-                # 中文说明：报告生成后 section 内容已经换成参考文献序号，状态里也保存同一份内容，
-                # 避免前端读取 writing_sections 时又看到旧的 [paperId] 引用。
-                "writing_sections": list(writing_report.get("sections") or written_sections),
+                # 中文说明：正文的唯一权威副本是 writing_report["sections"]（引用已替换成编号），
+                # 不再在 State 里另存一份平铺副本；事件里的 sections 由回复节点从 report 取。
                 "writing_report": writing_report,
                 "writing_artifact_refs": artifact_refs,
                 "diagnostics": diagnostics,
