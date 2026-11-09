@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any
 
 from src.graph.runtime import WorkflowRuntimeContext
 from src.graph.state_models import JsonObject, State
+from src.models.artifacts import to_artifact_ref
 from src.repositories.sessions.base import SessionRepository
 
 
@@ -228,13 +229,5 @@ async def _persist_final_markdown_if_possible(
         )
     except Exception:
         return None
-    return {
-        "artifact_id": str(record["id"]),
-        "artifact_type": str(record["artifact_type"]),
-        "name": str(record["name"]),
-        "path": str(record["path"]),
-        "size": int(record["size"]),
-        "created_at": str(record["created_at"]),
-        "metadata": dict(record.get("metadata") or {}),
-    }
+    return to_artifact_ref(record)
 

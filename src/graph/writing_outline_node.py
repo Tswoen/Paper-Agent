@@ -13,6 +13,7 @@ from src.agents.writingOutlineAgent import (
 from src.graph.runtime import WorkflowRuntimeContext
 from src.graph.state_models import JsonObject, State
 from src.llm import ProviderSnapshot
+from src.models.artifacts import to_artifact_ref
 from src.models.sessions import utc_now
 
 
@@ -278,15 +279,7 @@ async def _persist_outline_if_possible(runtime: Runtime[WorkflowRuntimeContext] 
         )
     except Exception:
         return None
-    return {
-        "artifact_id": str(record["id"]),
-        "artifact_type": str(record["artifact_type"]),
-        "name": str(record["name"]),
-        "path": str(record["path"]),
-        "size": int(record["size"]),
-        "created_at": str(record["created_at"]),
-        "metadata": dict(record.get("metadata") or {}),
-    }
+    return to_artifact_ref(record)
 
 
 def _optional_text(value: Any) -> str | None:

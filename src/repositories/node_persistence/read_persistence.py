@@ -4,6 +4,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
+from src.models.artifacts import to_artifact_ref
 from src.models.read_models import PaperReadResult
 from src.models.sessions import utc_now
 from src.repositories.sessions.base import SessionRepository
@@ -92,14 +93,6 @@ def _safe_path_component(value: str) -> str:
 
 
 def _artifact_ref(record: JsonObject) -> JsonObject:
-    """把仓储返回的记录收敛为状态中需要的产物引用字段。"""
+    """把仓储返回的记录收敛为状态中需要的产物引用字段（不携带本地路径）。"""
 
-    return {
-        "artifact_id": str(record["id"]),
-        "artifact_type": str(record["artifact_type"]),
-        "name": str(record["name"]),
-        "path": str(record["path"]),
-        "size": int(record["size"]),
-        "created_at": str(record["created_at"]),
-        "metadata": dict(record.get("metadata") or {}),
-    }
+    return to_artifact_ref(record)

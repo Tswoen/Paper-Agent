@@ -15,6 +15,7 @@ from src.agents.writingOutlineAgent import OVERALL_ANALYSIS_FIELDS
 from src.graph.runtime import WorkflowRuntimeContext
 from src.graph.state_models import JsonObject, State
 from src.llm import ProviderSnapshot, SystemConfig
+from src.models.artifacts import to_artifact_ref
 from src.models.sessions import utc_now
 from src.paper_retrieval.models import PaperDocument
 from src.utils.read_utils.cache import safe_cache_name
@@ -865,15 +866,7 @@ async def _persist_writing_if_possible(runtime: Runtime[WorkflowRuntimeContext] 
         )
     except Exception:
         return None
-    return {
-        "artifact_id": str(record["id"]),
-        "artifact_type": str(record["artifact_type"]),
-        "name": str(record["name"]),
-        "path": str(record["path"]),
-        "size": int(record["size"]),
-        "created_at": str(record["created_at"]),
-        "metadata": dict(record.get("metadata") or {}),
-    }
+    return to_artifact_ref(record)
 
 
 def _optional_text(value: Any) -> str | None:

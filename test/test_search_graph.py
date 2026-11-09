@@ -370,6 +370,35 @@ class GraphTest(unittest.TestCase):
             self.assertNotIn("writing_sections", payload)
             self.assertIn("writing_report", payload)
             self.assertEqual(payload["writing_report"]["sections"], result.state["writing_report"]["sections"])
+            # 中文注释：State 与事件里的 artifact ref 只保留标识字段，不允许再携带本地路径；
+            # 两个 summary 的 manifest 里也嵌了 ref，所以这里递归检查所有 dict。
+            artifact_refs: list[dict] = []
+            for field in (
+                "search_artifact_refs",
+                "read_artifact_refs",
+                "analysis_artifact_refs",
+                "writing_outline_artifact_refs",
+                "writing_artifact_refs",
+            ):
+                artifact_refs.extend(result.state.get(field) or [])
+            self.assertTrue(artifact_refs)
+
+            def _assert_no_path(value) -> None:
+                """递归确认没有任何字典仍带 path 键。"""
+
+                if isinstance(value, dict):
+                    self.assertNotIn("path", value)
+                    for item in value.values():
+                        _assert_no_path(item)
+                elif isinstance(value, list):
+                    for item in value:
+                        _assert_no_path(item)
+
+            _assert_no_path(result.state)
+            _assert_no_path(payload)
+            for ref in artifact_refs:
+                self.assertTrue(ref.get("artifact_id"))
+                self.assertIsNotNone(repo.read_artifact_path(session.key, ref["artifact_id"]))
 
     def test_read_node_saves_checkpoint_when_model_is_unavailable(self):
         """验证阅读模型不可用时不会走保守摘要，而是保存现场并中断。"""
