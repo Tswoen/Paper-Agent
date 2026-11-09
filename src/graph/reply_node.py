@@ -116,8 +116,8 @@ def run_compose_reply_node():
             "writing_outline": writing_outline,
             "writing_outline_report": writing_outline_report,
             "writing_outline_artifact_refs": writing_outline_artifact_refs,
-            # 中文说明：事件键保留，值改为从 writing_report.sections 取，避免事件 schema 变化。
-            "writing_sections": sections,
+            # 中文说明：事件只带权威的 writing_report（内含 sections），不再携带平铺副本；
+            # 历史事件可能仍有 writing_sections，读取方应容忍缺失。
             "writing_report": writing_report,
             "writing_artifact_refs": writing_artifact_refs,
             "final_artifact_refs": final_artifact_refs,
