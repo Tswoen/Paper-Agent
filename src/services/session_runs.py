@@ -8,8 +8,11 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
+from src.graph.checkpointing import CheckpointStore, build_checkpoint_store
+from src.graph.graph import GRAPH_VERSION
 from src.graph.runtime import InlineWorkflowSyncPort, WorkflowCancellation, WorkflowRuntimeContext
 from src.graph.runtime_resources import WorkflowRuntimeResources
+from src.llm.config import CheckpointSettings
 from src.models.sessions import SessionRecord, utc_now
 from src.repositories.sessions.base import SessionRepository
 from src.services.sessions import AssistantMessageBuffer, MessageHandler, SessionError, invoke_message_handler_async
@@ -34,6 +37,8 @@ class RunBrokerState:
     closed: bool = False
     cancellation: WorkflowCancellation = field(default_factory=WorkflowCancellation)
     task: asyncio.Task[None] | None = None
+    # 中文注释：存档线程与 turn_id 可能不同（续跑复用旧线程），事件里要如实记录。
+    thread_id: str | None = None
 
 
 class SessionRunBroker:
@@ -47,7 +52,14 @@ class SessionRunBroker:
         # 和“当前事件循环里直接同步发布事件”的 nowait 调用，不再强依赖 await lock。
         self._lock = threading.RLock()
 
-    async def open_run(self, session_key: str, run_id: str, turn_id: str, created_at: str) -> None:
+    async def open_run(
+        self,
+        session_key: str,
+        run_id: str,
+        turn_id: str,
+        created_at: str,
+        thread_id: str | None = None,
+    ) -> None:
         """注册一条新的 run 记录，让后续事件可以被订阅。"""
 
         with self._lock:
@@ -56,6 +68,7 @@ class SessionRunBroker:
                 run_id=run_id,
                 turn_id=turn_id,
                 created_at=created_at,
+                thread_id=thread_id,
             )
 
     def attach_task(self, run_id: str, task: asyncio.Task[None]) -> None:
@@ -187,12 +200,18 @@ class SessionRunService:
         repo: SessionRepository,
         message_handler: MessageHandler | None = None,
         broker: SessionRunBroker | None = None,
+        checkpoint_store: CheckpointStore | None = None,
     ):
         """初始化 run service。"""
 
         self.repo = repo
         self.message_handler = message_handler
         self.broker = broker or SessionRunBroker()
+        # 中文注释：生产由 create_app 注入 SQLite store；直接构造服务（测试、脚本）
+        # 默认用内存 store，既能跑同一套代码，又不会在仓库里留下 checkpoint 文件。
+        self.checkpoint_store = checkpoint_store or build_checkpoint_store(
+            CheckpointSettings(backend="memory")
+        )
 
     def recover_interrupted_runs(self) -> list[str]:
         """清理进程重启后遗留的运行标记，并留下可审计的中断事件。
@@ -278,11 +297,22 @@ class SessionRunService:
         run_id = str(body.get("run_id") or f"run_{uuid.uuid4().hex}")
         media = list(body.get("media") or [])
         started_at = utc_now()
+        # 中文注释：普通 run 的线程按「会话 + 轮」命名；续跑复用旧线程的规则
+        # 在阶段 4 的后续提交里接入，这里先生成并登记普通线程。
+        thread_id = f"{session_key}:{turn_id}"
+        self.checkpoint_store.registry.mark_started(
+            thread_id=thread_id,
+            session_key=session_key,
+            turn_id=turn_id,
+            run_id=run_id,
+            graph_version=GRAPH_VERSION,
+            started_at=started_at,
+        )
 
         self.repo.append_message(session_key, "user", content, media=media, turn_id=turn_id)
         self.repo.set_status(session_key, "running")
         self.repo.set_run_started_at(session_key, started_at)
-        await self.broker.open_run(session_key, run_id, turn_id, started_at)
+        await self.broker.open_run(session_key, run_id, turn_id, started_at, thread_id=thread_id)
 
         await self._publish_runtime_event(
             session_key,
@@ -319,6 +349,8 @@ class SessionRunService:
                 turn_id=turn_id,
                 content=content,
                 body=copy.deepcopy(body),
+                thread_id=thread_id,
+                resume=False,
             )
         )
         self.broker.attach_task(run_id, task)
@@ -386,6 +418,8 @@ class SessionRunService:
         turn_id: str,
         content: str,
         body: JsonObject,
+        thread_id: str,
+        resume: bool = False,
     ) -> None:
         """直接在当前事件循环里执行异步工作流，不再把整套图塞进线程。"""
 
@@ -428,6 +462,8 @@ class SessionRunService:
             resources=resources,
             cancellation=cancellation,
             session_repo=self.repo,
+            checkpoint_store=self.checkpoint_store,
+            thread_id=thread_id,
         )
 
         try:
@@ -450,7 +486,14 @@ class SessionRunService:
                     resolved_handler,
                     session_key,
                     content,
-                    {"run_id": run_id, "turn_id": turn_id, "runtime_context": runtime_context, **body},
+                    {
+                        "run_id": run_id,
+                        "turn_id": turn_id,
+                        "runtime_context": runtime_context,
+                        **body,
+                        # 中文注释：写在 body 之后，防止客户端请求体覆盖内部续跑标记。
+                        "resume_from_checkpoint": resume,
+                    },
                     emit,
                 )
                 if self.broker.is_cancel_requested(run_id):
@@ -460,6 +503,7 @@ class SessionRunService:
                         turn_id,
                         assistant_buffer,
                         already_closed=saw_turn_end,
+                        thread_id=thread_id,
                     )
                     logger.info("run cancelled after user request")
                     return
@@ -472,12 +516,19 @@ class SessionRunService:
                             "timestamp": utc_now(),
                         }
                     )
-                self._finalize_success(session_key, run_id, turn_id, assistant_buffer)
+                self._finalize_success(session_key, run_id, turn_id, assistant_buffer, thread_id=thread_id)
                 logger.info("后台 run 执行完成")
         except asyncio.CancelledError:
             if self.broker.is_cancel_requested(run_id):
                 # 中文注释：用户主动停止不是程序错误，不发送 error 事件，也不把会话标成 failed。
-                self._finalize_cancelled(session_key, run_id, turn_id, assistant_buffer, already_closed=saw_turn_end)
+                self._finalize_cancelled(
+                    session_key,
+                    run_id,
+                    turn_id,
+                    assistant_buffer,
+                    already_closed=saw_turn_end,
+                    thread_id=thread_id,
+                )
                 logger.info("run cancelled by user")
             else:
                 # 中文注释：如果没有用户停止标记，说明是服务关闭或其他外部取消，不能伪装成用户操作。
@@ -488,6 +539,7 @@ class SessionRunService:
                     assistant_buffer=assistant_buffer,
                     error=RuntimeError("后台 run 被外部取消"),
                     already_closed=saw_turn_end,
+                    thread_id=thread_id,
                 )
         except Exception as error:
             logger.exception("后台 run 执行失败")
@@ -498,6 +550,7 @@ class SessionRunService:
                 assistant_buffer=assistant_buffer,
                 error=error,
                 already_closed=saw_turn_end,
+                thread_id=thread_id,
             )
         finally:
             await resources.aclose()
@@ -508,11 +561,13 @@ class SessionRunService:
         run_id: str,
         turn_id: str,
         assistant_buffer: AssistantMessageBuffer,
+        thread_id: str | None = None,
     ) -> None:
         """在 run 成功时写回助手消息，并关闭事件流。"""
 
         assistant_buffer.persist(self.repo, session_key, turn_id)
         self.repo.set_status(session_key, "completed")
+        self._mark_checkpoint_finished(thread_id, "completed")
         self.repo.set_run_started_at(session_key, None)
         self.broker.close_run_nowait(run_id)
 
@@ -523,6 +578,7 @@ class SessionRunService:
         turn_id: str,
         assistant_buffer: AssistantMessageBuffer,
         already_closed: bool = False,
+        thread_id: str | None = None,
     ) -> None:
         """保存用户停止前已经产生的回复，并把 run 结束为 cancelled。"""
 
@@ -542,6 +598,7 @@ class SessionRunService:
             )
         assistant_buffer.persist(self.repo, session_key, turn_id)
         self.repo.set_status(session_key, "cancelled")
+        self._mark_checkpoint_finished(thread_id, "cancelled")
         self.repo.set_run_started_at(session_key, None)
         self.broker.close_run_nowait(run_id)
 
@@ -554,6 +611,7 @@ class SessionRunService:
         assistant_buffer: AssistantMessageBuffer,
         error: Exception,
         already_closed: bool,
+        thread_id: str | None = None,
     ) -> None:
         """在 run 失败时补发错误和终止事件，并统一收口状态。"""
 
@@ -586,8 +644,23 @@ class SessionRunService:
             )
         assistant_buffer.persist(self.repo, session_key, turn_id)
         self.repo.set_status(session_key, "failed")
+        self._mark_checkpoint_finished(thread_id, "failed")
         self.repo.set_run_started_at(session_key, None)
         self.broker.close_run_nowait(run_id)
+
+    def _mark_checkpoint_finished(self, thread_id: str | None, status: str) -> None:
+        """收尾时更新 checkpoint 账本；记账失败只告警，不能影响 run 状态收口。"""
+
+        if not thread_id:
+            return
+        try:
+            self.checkpoint_store.registry.mark_finished(thread_id=thread_id, status=status)
+        except Exception:
+            logger.warning(
+                "checkpoint 记账失败",
+                extra={"thread_id": thread_id, "checkpoint_status": status},
+                exc_info=True,
+            )
 
     async def _publish_runtime_event(
         self,
@@ -651,6 +724,11 @@ class SessionRunService:
         normalized_event["run_id"] = run_id
         normalized_event["turn_id"] = str(normalized_event.get("turn_id") or turn_id)
         normalized_event["timestamp"] = str(normalized_event.get("timestamp") or utc_now())
+        # 中文注释：事件带上存档线程，方便和 checkpoint 对齐；续跑时它可能是旧线程，
+        # 与当前 turn_id 不同，属于预期行为。
+        state = self.broker.get_run(run_id)
+        if state is not None and state.thread_id:
+            normalized_event.setdefault("thread_id", state.thread_id)
         return normalized_event
 
 

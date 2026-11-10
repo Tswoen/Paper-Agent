@@ -4,6 +4,8 @@ import unittest
 from fastapi.testclient import TestClient
 
 from src.api import GatewayConfig, create_app
+from src.graph.checkpointing import build_checkpoint_store
+from src.llm.config import CheckpointSettings
 from src.repositories.sessions.sqlite import SQLiteSessionRepository
 from src.repositories.settings.json import SettingsRepository
 from src.services.settings import provider_models_payload
@@ -67,7 +69,13 @@ class SettingsFastApiTest(unittest.TestCase):
         temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(temp_dir.cleanup)
         sessions = SQLiteSessionRepository(storage_root=temp_dir.name)
-        app = create_app(settings_repo=repo, sessions_repo=sessions, config=GatewayConfig())
+        checkpoint_store = build_checkpoint_store(CheckpointSettings(backend="memory"))
+        app = create_app(
+            settings_repo=repo,
+            sessions_repo=sessions,
+            config=GatewayConfig(),
+            checkpoint_store=checkpoint_store,
+        )
         return repo, TestClient(app)
 
     def test_get_settings_returns_full_snapshot(self):

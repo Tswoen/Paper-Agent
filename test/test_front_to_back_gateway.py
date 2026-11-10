@@ -4,6 +4,8 @@ import unittest
 from fastapi.testclient import TestClient
 
 from src.api import GatewayConfig, create_app
+from src.graph.checkpointing import build_checkpoint_store
+from src.llm.config import CheckpointSettings
 from src.presentation.stream_aggregator import ChatStreamAggregator
 from src.repositories.sessions.sqlite import SQLiteSessionRepository
 from src.repositories.settings.json import SettingsRepository
@@ -69,6 +71,7 @@ class FrontToBackFastApiTest(unittest.TestCase):
             sessions_repo=sessions,
             config=GatewayConfig(),
             message_handler=self._fake_message_handler_factory(sessions),
+            checkpoint_store=build_checkpoint_store(CheckpointSettings(backend="memory")),
         )
         return TestClient(app), sessions
 

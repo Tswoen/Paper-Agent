@@ -4,6 +4,8 @@ import tempfile
 import unittest
 from contextlib import closing
 
+from src.graph.checkpointing import build_checkpoint_store
+from src.llm.config import CheckpointSettings
 from src.repositories.sessions.sqlite import SQLiteSessionRepository
 from src.repositories.settings.json import SettingsRepository
 from src.api import create_app
@@ -83,7 +85,11 @@ class SessionRunRecoveryTest(unittest.TestCase):
         self.repo.set_status(session.key, "running")
         self.repo.set_run_started_at(session.key, "2026-09-18T01:02:03+00:00")
 
-        create_app(settings_repo=SettingsRepository(initial={}), sessions_repo=self.repo)
+        create_app(
+            settings_repo=SettingsRepository(initial={}),
+            sessions_repo=self.repo,
+            checkpoint_store=build_checkpoint_store(CheckpointSettings(backend="memory")),
+        )
 
         record = self.repo.get(session.key)
         self.assertEqual(record.status, "failed")

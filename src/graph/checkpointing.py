@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -274,6 +275,51 @@ class MemoryCheckpointRegistry(CheckpointRegistry):
         self._rows.clear()
 
 
+class AsyncCompatSqliteSaver(SqliteSaver):
+    """给官方同步 SqliteSaver 补上 async 接口，供 graph.ainvoke 使用。
+
+    中文说明：官方 `SqliteSaver` 只实现同步读写，而本项目的服务路径是 async。
+    这里不自己实现存储，只把官方同步方法转交线程执行；saver 内部用 threading.Lock
+    串行化，同一个 `check_same_thread=False` 连接可以安全跨线程使用。
+
+    为什么不直接用 `AsyncSqliteSaver`：它的 aiosqlite 连接绑定在创建时的事件循环上，
+    而 `create_app` 是同步入口、`run_graph_sync` 每次都会新建事件循环；同步 saver
+    加线程转发可以同时支持这两条路径，也避免应用启动时无法 await 的连接初始化。
+    """
+
+    async def aget_tuple(self, config: Any) -> Any:
+        return await asyncio.to_thread(self.get_tuple, config)
+
+    async def alist(
+        self,
+        config: Any,
+        *,
+        filter: dict[str, Any] | None = None,
+        before: Any = None,
+        limit: int | None = None,
+    ):
+        items = await asyncio.to_thread(
+            lambda: list(self.list(config, filter=filter, before=before, limit=limit))
+        )
+        for item in items:
+            yield item
+
+    async def aput(self, config: Any, checkpoint: Any, metadata: Any, new_versions: Any) -> Any:
+        return await asyncio.to_thread(self.put, config, checkpoint, metadata, new_versions)
+
+    async def aput_writes(
+        self,
+        config: Any,
+        writes: Any,
+        task_id: str,
+        task_path: str = "",
+    ) -> None:
+        return await asyncio.to_thread(self.put_writes, config, writes, task_id, task_path)
+
+    async def adelete_thread(self, thread_id: str) -> None:
+        return await asyncio.to_thread(self.delete_thread, thread_id)
+
+
 class CheckpointStore:
     """把官方 saver 与 run 账本打包在一起，供服务层一次性注入。"""
 
@@ -335,7 +381,8 @@ def build_checkpoint_store(settings: CheckpointSettings) -> CheckpointStore:
         database_path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(database_path, check_same_thread=False)
         try:
-            saver = SqliteSaver(connection)
+            # 中文注释：同步 saver + 线程转发，兼容 async 服务路径和 sync 兼容入口。
+            saver = AsyncCompatSqliteSaver(connection)
             # 中文注释：先让官方 saver 建表并切到 WAL，再创建注册表连接；
             # 顺序反了会让注册表先在 rollback journal 模式下写一次。
             saver.setup()

@@ -79,6 +79,12 @@ class WorkflowRuntimeContext:
     # 它持有数据库连接和文件句柄，无法被序列化，所以只能挂在每次 run 注入的 context 上；
     # 一旦进 State，接 Checkpointer 后第一个节点就会因为无法序列化而失败。
     session_repo: SessionRepository | None = None
+    # 中文注释：checkpoint 存储由服务层注入，重启时重建，绝不进 State 或 checkpoint。
+    # 节点看不到 saver，它只在 build_graph 的 compile 阶段被使用。
+    checkpoint_store: Any = None
+    # 中文注释：本次 run 使用的存档线程。续跑时复用的是失败 run 的线程，
+    # 可能和当前 turn_id 不同（界面开新一轮，图在旧线程继续）。
+    thread_id: str | None = None
 
 
 class InlineWorkflowSyncPort:

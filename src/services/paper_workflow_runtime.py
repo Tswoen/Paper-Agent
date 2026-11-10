@@ -40,13 +40,31 @@ def build_paper_workflow_message_handler(repo: SessionRepository):
             )
 
         checkpoint = frame.get("read_resume_checkpoint")
-        # 中文注释：新请求的约束由前端放在请求体的 constraints 字段中，
-        # 这里把它装进 ReviewRequest，进图前会被转成纯 dict 存进 state["request"]。
-        request = _request_from_checkpoint(checkpoint) or ReviewRequest(
-            topic=content,
-            constraints=_constraints_from_frame(frame),
+        # 中文注释：存档能力来自运行时上下文；直接调用 handler（没有 run service）
+        # 时 store 为空，图就退回“不落盘”的旧行为。
+        checkpointer = runtime.checkpoint_store.saver if runtime.checkpoint_store is not None else None
+        thread_id = runtime.thread_id
+        # 中文注释：只有同时具备 saver 和线程时才认续跑标记；旧入口即使收到
+        # 客户端塞进来的 resume 标记，也退回普通运行，避免在没有存档时误触发。
+        resume = bool(frame.get("resume_from_checkpoint")) and checkpointer is not None and thread_id is not None
+        # 中文注释：续跑时输入必须来自 checkpoint，不能再塞手写恢复现场或新请求；
+        # request=None 由 run_graph 的续跑分支接受。
+        request = (
+            None
+            if resume
+            else (
+                _request_from_checkpoint(checkpoint)
+                or ReviewRequest(
+                    topic=content,
+                    constraints=_constraints_from_frame(frame),
+                )
+            )
         )
-        state_overrides = {"read_resume_checkpoint": checkpoint} if isinstance(checkpoint, dict) else None
+        state_overrides = (
+            {"read_resume_checkpoint": checkpoint}
+            if isinstance(checkpoint, dict) and not resume
+            else None
+        )
         await run_graph(
             request,
             runtime=runtime,
@@ -54,6 +72,9 @@ def build_paper_workflow_message_handler(repo: SessionRepository):
             session_key=chat_id,
             turn_id=turn_id,
             state_overrides=state_overrides,
+            checkpointer=checkpointer,
+            thread_id=thread_id,
+            resume=resume,
         )
 
     return _handler
