@@ -29,6 +29,8 @@ class GraphRunResult:
     papers: list[dict[str, Any]] = field(default_factory=list)
     state: dict[str, Any] = field(default_factory=dict)
     diagnostics: dict[str, Any] = field(default_factory=dict)
+    # 中文注释：回显本次使用的 checkpoint 线程，方便调用方记日志、对账和清理。
+    thread_id: str | None = None
 
 
 GraphState = State
@@ -121,51 +123,83 @@ def _with_cancellation_boundary(node_name: str, node):
 
 
 async def run_graph(
-    request: ReviewRequest,
+    request: ReviewRequest | None = None,
     *,
     runtime: WorkflowRuntimeContext | None = None,
     session_repo: SessionRepository | None = None,
     session_key: str | None = None,
     turn_id: str | None = None,
     state_overrides: dict[str, Any] | None = None,
+    checkpointer: Any = None,
+    thread_id: str | None = None,
+    durability: str | None = "sync",
+    resume: bool = False,
 ) -> GraphRunResult:
-    """异步运行执行图，并通过 graph context 注入运行时依赖。"""
+    """异步运行执行图，并通过 graph context 注入运行时依赖。
 
-    graph = build_graph()
+    中文注释：checkpointer/thread_id/durability/resume 是阶段 4 新增的存档入口，
+    默认全部关闭——不传时行为与阶段 3 完全一致；真正接生产路径在 SessionRunService。
+    """
+
+    # 中文注释：有 saver 就必须有线程，否则 LangGraph 没有地方落盘；续跑还要额外
+    # 保证输入来自 checkpoint，不能又塞初始状态或手写恢复现场。
+    if checkpointer is not None and not thread_id:
+        raise ValueError("使用 checkpointer 时必须提供 thread_id")
+    if resume and (checkpointer is None or not thread_id):
+        raise ValueError("续跑需要同时提供 checkpointer 和 thread_id")
+    if resume and state_overrides:
+        raise ValueError("续跑时不能同时提供 state_overrides，输入必须来自 checkpoint")
+    if not resume and request is None:
+        raise ValueError("非续跑调用必须提供 request")
+
+    graph = build_graph(checkpointer=checkpointer)
     runtime = _ensure_runtime(
         runtime,
         session_repo=session_repo,
         session_key=session_key,
         turn_id=turn_id,
     )
-    initial_state = _build_initial_state(
-        request,
-        session_key=session_key,
-        turn_id=turn_id,
-        state_overrides=state_overrides,
-    )
-    final_state = await graph.ainvoke(
-        initial_state,
-        config=_build_run_config(runtime),
-        context=runtime,
-    )
+    config = _build_run_config(runtime, thread_id=thread_id)
+    if resume:
+        # 中文注释：输入传 None 表示从该线程的最后一份 checkpoint 继续；
+        # 请求、检索结果等状态都由 checkpoint 恢复，不再重新构造。
+        invoke_input = None
+    else:
+        invoke_input = _build_initial_state(
+            request,
+            session_key=session_key,
+            turn_id=turn_id,
+            state_overrides=state_overrides,
+        )
+
+    invoke_kwargs: dict[str, Any] = {"config": config, "context": runtime}
+    if checkpointer is not None and durability:
+        # 中文注释：没有 checkpointer 时传 durability 没有意义，还会触发告警。
+        invoke_kwargs["durability"] = durability
+
+    final_state = await graph.ainvoke(invoke_input, **invoke_kwargs)
     papers = list(final_state.get("search_results") or [])
     diagnostics = dict(final_state.get("diagnostics") or {})
     return GraphRunResult(
         papers=papers,
         state=dict(final_state),
         diagnostics=diagnostics,
+        thread_id=thread_id,
     )
 
 
 def run_graph_sync(
-    request: ReviewRequest,
+    request: ReviewRequest | None = None,
     *,
     runtime: WorkflowRuntimeContext | None = None,
     session_repo: SessionRepository | None = None,
     session_key: str | None = None,
     turn_id: str | None = None,
     state_overrides: dict[str, Any] | None = None,
+    checkpointer: Any = None,
+    thread_id: str | None = None,
+    durability: str | None = "sync",
+    resume: bool = False,
 ) -> GraphRunResult:
     """给旧同步入口保留一个很薄的兼容壳。"""
 
@@ -178,15 +212,23 @@ def run_graph_sync(
                 session_key=session_key,
                 turn_id=turn_id,
                 state_overrides=state_overrides,
+                checkpointer=checkpointer,
+                thread_id=thread_id,
+                durability=durability,
+                resume=resume,
             )
         )
 
 
-def _build_run_config(runtime: WorkflowRuntimeContext | None) -> dict[str, Any]:
-    """组装本次 run 的追踪元数据，方便按会话/轮次检索轨迹。
+def _build_run_config(
+    runtime: WorkflowRuntimeContext | None,
+    *,
+    thread_id: str | None = None,
+) -> dict[str, Any]:
+    """组装本次 run 的追踪元数据与存档线程。
 
-    中文注释：这里只放 metadata 和 tags，不写 configurable——thread_id 的粒度
-    要等阶段 4 接 Checkpointer 时再定，提前写死会让后续迁移多改一处。
+    中文注释：metadata 只用于追踪；thread_id 才决定 checkpoint 存到哪个线程，
+    它属于 RunnableConfig，不进 State，也不进 graph context。
     """
 
     config: dict[str, Any] = {"tags": ["paper_graph"]}
@@ -196,6 +238,8 @@ def _build_run_config(runtime: WorkflowRuntimeContext | None) -> dict[str, Any]:
             "turn_id": runtime.turn_id,
             "run_id": runtime.run_id,
         }
+    if thread_id:
+        config["configurable"] = {"thread_id": thread_id}
     return config
 
 

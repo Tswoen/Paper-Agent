@@ -490,6 +490,117 @@ class GraphTest(unittest.TestCase):
         self.assertEqual(result.state["search_results"][0]["id"], "resume-paper-1")
         self.assertEqual(result.state["read_results"][0]["note"]["short_summary"], "agent search summary")
 
+    def test_run_graph_persists_checkpoints_when_saver_is_provided(self):
+        """带 saver 时状态会落到指定线程，返回值回显 thread_id。"""
+
+        stub = _StubService()
+        saver = InMemorySaver()
+        thread_id = "graph-checkpoint-thread"
+
+        with _fake_backends(stub, search_snapshot=_fake_snapshot(), read_snapshot=_read_snapshot()):
+            result = asyncio.run(
+                run_graph(
+                    ReviewRequest(
+                        topic="multi-agent literature review",
+                        constraints={"sources": ["openalex"], "max_results": 3},
+                    ),
+                    checkpointer=saver,
+                    thread_id=thread_id,
+                    durability="sync",
+                )
+            )
+
+        self.assertEqual(result.thread_id, thread_id)
+        self.assertEqual(result.state["current_step"], "reply")
+        self.assertIsNotNone(saver.get_tuple({"configurable": {"thread_id": thread_id}}))
+        # 中文注释：别的线程不应该被这次 run 影响。
+        self.assertIsNone(saver.get_tuple({"configurable": {"thread_id": "other-thread"}}))
+
+    def test_run_graph_resumes_from_checkpoint_without_rerunning_search(self):
+        """同一线程失败后可用 resume=True 续跑，且检索节点不会重跑。"""
+
+        class _FlakyAnalyseAgent:
+            """第一次综合分析失败，第二次成功，用来模拟进程崩溃后恢复。"""
+
+            def __init__(self):
+                self.overall_calls = 0
+
+            async def async_analyse_subtopic(self, *, topic, group, usage_callback=None):
+                return AnalyseModelResult(parsed=None, reason="stub: 子主题走兜底")
+
+            async def async_analyse_overall(self, *, topic, subtopic_analyses, usage_callback=None):
+                self.overall_calls += 1
+                if self.overall_calls == 1:
+                    raise RuntimeError("stub analysis model unavailable")
+                return AnalyseModelResult(parsed={}, raw_model_output="{}")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = SQLiteSessionRepository(storage_root=temp_dir)
+            session = repo.create("Resume via run_graph")
+            stub = _StubService()
+            saver = InMemorySaver()
+            thread_id = f"{session.key}:turn-1"
+            agent = _FlakyAnalyseAgent()
+
+            with _fake_backends(
+                stub,
+                search_snapshot=_fake_snapshot(),
+                read_snapshot=_read_snapshot(),
+            ), mock.patch("src.graph.analyse_node.build_analyse_agent", lambda *args, **kwargs: agent):
+                with self.assertRaises(RuntimeError):
+                    asyncio.run(
+                        run_graph(
+                            ReviewRequest(
+                                topic="multi-agent literature review",
+                                constraints={"sources": ["openalex"], "max_results": 3},
+                            ),
+                            session_repo=repo,
+                            session_key=session.key,
+                            turn_id="turn-1",
+                            checkpointer=saver,
+                            thread_id=thread_id,
+                        )
+                    )
+                search_calls_before_resume = len(stub.calls)
+                result = asyncio.run(
+                    run_graph(
+                        None,
+                        resume=True,
+                        session_repo=repo,
+                        session_key=session.key,
+                        turn_id="turn-1",
+                        checkpointer=saver,
+                        thread_id=thread_id,
+                    )
+                )
+
+            self.assertEqual(result.thread_id, thread_id)
+            self.assertEqual(result.state["current_step"], "reply")
+            # 中文注释：续跑从 run_analyse 继续，检索与阅读节点都不能重跑。
+            self.assertEqual(len(stub.calls), search_calls_before_resume)
+            artifact_names = [artifact["name"] for artifact in repo.get(session.key).thread()["artifacts"]]
+            self.assertEqual(artifact_names.count("search_manifest.json"), 1)
+
+    def test_run_graph_rejects_incomplete_checkpoint_settings(self):
+        """有 saver 必须有线程；续跑必须两个都给；续跑不能塞初始状态。"""
+
+        saver = InMemorySaver()
+
+        with self.assertRaises(ValueError):
+            asyncio.run(run_graph(ReviewRequest(topic="checkpoint guard"), checkpointer=saver))
+        with self.assertRaises(ValueError):
+            asyncio.run(run_graph(None, resume=True, thread_id="thread-without-saver"))
+        with self.assertRaises(ValueError):
+            asyncio.run(
+                run_graph(
+                    None,
+                    resume=True,
+                    checkpointer=saver,
+                    thread_id="thread-guard",
+                    state_overrides={"current_step": "init"},
+                )
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
