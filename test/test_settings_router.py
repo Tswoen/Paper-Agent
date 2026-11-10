@@ -1,8 +1,10 @@
+import tempfile
 import unittest
 
 from fastapi.testclient import TestClient
 
 from src.api import GatewayConfig, create_app
+from src.repositories.sessions.sqlite import SQLiteSessionRepository
 from src.repositories.settings.json import SettingsRepository
 from src.services.settings import provider_models_payload
 
@@ -60,7 +62,12 @@ class SettingsFastApiTest(unittest.TestCase):
                 },
             }
         )
-        app = create_app(settings_repo=repo, config=GatewayConfig())
+        # 中文注释：测试必须使用临时会话仓储，避免 create_app 初始化默认 data/ 目录，
+        # 也避免对真实会话执行 recover_interrupted_runs 对账。
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        sessions = SQLiteSessionRepository(storage_root=temp_dir.name)
+        app = create_app(settings_repo=repo, sessions_repo=sessions, config=GatewayConfig())
         return repo, TestClient(app)
 
     def test_get_settings_returns_full_snapshot(self):
