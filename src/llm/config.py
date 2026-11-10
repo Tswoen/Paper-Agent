@@ -12,6 +12,10 @@ from .registry import match_provider_backend
 
 JsonObject = dict[str, Any]
 
+# 运行状态存档的可选实现与持久化档位（见 CheckpointSettings）。
+_CHECKPOINT_BACKENDS = frozenset({"sqlite", "memory"})
+_DURABILITY_MODES = frozenset({"sync", "async", "exit"})
+
 
 @dataclass(slots=True)
 class ProviderConfig:
@@ -103,6 +107,22 @@ class SearchDefaults:
 
 
 @dataclass(slots=True)
+class CheckpointSettings:
+    """运行状态存档（LangGraph Checkpointer）的配置。
+
+    中文说明：节点永远看不到 saver，它只在 build_graph 的 compile 阶段出现。
+    这里只决定用哪种实现、存到哪、以及过渡期保留多久。
+    """
+
+    backend: str = "sqlite"
+    path: str = "data/checkpoints.db"
+    durability: str = "sync"
+    retention_enabled: bool = True
+    retention_completed_days: int = 7
+    retention_failed_days: int = 30
+
+
+@dataclass(slots=True)
 class SystemConfig:
     """从 config/system.yaml 读取的系统默认值。"""
 
@@ -111,6 +131,7 @@ class SystemConfig:
     paper_retrieval: PaperRetrievalConfig = field(default_factory=PaperRetrievalConfig)
     search: SearchDefaults = field(default_factory=SearchDefaults)
     read: ReadDefaults = field(default_factory=ReadDefaults)
+    checkpoint: CheckpointSettings = field(default_factory=CheckpointSettings)
 
     @classmethod
     def load(cls, path: str | Path = "config/system.yaml") -> "SystemConfig":
@@ -127,6 +148,8 @@ class SystemConfig:
         paper_retrieval = dict((data or {}).get("paper_retrieval") or {})
         search = dict((data or {}).get("search") or {})
         read = dict((data or {}).get("read") or {})
+        checkpoint = dict((data or {}).get("checkpoint") or {})
+        retention = dict(checkpoint.get("retention") or {})
         semantic_enabled = _optional_bool(search.get("semantic_filter_enabled"))
         return cls(
             llm=LLMDefaults(
@@ -167,6 +190,25 @@ class SystemConfig:
                 verify_max_retries=_read_non_negative_int(read.get("verify_max_retries"), 1),
                 verify_max_chars=_read_positive_int(read.get("verify_max_chars"), 120000),
                 verify_optional_fields=_string_tuple(read.get("verify_optional_fields"), default=("limitations",)),
+            ),
+            checkpoint=CheckpointSettings(
+                # 中文说明：backend/durability 写错时直接报错，避免悄悄退回另一个存储实现。
+                backend=_read_choice(
+                    checkpoint.get("backend"),
+                    _CHECKPOINT_BACKENDS,
+                    "sqlite",
+                    field="checkpoint.backend",
+                ),
+                path=str(checkpoint.get("path") or "data/checkpoints.db"),
+                durability=_read_choice(
+                    checkpoint.get("durability"),
+                    _DURABILITY_MODES,
+                    "sync",
+                    field="checkpoint.durability",
+                ),
+                retention_enabled=_optional_bool(retention.get("enabled")) is not False,
+                retention_completed_days=_read_positive_int(retention.get("completed_days"), 7),
+                retention_failed_days=_read_positive_int(retention.get("failed_days"), 30),
             ),
         )
 
@@ -459,6 +501,21 @@ def _optional_text(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _read_choice(value: Any, allowed: frozenset[str], default: str, *, field: str) -> str:
+    """读取枚举型配置，未配置用默认值，写错则直接报错。
+
+    中文说明：backend/durability 这类字段写错时不能静默退回默认值，
+    否则用户以为开了 SQLite 存档，实际可能跑在另一种实现上。
+    """
+
+    if value is None or str(value).strip() == "":
+        return default
+    text = str(value).strip().lower()
+    if text not in allowed:
+        raise ValueError(f"{field} 不支持 {value!r}；可选值：{', '.join(sorted(allowed))}")
+    return text
 
 
 def _string_tuple(value: Any, *, default: tuple[str, ...]) -> tuple[str, ...]:

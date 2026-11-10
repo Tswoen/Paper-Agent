@@ -33,6 +33,11 @@ class GraphRunResult:
 
 GraphState = State
 
+# 中文注释：图和 State 形状的版本号，随 checkpoint 一起登记。
+# 阶段 5a 的破坏性改造（Send/reducer/删字段）必须 bump 本常量，让旧 checkpoint
+# 在恢复前被显式拒绝，而不是悄悄恢复出一个字段对不上的旧状态。
+GRAPH_VERSION = 1
+
 # 中文注释：`TypedDict` 只在类型检查阶段生效，运行时它就是普通 dict。节点返回一个
 # 未声明的字段不会报错，它会悄悄进入图状态（曾经出现过的 `read_paper_statuses` 就是
 # 这种情况）。这里把声明过的字段名固化成集合，在节点返回值的边界上做断言。

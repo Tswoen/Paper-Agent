@@ -38,3 +38,17 @@ read:
   verify_max_retries: 1
   verify_max_chars: 120000
   verify_optional_fields: [limitations]
+
+# 运行状态存档（阶段 4）。backend 只支持 sqlite / memory：
+# - sqlite：生产默认，独立文件保存每个节点的 State 快照，进程重启后可续跑；
+# - memory：不落盘，仅用于测试或临时运行。
+checkpoint:
+  backend: sqlite
+  path: data/checkpoints.db
+  # sync 保证每个节点结束时快照已经写到磁盘；默认的 async 在崩溃时可能丢最后一个快照。
+  durability: sync
+  # 过渡期保留策略：完成的 run 保留 7 天，失败/取消/中断的保留 30 天。
+  retention:
+    enabled: true
+    completed_days: 7
+    failed_days: 30
