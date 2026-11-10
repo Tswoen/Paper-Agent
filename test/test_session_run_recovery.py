@@ -1,6 +1,8 @@
 import asyncio
+import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 
 from src.repositories.sessions.sqlite import SQLiteSessionRepository
 from src.repositories.settings.json import SettingsRepository
@@ -87,6 +89,14 @@ class SessionRunRecoveryTest(unittest.TestCase):
         self.assertEqual(record.status, "failed")
         self.assertIsNone(record.run_started_at)
         self.assertTrue(any(event["event_type"] == "run_interrupted" for event in record.events))
+
+    def test_session_database_uses_wal_journal_mode(self):
+        """会话库初始化后应处于 WAL 模式，避免读写互相阻塞。"""
+
+        with closing(sqlite3.connect(self.repo.backend.database_path)) as connection:
+            journal_mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
+
+        self.assertEqual(journal_mode, "wal")
 
 
 if __name__ == "__main__":

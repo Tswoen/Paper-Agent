@@ -353,6 +353,9 @@ class SessionStoreBackend:
         """初始化 SQLite 表结构与必要索引。"""
 
         with self._connection() as connection:
+            # 中文注释：会话库走 WAL，读历史/产物列表时不会被正在写入的事件阻塞。
+            # 这个设置持久写在数据库文件头里，初始化时执行一次即可。
+            connection.execute("PRAGMA journal_mode=WAL")
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS session (
