@@ -4,9 +4,13 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from langgraph.checkpoint.memory import InMemorySaver
+
+from graph import build_graph, run_graph
+from src.agents import ReviewRequest
 from src.agents.analyseAgent import AnalyseModelResult
 from src.graph.checkpointing import build_checkpoint_store
-from src.graph.graph import GRAPH_VERSION
+from src.graph.graph import GRAPH_VERSION, thread_has_pending_work
 from src.llm.config import CheckpointSettings
 from src.repositories.sessions.sqlite import SQLiteSessionRepository
 from src.services.paper_workflow_runtime import build_paper_workflow_message_handler
@@ -291,6 +295,211 @@ class CheckpointResumeTest(unittest.TestCase):
             finally:
                 # 中文注释：close 是幂等的，第一次分支已经关过也没关系。
                 store.close()
+
+    def test_resume_uses_latest_thread_not_older_failure(self):
+        """最新一轮已经成功时，不能跳回去续更早的失败线程。"""
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = SQLiteSessionRepository(storage_root=Path(temp_dir) / "sessions")
+            session = repo.create("Latest thread wins")
+            service = SessionRunService(repo)
+            registry = service.checkpoint_store.registry
+            old_thread = f"{session.key}:t1"
+            new_thread = f"{session.key}:t2"
+
+            registry.mark_started(
+                thread_id=old_thread,
+                session_key=session.key,
+                turn_id="t1",
+                run_id="run-1",
+                graph_version=GRAPH_VERSION,
+            )
+            registry.mark_finished(
+                thread_id=old_thread,
+                status="failed",
+                finished_at="2026-11-10T10:01:00+00:00",
+            )
+            registry.mark_started(
+                thread_id=new_thread,
+                session_key=session.key,
+                turn_id="t2",
+                run_id="run-2",
+                graph_version=GRAPH_VERSION,
+            )
+            registry.mark_finished(
+                thread_id=new_thread,
+                status="completed",
+                finished_at="2026-11-10T10:02:00+00:00",
+            )
+
+            checked: list[str] = []
+
+            async def fake_pending(checkpointer, thread_id):
+                checked.append(thread_id)
+                return False
+
+            with mock.patch(
+                "src.services.session_runs.thread_has_pending_work",
+                new=fake_pending,
+            ):
+                with self.assertRaises(ValueError) as raised:
+                    asyncio.run(
+                        service.start_run(
+                            session.key,
+                            {
+                                "content": "继续",
+                                "turn_id": "t3",
+                                "resume_from_last_checkpoint": True,
+                            },
+                        )
+                    )
+
+            # 中文注释：必须问的是“最近一次线程”，不是更早的失败线程。
+            self.assertEqual(checked, [new_thread])
+            self.assertIn("没有待执行的内容", str(raised.exception))
+
+    def test_resume_self_heals_ownerless_running_row(self):
+        """账本 running 但本进程没有活任务：先改 interrupted，再按 pending 续跑。"""
+
+        async def exercise():
+            temp_dir = tempfile.TemporaryDirectory()
+            self.addCleanup(temp_dir.cleanup)
+            repo = SQLiteSessionRepository(storage_root=Path(temp_dir.name) / "sessions")
+            session = repo.create("Self heal")
+            store = build_checkpoint_store(CheckpointSettings(backend="memory"))
+            thread_id = f"{session.key}:t1"
+            store.registry.mark_started(
+                thread_id=thread_id,
+                session_key=session.key,
+                turn_id="t1",
+                run_id="run-1",
+                graph_version=GRAPH_VERSION,
+            )
+            captured = {}
+
+            async def handler(chat_id, content, frame, emit):
+                captured.update(frame)
+
+            service = SessionRunService(repo, message_handler=handler, checkpoint_store=store)
+
+            async def fake_pending(checkpointer, tid):
+                return True
+
+            with mock.patch(
+                "src.services.session_runs.thread_has_pending_work",
+                new=fake_pending,
+            ), mock.patch.object(
+                store.registry,
+                "mark_running_interrupted",
+                wraps=store.registry.mark_running_interrupted,
+            ) as healed:
+                accepted = await service.start_run(
+                    session.key,
+                    {
+                        "content": "继续",
+                        "turn_id": "t2",
+                        "resume_from_last_checkpoint": True,
+                    },
+                )
+                task = service.broker.get_run(accepted["run_id"]).task
+                await asyncio.wait_for(task, timeout=30)
+
+            return {
+                "expected_thread": thread_id,
+                "runtime_thread": captured["runtime_context"].thread_id,
+                "resume": captured["resume_from_checkpoint"],
+                "row": store.registry.get(thread_id),
+                "healed": healed.call_count,
+            }
+
+        result = asyncio.run(exercise())
+
+        self.assertEqual(result["runtime_thread"], result["expected_thread"])
+        self.assertTrue(result["resume"])
+        self.assertEqual(result["healed"], 1)
+        self.assertEqual(result["row"]["status"], "completed")
+        self.assertEqual(result["row"]["turn_id"], "t1")
+
+    def test_resume_marks_running_row_interrupted_when_nothing_pending(self):
+        """没有待执行内容时，也要先把无主的 running 行修成 interrupted。"""
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = SQLiteSessionRepository(storage_root=Path(temp_dir) / "sessions")
+            session = repo.create("Nothing pending")
+            service = SessionRunService(repo)
+            thread_id = f"{session.key}:t1"
+            service.checkpoint_store.registry.mark_started(
+                thread_id=thread_id,
+                session_key=session.key,
+                turn_id="t1",
+                run_id="run-1",
+                graph_version=GRAPH_VERSION,
+            )
+
+            async def fake_pending(checkpointer, tid):
+                return False
+
+            with mock.patch(
+                "src.services.session_runs.thread_has_pending_work",
+                new=fake_pending,
+            ):
+                with self.assertRaises(ValueError) as raised:
+                    asyncio.run(
+                        service.start_run(
+                            session.key,
+                            {
+                                "content": "继续",
+                                "turn_id": "t2",
+                                "resume_from_last_checkpoint": True,
+                            },
+                        )
+                    )
+
+            self.assertIn("没有待执行的内容", str(raised.exception))
+            self.assertEqual(
+                service.checkpoint_store.registry.get(thread_id)["status"],
+                "interrupted",
+            )
+
+    def test_thread_has_pending_work_detects_uncommitted_writes(self):
+        """next 为空但 pending_writes 非空时，必须判定为“还有活”。"""
+
+        async def exercise():
+            saver = InMemorySaver()
+            thread_id = "pending-window-thread"
+            with hermetic_graph_llms(), _fake_backends(
+                _StubService(),
+                search_snapshot=_fake_snapshot(),
+                read_snapshot=_read_snapshot(),
+            ):
+                await run_graph(
+                    ReviewRequest(
+                        topic="multi-agent literature review",
+                        constraints={"sources": ["openalex"], "max_results": 3},
+                    ),
+                    checkpointer=saver,
+                    thread_id=thread_id,
+                )
+
+            config = {"configurable": {"thread_id": thread_id}}
+            graph = build_graph(checkpointer=saver)
+            before = await graph.aget_state(config)
+            checkpoint_tuple = saver.get_tuple(config)
+            self.assertIsNotNone(checkpoint_tuple)
+            # 中文注释：模拟“任务写完、checkpoint 未推进”的窗口。
+            saver.put_writes(
+                checkpoint_tuple.config,
+                [("current_step", "init")],
+                task_id="pending-window-test",
+            )
+            after = await graph.aget_state(config)
+            return before.next, after.next, await thread_has_pending_work(saver, thread_id)
+
+        before_next, after_next, pending = asyncio.run(exercise())
+
+        self.assertEqual(before_next, ())
+        self.assertEqual(after_next, ())
+        self.assertTrue(pending)
 
 
 if __name__ == "__main__":

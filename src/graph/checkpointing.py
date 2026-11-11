@@ -16,10 +16,8 @@ from src.models.sessions import utc_now
 
 JsonObject = dict[str, Any]
 
-# 中文注释：只有这些终态才允许“继续执行”。running 不算——进程还活着时，
-# 同一会话会被 start_run 的并发保护挡住；进程重启后由 recover_interrupted_runs
-# 把它改写成 interrupted，才进入可续跑集合。
-RESUMABLE_STATUSES = ("failed", "cancelled", "interrupted")
+# 中文注释：账本只记录 run 的终态，用于展示和清理；“能不能续”由 checkpointer
+# 的 pending writes / next 决定，不再由这里的 status 决定。
 _FINISHED_STATUSES = frozenset({"completed", "failed", "cancelled", "interrupted"})
 
 # 中文注释：checkpoint 由官方 saver 自己建表；这里只建“哪个 thread 属于哪个
@@ -76,8 +74,8 @@ class CheckpointRegistry(ABC):
         """按 thread_id 读取一条登记记录。"""
 
     @abstractmethod
-    def latest_resumable(self, session_key: str) -> JsonObject | None:
-        """返回当前会话最近一次可续跑的 run；没有时返回 None。"""
+    def latest_thread(self, session_key: str) -> JsonObject | None:
+        """返回当前会话最近一次登记线程（不看状态）；没有时返回 None。"""
 
     @abstractmethod
     def mark_running_interrupted(self, session_key: str, finished_at: str | None = None) -> int:
@@ -166,16 +164,15 @@ class SqliteCheckpointRegistry(CheckpointRegistry):
         ).fetchone()
         return dict(row) if row is not None else None
 
-    def latest_resumable(self, session_key: str) -> JsonObject | None:
-        placeholders = ", ".join("?" for _ in RESUMABLE_STATUSES)
+    def latest_thread(self, session_key: str) -> JsonObject | None:
         row = self._connection.execute(
-            f"""
+            """
             SELECT * FROM checkpoint_runs
-            WHERE session_key = ? AND status IN ({placeholders})
+            WHERE session_key = ?
             ORDER BY COALESCE(finished_at, updated_at) DESC
             LIMIT 1
             """,
-            (session_key, *RESUMABLE_STATUSES),
+            (session_key,),
         ).fetchone()
         return dict(row) if row is not None else None
 
@@ -239,8 +236,8 @@ class MemoryCheckpointRegistry(CheckpointRegistry):
         previous = self._rows.get(thread_id)
         self._rows[thread_id] = {
             "thread_id": thread_id,
-            "session_key": session_key,
-            "turn_id": turn_id,
+            "session_key": previous["session_key"] if previous else session_key,
+            "turn_id": previous["turn_id"] if previous else turn_id,
             "run_id": run_id,
             # 中文注释：与 SQLite 实现保持一致，续跑不覆盖首次登记的版本号。
             "graph_version": previous["graph_version"] if previous else graph_version,
@@ -265,12 +262,8 @@ class MemoryCheckpointRegistry(CheckpointRegistry):
         row = self._rows.get(thread_id)
         return dict(row) if row is not None else None
 
-    def latest_resumable(self, session_key: str) -> JsonObject | None:
-        candidates = [
-            row
-            for row in self._rows.values()
-            if row["session_key"] == session_key and row["status"] in RESUMABLE_STATUSES
-        ]
+    def latest_thread(self, session_key: str) -> JsonObject | None:
+        candidates = [row for row in self._rows.values() if row["session_key"] == session_key]
         if not candidates:
             return None
         latest = max(candidates, key=lambda row: row["finished_at"] or row["updated_at"])
@@ -372,11 +365,6 @@ class CheckpointStore:
     @property
     def is_persistent(self) -> bool:
         return self.backend == "sqlite"
-
-    def has_checkpoints(self, thread_id: str) -> bool:
-        """判断线程在 saver 里是否真的还有快照，防止账本有行、存档已被清掉。"""
-
-        return self.saver.get_tuple({"configurable": {"thread_id": thread_id}}) is not None
 
     def close(self) -> None:
         """先关注册表，再关官方 saver 持有的连接；可重复调用。"""

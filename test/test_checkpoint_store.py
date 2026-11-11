@@ -80,8 +80,11 @@ class CheckpointStoreTest(unittest.TestCase):
         self.assertIsNotNone(row)
         self.assertEqual(row["status"], "running")
         self.assertEqual(row["graph_version"], 1)
-        # running 不算可续跑：进程还活着时应由并发保护挡住，而不是续跑。
-        self.assertIsNone(registry.latest_resumable("session-a"))
+        # 账本只负责“找最近线程”，不判断能不能续；running 也能被取到。
+        latest = registry.latest_thread("session-a")
+        self.assertIsNotNone(latest)
+        self.assertEqual(latest["thread_id"], "session-a:turn-1")
+        self.assertEqual(latest["status"], "running")
 
         # 续跑：同一 thread 重新开始，状态回到 running，但版本号保留首次登记值。
         registry.mark_started(
@@ -96,23 +99,29 @@ class CheckpointStoreTest(unittest.TestCase):
         self.assertEqual(row["status"], "running")
         self.assertEqual(row["run_id"], "run-2")
         self.assertEqual(row["graph_version"], 1)
+        # 中文注释：续跑只更新 run_id/时间，首次登记的会话与轮次不能被覆盖。
+        self.assertEqual(row["session_key"], "session-a")
+        self.assertEqual(row["turn_id"], "turn-1")
 
         registry.mark_finished(
             thread_id="session-a:turn-1",
             status="failed",
             finished_at="2026-11-10T10:05:00+00:00",
         )
-        resumable = registry.latest_resumable("session-a")
-        self.assertIsNotNone(resumable)
-        self.assertEqual(resumable["thread_id"], "session-a:turn-1")
+        latest = registry.latest_thread("session-a")
+        self.assertIsNotNone(latest)
+        self.assertEqual(latest["thread_id"], "session-a:turn-1")
+        self.assertEqual(latest["status"], "failed")
 
-        # 完成后的 run 不能再续跑。
+        # 完成后仍是最新线程；能不能续由 checkpointer 判断，不由账本状态决定。
         registry.mark_finished(
             thread_id="session-a:turn-1",
             status="completed",
             finished_at="2026-11-10T10:06:00+00:00",
         )
-        self.assertIsNone(registry.latest_resumable("session-a"))
+        latest = registry.latest_thread("session-a")
+        self.assertEqual(latest["thread_id"], "session-a:turn-1")
+        self.assertEqual(latest["status"], "completed")
 
         registry.mark_started(
             thread_id="session-a:turn-2",
@@ -130,7 +139,7 @@ class CheckpointStoreTest(unittest.TestCase):
 
         listed = [row["thread_id"] for row in registry.list_threads("session-a")]
         self.assertEqual(listed, ["session-a:turn-2", "session-a:turn-1"])
-        self.assertEqual(registry.latest_resumable("session-a")["thread_id"], "session-a:turn-2")
+        self.assertEqual(registry.latest_thread("session-a")["thread_id"], "session-a:turn-2")
 
         self.assertTrue(registry.delete_thread("session-a:turn-2"))
         self.assertFalse(registry.delete_thread("session-a:turn-2"))
@@ -153,7 +162,7 @@ class CheckpointStoreTest(unittest.TestCase):
         )
         row = registry.get("session-a:turn-3")
         self.assertEqual(row["status"], "interrupted")
-        self.assertEqual(registry.latest_resumable("session-a")["thread_id"], "session-a:turn-3")
+        self.assertEqual(registry.latest_thread("session-a")["thread_id"], "session-a:turn-3")
         self.assertEqual(registry.mark_running_interrupted("session-a"), 0)
 
     def test_mark_finished_validates_status_and_existence(self):

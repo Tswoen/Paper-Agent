@@ -220,6 +220,32 @@ def run_graph_sync(
         )
 
 
+async def thread_has_pending_work(checkpointer: Any, thread_id: str) -> bool:
+    """判断线程是否还有活可干。
+
+    中文注释：
+    - pending_writes 覆盖“任务已写完、checkpoint 未推进”的窗口；
+    - snapshot.next 覆盖“下一步还有节点要跑”；
+    - 两者都空 = 图已经走完。
+
+    TODO(5-send): 引入 Send/子图后，next 只表示节点名，进度展示走事件流。
+    TODO(interrupt): 若将来引入 interrupt，__interrupt__ 写入需要
+    Command(resume=...) 才能继续，不能简单用 None 续跑。
+    """
+
+    if checkpointer is None or not thread_id:
+        return False
+    config = {"configurable": {"thread_id": thread_id}}
+    checkpoint_tuple = await checkpointer.aget_tuple(config)
+    if checkpoint_tuple is None:
+        return False
+    if checkpoint_tuple.pending_writes:
+        return True
+    graph = build_graph(checkpointer=checkpointer)
+    snapshot = await graph.aget_state(config)
+    return bool(snapshot.next)
+
+
 def _build_run_config(
     runtime: WorkflowRuntimeContext | None,
     *,

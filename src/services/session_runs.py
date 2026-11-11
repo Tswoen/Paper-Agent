@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from src.graph.checkpointing import CheckpointStore, build_checkpoint_store
-from src.graph.graph import GRAPH_VERSION
+from src.graph.graph import GRAPH_VERSION, thread_has_pending_work
 from src.graph.runtime import InlineWorkflowSyncPort, WorkflowCancellation, WorkflowRuntimeContext
 from src.graph.runtime_resources import WorkflowRuntimeResources
 from src.llm.config import CheckpointSettings
@@ -287,9 +287,10 @@ class SessionRunService:
         record = self.repo.get(session_key)
         resume_row: JsonObject | None = None
         if _should_resume_from_last_checkpoint(body):
-            # 中文注释：续跑只认 checkpoint。先查最近一次可续跑的 run，再校验版本和
-            # 存档是否还在；任何一项不满足都明确拒绝，不回退到手写恢复现场。
-            resume_row = self.checkpoint_store.registry.latest_resumable(session_key)
+            # 中文注释：续跑只认 checkpoint。先找该会话最近一次线程，再校验版本，
+            # 最后问 checkpointer 还有没有待执行的节点/待重放的写入；账本状态不再
+            # 决定能不能续，找不到活或版本不符都明确拒绝。
+            resume_row = self.checkpoint_store.registry.latest_thread(session_key)
             if resume_row is None:
                 raise ValueError("没有找到可继续执行的恢复现场")
             stored_version = int(resume_row.get("graph_version") or 0)
@@ -298,8 +299,14 @@ class SessionRunService:
                     f"checkpoint 存档由旧版本生成（v{stored_version}），当前版本 v{GRAPH_VERSION}；请重新运行。",
                     409,
                 )
-            if not self.checkpoint_store.has_checkpoints(str(resume_row.get("thread_id") or "")):
-                raise ValueError("该存档的 checkpoint 已不存在，请重新运行")
+            thread_id = str(resume_row["thread_id"])
+            # 中文注释：running 只说明账本没来得及收尾；broker 里没有该会话的活任务，
+            # 才是真正的“无主”。这时把它改成 interrupted；如果本进程确实还在跑，
+            # 这里不动它，后面会被 409 挡住。
+            if resume_row.get("status") == "running" and not self.broker.has_active_session(session_key):
+                self.checkpoint_store.registry.mark_running_interrupted(session_key)
+            if not await thread_has_pending_work(self.checkpoint_store.saver, thread_id):
+                raise ValueError("该线程已经没有待执行的内容，无需继续；请重新运行。")
             content = str(body.get("content") or "").strip() or "继续上次失败的位置"
         else:
             content = str(body.get("content") or "")
