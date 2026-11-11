@@ -9,40 +9,40 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 
 from src.graph.checkpointing import (
     MemoryCheckpointRegistry,
-    build_checkpoint_store,
+    build_checkpoint_bundle,
 )
 from src.llm.config import CheckpointSettings, SystemConfig
 
 
-class CheckpointStoreTest(unittest.TestCase):
+class CheckpointBundleTest(unittest.TestCase):
     """验证 checkpoint 工厂、SQLite 建表与注册表在两种后端上的行为一致。"""
 
     @contextmanager
-    def _sqlite_store(self):
-        """提供临时目录里的 SQLite store；先关连接再删目录，避免 Windows 文件占用。"""
+    def _sqlite_bundle(self):
+        """提供临时目录里的 SQLite bundle；先关连接再删目录，避免 Windows 文件占用。"""
 
         with tempfile.TemporaryDirectory() as temp_dir:
             database_path = Path(temp_dir) / "checkpoints.db"
-            store = build_checkpoint_store(
+            bundle = build_checkpoint_bundle(
                 CheckpointSettings(backend="sqlite", path=str(database_path))
             )
             try:
-                yield store, database_path
+                yield bundle, database_path
             finally:
-                store.close()
+                bundle.close()
 
     def test_memory_backend_uses_in_memory_saver(self):
-        store = build_checkpoint_store(CheckpointSettings(backend="memory"))
-        self.addCleanup(store.close)
+        bundle = build_checkpoint_bundle(CheckpointSettings(backend="memory"))
+        self.addCleanup(bundle.close)
 
-        self.assertIsInstance(store.saver, InMemorySaver)
-        self.assertIsInstance(store.registry, MemoryCheckpointRegistry)
-        self.assertFalse(store.is_persistent)
+        self.assertIsInstance(bundle.saver, InMemorySaver)
+        self.assertIsInstance(bundle.registry, MemoryCheckpointRegistry)
+        self.assertFalse(bundle.is_persistent)
 
     def test_sqlite_backend_creates_database_and_tables(self):
-        with self._sqlite_store() as (store, database_path):
-            self.assertIsInstance(store.saver, SqliteSaver)
-            self.assertTrue(store.is_persistent)
+        with self._sqlite_bundle() as (bundle, database_path):
+            self.assertIsInstance(bundle.saver, SqliteSaver)
+            self.assertTrue(bundle.is_persistent)
             self.assertTrue(database_path.exists())
 
             with closing(sqlite3.connect(database_path)) as connection:
@@ -56,18 +56,18 @@ class CheckpointStoreTest(unittest.TestCase):
             self.assertLessEqual({"checkpoints", "writes", "checkpoint_runs"}, tables)
 
     def test_registry_contract_on_all_backends(self):
-        memory_store = build_checkpoint_store(CheckpointSettings(backend="memory"))
-        self.addCleanup(memory_store.close)
+        memory_bundle = build_checkpoint_bundle(CheckpointSettings(backend="memory"))
+        self.addCleanup(memory_bundle.close)
 
-        with self._sqlite_store() as (sqlite_store, _):
-            for store in (memory_store, sqlite_store):
-                with self.subTest(backend=store.backend):
-                    self._exercise_registry_contract(store)
+        with self._sqlite_bundle() as (sqlite_bundle, _):
+            for bundle in (memory_bundle, sqlite_bundle):
+                with self.subTest(backend=bundle.backend):
+                    self._exercise_registry_contract(bundle)
 
-    def _exercise_registry_contract(self, store) -> None:
+    def _exercise_registry_contract(self, bundle) -> None:
         """同一份断言跑两种实现，任何行为不一致都会在这里暴露。"""
 
-        registry = store.registry
+        registry = bundle.registry
         registry.mark_started(
             thread_id="session-a:turn-1",
             session_key="session-a",
@@ -166,19 +166,19 @@ class CheckpointStoreTest(unittest.TestCase):
         self.assertEqual(registry.mark_running_interrupted("session-a"), 0)
 
     def test_mark_finished_validates_status_and_existence(self):
-        store = build_checkpoint_store(CheckpointSettings(backend="memory"))
-        self.addCleanup(store.close)
+        bundle = build_checkpoint_bundle(CheckpointSettings(backend="memory"))
+        self.addCleanup(bundle.close)
 
         with self.assertRaises(ValueError):
-            store.registry.mark_finished(thread_id="missing", status="running")
+            bundle.registry.mark_finished(thread_id="missing", status="running")
         with self.assertRaises(KeyError):
-            store.registry.mark_finished(thread_id="missing", status="failed")
+            bundle.registry.mark_finished(thread_id="missing", status="failed")
 
     def test_unknown_backend_is_rejected(self):
         with self.assertRaises(ValueError):
             SystemConfig.from_dict({"checkpoint": {"backend": "postgres"}})
         with self.assertRaises(ValueError):
-            build_checkpoint_store(CheckpointSettings(backend="postgres"))
+            build_checkpoint_bundle(CheckpointSettings(backend="postgres"))
 
     def test_system_config_parses_checkpoint_section(self):
         config = SystemConfig.from_dict(

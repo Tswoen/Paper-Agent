@@ -341,7 +341,7 @@ class AsyncCompatSqliteSaver(SqliteSaver):
         return await asyncio.to_thread(self.delete_thread, thread_id)
 
 
-class CheckpointStore:
+class CheckpointBundle:
     """把官方 saver 与 run 账本打包在一起，供服务层一次性注入。"""
 
     def __init__(
@@ -376,14 +376,14 @@ class CheckpointStore:
         if self._connection is not None:
             self._connection.close()
 
-    def __enter__(self) -> "CheckpointStore":
+    def __enter__(self) -> "CheckpointBundle":
         return self
 
     def __exit__(self, exc_type, exc, traceback) -> None:
         self.close()
 
 
-def build_checkpoint_store(settings: CheckpointSettings) -> CheckpointStore:
+def build_checkpoint_bundle(settings: CheckpointSettings) -> CheckpointBundle:
     """按配置创建 checkpoint 存储；节点看不到这个对象，只在 compile 阶段使用 saver。
 
     中文说明：sqlite 会在构造时就把文件和表建好（官方 saver 的 setup 还会切到
@@ -392,7 +392,7 @@ def build_checkpoint_store(settings: CheckpointSettings) -> CheckpointStore:
 
     backend = str(settings.backend or "").strip().lower()
     if backend == "memory":
-        return CheckpointStore(
+        return CheckpointBundle(
             settings=settings,
             saver=InMemorySaver(),
             registry=MemoryCheckpointRegistry(),
@@ -411,7 +411,7 @@ def build_checkpoint_store(settings: CheckpointSettings) -> CheckpointStore:
         except Exception:
             connection.close()
             raise
-        return CheckpointStore(
+        return CheckpointBundle(
             settings=settings,
             saver=saver,
             registry=registry,

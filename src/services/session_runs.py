@@ -8,7 +8,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from src.graph.checkpointing import CheckpointStore, build_checkpoint_store
+from src.graph.checkpointing import CheckpointBundle, build_checkpoint_bundle
 from src.graph.graph import GRAPH_VERSION, thread_has_pending_work
 from src.graph.runtime import InlineWorkflowSyncPort, WorkflowCancellation, WorkflowRuntimeContext
 from src.graph.runtime_resources import WorkflowRuntimeResources
@@ -200,7 +200,7 @@ class SessionRunService:
         repo: SessionRepository,
         message_handler: MessageHandler | None = None,
         broker: SessionRunBroker | None = None,
-        checkpoint_store: CheckpointStore | None = None,
+        checkpoint_bundle: CheckpointBundle | None = None,
     ):
         """初始化 run service。"""
 
@@ -209,7 +209,7 @@ class SessionRunService:
         self.broker = broker or SessionRunBroker()
         # 中文注释：生产由 create_app 注入 SQLite store；直接构造服务（测试、脚本）
         # 默认用内存 store，既能跑同一套代码，又不会在仓库里留下 checkpoint 文件。
-        self.checkpoint_store = checkpoint_store or build_checkpoint_store(
+        self.checkpoint_bundle = checkpoint_bundle or build_checkpoint_bundle(
             CheckpointSettings(backend="memory")
         )
 
@@ -243,10 +243,10 @@ class SessionRunService:
                 # interrupted，让它进入可续跑集合；已完成的行不受影响。
                 interrupted_threads = [
                     str(row["thread_id"])
-                    for row in self.checkpoint_store.registry.list_threads(session_key)
+                    for row in self.checkpoint_bundle.registry.list_threads(session_key)
                     if row.get("status") == "running"
                 ]
-                self.checkpoint_store.registry.mark_running_interrupted(
+                self.checkpoint_bundle.registry.mark_running_interrupted(
                     session_key,
                     finished_at=recovered_at,
                 )
@@ -283,14 +283,14 @@ class SessionRunService:
         # 或会话已被删除），但 broker 知道本进程还有没有活任务。只清理真正无主的
         # running 行；有活任务的会话一律跳过，避免误伤正在跑的 run。
         reconciled_at = utc_now()
-        for row in self.checkpoint_store.registry.list_threads():
+        for row in self.checkpoint_bundle.registry.list_threads():
             if row.get("status") != "running":
                 continue
             owner_session = str(row.get("session_key") or "")
             if not owner_session or self.broker.has_active_session(owner_session):
                 continue
             try:
-                self.checkpoint_store.registry.mark_running_interrupted(
+                self.checkpoint_bundle.registry.mark_running_interrupted(
                     owner_session,
                     finished_at=reconciled_at,
                 )
@@ -322,7 +322,7 @@ class SessionRunService:
             # 中文注释：续跑只认 checkpoint。先找该会话最近一次线程，再校验版本，
             # 最后问 checkpointer 还有没有待执行的节点/待重放的写入；账本状态不再
             # 决定能不能续，找不到活或版本不符都明确拒绝。
-            resume_row = self.checkpoint_store.registry.latest_thread(session_key)
+            resume_row = self.checkpoint_bundle.registry.latest_thread(session_key)
             if resume_row is None:
                 raise ValueError("没有找到可继续执行的恢复现场")
             stored_version = int(resume_row.get("graph_version") or 0)
@@ -336,8 +336,8 @@ class SessionRunService:
             # 才是真正的“无主”。这时把它改成 interrupted；如果本进程确实还在跑，
             # 这里不动它，后面会被 409 挡住。
             if resume_row.get("status") == "running" and not self.broker.has_active_session(session_key):
-                self.checkpoint_store.registry.mark_running_interrupted(session_key)
-            if not await thread_has_pending_work(self.checkpoint_store.saver, thread_id):
+                self.checkpoint_bundle.registry.mark_running_interrupted(session_key)
+            if not await thread_has_pending_work(self.checkpoint_bundle.saver, thread_id):
                 raise ValueError("该线程已经没有待执行的内容，无需继续；请重新运行。")
             content = str(body.get("content") or "").strip() or "继续上次失败的位置"
         else:
@@ -362,7 +362,7 @@ class SessionRunService:
             # 普通 run 的线程按「会话 + 轮」命名，每轮互不影响。
             thread_id = f"{session_key}:{turn_id}"
             resume = False
-        self.checkpoint_store.registry.mark_started(
+        self.checkpoint_bundle.registry.mark_started(
             thread_id=thread_id,
             session_key=session_key,
             turn_id=turn_id,
@@ -524,7 +524,7 @@ class SessionRunService:
             resources=resources,
             cancellation=cancellation,
             session_repo=self.repo,
-            checkpoint_store=self.checkpoint_store,
+            checkpoint_bundle=self.checkpoint_bundle,
             thread_id=thread_id,
         )
 
@@ -716,7 +716,7 @@ class SessionRunService:
         if not thread_id:
             return
         try:
-            self.checkpoint_store.registry.mark_finished(thread_id=thread_id, status=status)
+            self.checkpoint_bundle.registry.mark_finished(thread_id=thread_id, status=status)
         except Exception:
             logger.warning(
                 "checkpoint 记账失败",

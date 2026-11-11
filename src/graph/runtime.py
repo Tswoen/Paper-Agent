@@ -81,7 +81,7 @@ class WorkflowRuntimeContext:
     session_repo: SessionRepository | None = None
     # 中文注释：checkpoint 存储由服务层注入，重启时重建，绝不进 State 或 checkpoint。
     # 节点看不到 saver，它只在 build_graph 的 compile 阶段被使用。
-    checkpoint_store: Any = None
+    checkpoint_bundle: Any = None
     # 中文注释：本次 run 使用的存档线程。续跑时复用的是失败 run 的线程，
     # 可能和当前 turn_id 不同（界面开新一轮，图在旧线程继续）。
     thread_id: str | None = None

@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from contextlib import closing
 
-from src.graph.checkpointing import build_checkpoint_store
+from src.graph.checkpointing import build_checkpoint_bundle
 from src.graph.graph import GRAPH_VERSION
 from src.llm.config import CheckpointSettings
 from src.repositories.sessions.sqlite import SQLiteSessionRepository
@@ -85,9 +85,9 @@ class SessionRunRecoveryTest(unittest.TestCase):
         session = self.repo.create("Restarted app")
         self.repo.set_status(session.key, "running")
         self.repo.set_run_started_at(session.key, "2026-09-18T01:02:03+00:00")
-        checkpoint_store = build_checkpoint_store(CheckpointSettings(backend="memory"))
+        checkpoint_bundle = build_checkpoint_bundle(CheckpointSettings(backend="memory"))
         thread_id = f"{session.key}:turn-1"
-        checkpoint_store.registry.mark_started(
+        checkpoint_bundle.registry.mark_started(
             thread_id=thread_id,
             session_key=session.key,
             turn_id="turn-1",
@@ -98,7 +98,7 @@ class SessionRunRecoveryTest(unittest.TestCase):
         create_app(
             settings_repo=SettingsRepository(initial={}),
             sessions_repo=self.repo,
-            checkpoint_store=checkpoint_store,
+            checkpoint_bundle=checkpoint_bundle,
         )
 
         record = self.repo.get(session.key)
@@ -108,7 +108,7 @@ class SessionRunRecoveryTest(unittest.TestCase):
         self.assertEqual(len(interruption_events), 1)
         # 中文注释：重启对账要把存档线程改成 interrupted，并让事件能对上是哪条线程。
         self.assertEqual(interruption_events[0]["metadata"]["thread_id"], thread_id)
-        self.assertEqual(checkpoint_store.registry.get(thread_id)["status"], "interrupted")
+        self.assertEqual(checkpoint_bundle.registry.get(thread_id)["status"], "interrupted")
 
     def test_session_database_uses_wal_journal_mode(self):
         """会话库初始化后应处于 WAL 模式，避免读写互相阻塞。"""
@@ -124,9 +124,9 @@ class SessionRunRecoveryTest(unittest.TestCase):
         session = self.repo.create("Stale ledger row")
         self.repo.set_status(session.key, "failed")
         self.repo.set_run_started_at(session.key, None)
-        checkpoint_store = build_checkpoint_store(CheckpointSettings(backend="memory"))
+        checkpoint_bundle = build_checkpoint_bundle(CheckpointSettings(backend="memory"))
         thread_id = f"{session.key}:t1"
-        checkpoint_store.registry.mark_started(
+        checkpoint_bundle.registry.mark_started(
             thread_id=thread_id,
             session_key=session.key,
             turn_id="t1",
@@ -136,18 +136,18 @@ class SessionRunRecoveryTest(unittest.TestCase):
 
         recovered = SessionRunService(
             self.repo,
-            checkpoint_store=checkpoint_store,
+            checkpoint_bundle=checkpoint_bundle,
         ).recover_interrupted_runs()
 
         self.assertEqual(recovered, [])
-        self.assertEqual(checkpoint_store.registry.get(thread_id)["status"], "interrupted")
+        self.assertEqual(checkpoint_bundle.registry.get(thread_id)["status"], "interrupted")
 
     def test_recover_sweeps_row_for_missing_session(self):
         """会话已被删除时，账本里的无主 running 行也要能清理。"""
 
-        checkpoint_store = build_checkpoint_store(CheckpointSettings(backend="memory"))
+        checkpoint_bundle = build_checkpoint_bundle(CheckpointSettings(backend="memory"))
         thread_id = "ghost-session:t1"
-        checkpoint_store.registry.mark_started(
+        checkpoint_bundle.registry.mark_started(
             thread_id=thread_id,
             session_key="ghost-session",
             turn_id="t1",
@@ -157,11 +157,11 @@ class SessionRunRecoveryTest(unittest.TestCase):
 
         recovered = SessionRunService(
             self.repo,
-            checkpoint_store=checkpoint_store,
+            checkpoint_bundle=checkpoint_bundle,
         ).recover_interrupted_runs()
 
         self.assertEqual(recovered, [])
-        self.assertEqual(checkpoint_store.registry.get(thread_id)["status"], "interrupted")
+        self.assertEqual(checkpoint_bundle.registry.get(thread_id)["status"], "interrupted")
 
     def test_recover_sweep_skips_active_broker_session(self):
         """broker 里确实有活任务时，扫描不能把它的账本行改掉。"""
@@ -169,9 +169,9 @@ class SessionRunRecoveryTest(unittest.TestCase):
         session = self.repo.create("Active ledger row")
         self.repo.set_status(session.key, "running")
         self.repo.set_run_started_at(session.key, "2026-09-18T01:02:03+00:00")
-        checkpoint_store = build_checkpoint_store(CheckpointSettings(backend="memory"))
+        checkpoint_bundle = build_checkpoint_bundle(CheckpointSettings(backend="memory"))
         thread_id = f"{session.key}:t1"
-        checkpoint_store.registry.mark_started(
+        checkpoint_bundle.registry.mark_started(
             thread_id=thread_id,
             session_key=session.key,
             turn_id="t1",
@@ -188,7 +188,7 @@ class SessionRunRecoveryTest(unittest.TestCase):
                 return SessionRunService(
                     self.repo,
                     broker=broker,
-                    checkpoint_store=checkpoint_store,
+                    checkpoint_bundle=checkpoint_bundle,
                 ).recover_interrupted_runs()
             finally:
                 task.cancel()
@@ -198,26 +198,26 @@ class SessionRunRecoveryTest(unittest.TestCase):
         recovered = asyncio.run(exercise())
 
         self.assertEqual(recovered, [])
-        self.assertEqual(checkpoint_store.registry.get(thread_id)["status"], "running")
+        self.assertEqual(checkpoint_bundle.registry.get(thread_id)["status"], "running")
 
     def test_recover_sweep_is_idempotent(self):
         """连续对账两次，第二次不应再改 finished_at。"""
 
-        checkpoint_store = build_checkpoint_store(CheckpointSettings(backend="memory"))
+        checkpoint_bundle = build_checkpoint_bundle(CheckpointSettings(backend="memory"))
         thread_id = "ghost-idempotent:t1"
-        checkpoint_store.registry.mark_started(
+        checkpoint_bundle.registry.mark_started(
             thread_id=thread_id,
             session_key="ghost-idempotent",
             turn_id="t1",
             run_id="run-ghost",
             graph_version=GRAPH_VERSION,
         )
-        service = SessionRunService(self.repo, checkpoint_store=checkpoint_store)
+        service = SessionRunService(self.repo, checkpoint_bundle=checkpoint_bundle)
 
         service.recover_interrupted_runs()
-        first_finished_at = checkpoint_store.registry.get(thread_id)["finished_at"]
+        first_finished_at = checkpoint_bundle.registry.get(thread_id)["finished_at"]
         service.recover_interrupted_runs()
-        second = checkpoint_store.registry.get(thread_id)
+        second = checkpoint_bundle.registry.get(thread_id)
 
         self.assertEqual(second["status"], "interrupted")
         self.assertEqual(second["finished_at"], first_finished_at)

@@ -9,7 +9,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from graph import build_graph, run_graph
 from src.agents import ReviewRequest
 from src.agents.analyseAgent import AnalyseModelResult
-from src.graph.checkpointing import build_checkpoint_store
+from src.graph.checkpointing import build_checkpoint_bundle
 from src.graph.graph import GRAPH_VERSION, thread_has_pending_work
 from src.llm.config import CheckpointSettings
 from src.repositories.sessions.sqlite import SQLiteSessionRepository
@@ -55,14 +55,14 @@ class CheckpointResumeTest(unittest.TestCase):
             root = Path(temp_dir)
             repo = SQLiteSessionRepository(storage_root=root / "sessions")
             session = repo.create("Resume after failure")
-            store = build_checkpoint_store(
+            bundle = build_checkpoint_bundle(
                 CheckpointSettings(backend="sqlite", path=str(root / "checkpoints.db"))
             )
             try:
                 service = SessionRunService(
                     repo,
                     message_handler=build_paper_workflow_message_handler(repo),
-                    checkpoint_store=store,
+                    checkpoint_bundle=bundle,
                 )
                 stub = _StubService()
                 agent = _FlakyAnalyseAgent()
@@ -87,7 +87,7 @@ class CheckpointResumeTest(unittest.TestCase):
                             },
                         )
                     )
-                    failed_row = store.registry.get(thread_id)
+                    failed_row = bundle.registry.get(thread_id)
                     self.assertEqual(failed_row["status"], "failed")
                     search_calls_before_resume = len(stub.calls)
 
@@ -103,7 +103,7 @@ class CheckpointResumeTest(unittest.TestCase):
                         )
                     )
 
-                row = store.registry.get(thread_id)
+                row = bundle.registry.get(thread_id)
                 self.assertEqual(row["status"], "completed")
                 # 中文注释：注册表保留首次登记的轮次；新 turn 只用于本次消息和事件。
                 self.assertEqual(row["turn_id"], "t1")
@@ -114,27 +114,27 @@ class CheckpointResumeTest(unittest.TestCase):
                 ]
                 self.assertEqual(artifact_names.count("search_manifest.json"), 1)
             finally:
-                store.close()
+                bundle.close()
 
     def test_resume_refuses_graph_version_mismatch(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             repo = SQLiteSessionRepository(storage_root=root / "sessions")
             session = repo.create("Version mismatch")
-            store = build_checkpoint_store(
+            bundle = build_checkpoint_bundle(
                 CheckpointSettings(backend="sqlite", path=str(root / "checkpoints.db"))
             )
             try:
-                service = SessionRunService(repo, checkpoint_store=store)
+                service = SessionRunService(repo, checkpoint_bundle=bundle)
                 thread_id = f"{session.key}:legacy"
-                store.registry.mark_started(
+                bundle.registry.mark_started(
                     thread_id=thread_id,
                     session_key=session.key,
                     turn_id="legacy",
                     run_id="run-legacy",
                     graph_version=GRAPH_VERSION - 1,
                 )
-                store.registry.mark_finished(thread_id=thread_id, status="failed")
+                bundle.registry.mark_finished(thread_id=thread_id, status="failed")
 
                 with self.assertRaises(SessionError) as raised:
                     asyncio.run(
@@ -152,7 +152,7 @@ class CheckpointResumeTest(unittest.TestCase):
                 self.assertIn(f"v{GRAPH_VERSION - 1}", str(raised.exception))
                 self.assertIn(f"v{GRAPH_VERSION}", str(raised.exception))
             finally:
-                store.close()
+                bundle.close()
 
     def test_resume_without_checkpoint_raises(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -180,14 +180,14 @@ class CheckpointResumeTest(unittest.TestCase):
             session = repo.create("Completed run")
             service = SessionRunService(repo)
             thread_id = f"{session.key}:t1"
-            service.checkpoint_store.registry.mark_started(
+            service.checkpoint_bundle.registry.mark_started(
                 thread_id=thread_id,
                 session_key=session.key,
                 turn_id="t1",
                 run_id="run-done",
                 graph_version=GRAPH_VERSION,
             )
-            service.checkpoint_store.registry.mark_finished(
+            service.checkpoint_bundle.registry.mark_finished(
                 thread_id=thread_id, status="completed"
             )
 
@@ -208,7 +208,7 @@ class CheckpointResumeTest(unittest.TestCase):
             root = Path(temp_dir)
             repo = SQLiteSessionRepository(storage_root=root / "sessions")
             session = repo.create("Restart resume")
-            store = build_checkpoint_store(
+            bundle = build_checkpoint_bundle(
                 CheckpointSettings(backend="sqlite", path=str(root / "checkpoints.db"))
             )
             stub = _StubService()
@@ -218,7 +218,7 @@ class CheckpointResumeTest(unittest.TestCase):
                 first_service = SessionRunService(
                     repo,
                     message_handler=build_paper_workflow_message_handler(repo),
-                    checkpoint_store=store,
+                    checkpoint_bundle=bundle,
                 )
                 with hermetic_graph_llms(), _fake_backends(
                     stub,
@@ -239,10 +239,10 @@ class CheckpointResumeTest(unittest.TestCase):
                             },
                         )
                     )
-                    self.assertEqual(store.registry.get(thread_id)["status"], "failed")
+                    self.assertEqual(bundle.registry.get(thread_id)["status"], "failed")
 
                     # 中文注释：模拟进程在 finalize 之前被 kill——会话和账本都停在 running。
-                    store.registry.mark_started(
+                    bundle.registry.mark_started(
                         thread_id=thread_id,
                         session_key=session.key,
                         turn_id="t1",
@@ -252,19 +252,19 @@ class CheckpointResumeTest(unittest.TestCase):
                     repo.set_status(session.key, "running")
                     repo.set_run_started_at(session.key, "2026-11-10T12:00:00+00:00")
 
-                store.close()
-                restarted_store = build_checkpoint_store(
+                bundle.close()
+                restarted_bundle = build_checkpoint_bundle(
                     CheckpointSettings(backend="sqlite", path=str(root / "checkpoints.db"))
                 )
                 try:
                     restarted_service = SessionRunService(
                         repo,
                         message_handler=build_paper_workflow_message_handler(repo),
-                        checkpoint_store=restarted_store,
+                        checkpoint_bundle=restarted_bundle,
                     )
                     self.assertEqual(restarted_service.recover_interrupted_runs(), [session.key])
                     self.assertEqual(
-                        restarted_store.registry.get(thread_id)["status"], "interrupted"
+                        restarted_bundle.registry.get(thread_id)["status"], "interrupted"
                     )
 
                     with hermetic_graph_llms(), _fake_backends(
@@ -288,13 +288,13 @@ class CheckpointResumeTest(unittest.TestCase):
                         )
 
                     self.assertEqual(
-                        restarted_store.registry.get(thread_id)["status"], "completed"
+                        restarted_bundle.registry.get(thread_id)["status"], "completed"
                     )
                 finally:
-                    restarted_store.close()
+                    restarted_bundle.close()
             finally:
                 # 中文注释：close 是幂等的，第一次分支已经关过也没关系。
-                store.close()
+                bundle.close()
 
     def test_resume_uses_latest_thread_not_older_failure(self):
         """最新一轮已经成功时，不能跳回去续更早的失败线程。"""
@@ -303,7 +303,7 @@ class CheckpointResumeTest(unittest.TestCase):
             repo = SQLiteSessionRepository(storage_root=Path(temp_dir) / "sessions")
             session = repo.create("Latest thread wins")
             service = SessionRunService(repo)
-            registry = service.checkpoint_store.registry
+            registry = service.checkpoint_bundle.registry
             old_thread = f"{session.key}:t1"
             new_thread = f"{session.key}:t2"
 
@@ -366,9 +366,9 @@ class CheckpointResumeTest(unittest.TestCase):
             self.addCleanup(temp_dir.cleanup)
             repo = SQLiteSessionRepository(storage_root=Path(temp_dir.name) / "sessions")
             session = repo.create("Self heal")
-            store = build_checkpoint_store(CheckpointSettings(backend="memory"))
+            bundle = build_checkpoint_bundle(CheckpointSettings(backend="memory"))
             thread_id = f"{session.key}:t1"
-            store.registry.mark_started(
+            bundle.registry.mark_started(
                 thread_id=thread_id,
                 session_key=session.key,
                 turn_id="t1",
@@ -380,7 +380,7 @@ class CheckpointResumeTest(unittest.TestCase):
             async def handler(chat_id, content, frame, emit):
                 captured.update(frame)
 
-            service = SessionRunService(repo, message_handler=handler, checkpoint_store=store)
+            service = SessionRunService(repo, message_handler=handler, checkpoint_bundle=bundle)
 
             async def fake_pending(checkpointer, tid):
                 return True
@@ -389,9 +389,9 @@ class CheckpointResumeTest(unittest.TestCase):
                 "src.services.session_runs.thread_has_pending_work",
                 new=fake_pending,
             ), mock.patch.object(
-                store.registry,
+                bundle.registry,
                 "mark_running_interrupted",
-                wraps=store.registry.mark_running_interrupted,
+                wraps=bundle.registry.mark_running_interrupted,
             ) as healed:
                 accepted = await service.start_run(
                     session.key,
@@ -408,7 +408,7 @@ class CheckpointResumeTest(unittest.TestCase):
                 "expected_thread": thread_id,
                 "runtime_thread": captured["runtime_context"].thread_id,
                 "resume": captured["resume_from_checkpoint"],
-                "row": store.registry.get(thread_id),
+                "row": bundle.registry.get(thread_id),
                 "healed": healed.call_count,
             }
 
@@ -428,7 +428,7 @@ class CheckpointResumeTest(unittest.TestCase):
             session = repo.create("Nothing pending")
             service = SessionRunService(repo)
             thread_id = f"{session.key}:t1"
-            service.checkpoint_store.registry.mark_started(
+            service.checkpoint_bundle.registry.mark_started(
                 thread_id=thread_id,
                 session_key=session.key,
                 turn_id="t1",
@@ -457,7 +457,7 @@ class CheckpointResumeTest(unittest.TestCase):
 
             self.assertIn("没有待执行的内容", str(raised.exception))
             self.assertEqual(
-                service.checkpoint_store.registry.get(thread_id)["status"],
+                service.checkpoint_bundle.registry.get(thread_id)["status"],
                 "interrupted",
             )
 
