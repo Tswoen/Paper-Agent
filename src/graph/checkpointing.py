@@ -80,6 +80,10 @@ class CheckpointRegistry(ABC):
         """返回当前会话最近一次可续跑的 run；没有时返回 None。"""
 
     @abstractmethod
+    def mark_running_interrupted(self, session_key: str, finished_at: str | None = None) -> int:
+        """把会话下所有 running 行改成 interrupted，返回影响行数。"""
+
+    @abstractmethod
     def list_threads(self, session_key: str | None = None) -> list[JsonObject]:
         """按更新时间倒序列出登记记录，可按会话过滤。"""
 
@@ -187,6 +191,19 @@ class SqliteCheckpointRegistry(CheckpointRegistry):
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def mark_running_interrupted(self, session_key: str, finished_at: str | None = None) -> int:
+        now = finished_at or utc_now()
+        with self._connection:
+            cursor = self._connection.execute(
+                """
+                UPDATE checkpoint_runs
+                SET status = 'interrupted', finished_at = ?, updated_at = ?
+                WHERE session_key = ? AND status = 'running'
+                """,
+                (now, now, session_key),
+            )
+        return cursor.rowcount
+
     def delete_thread(self, thread_id: str) -> bool:
         with self._connection:
             cursor = self._connection.execute(
@@ -258,6 +275,17 @@ class MemoryCheckpointRegistry(CheckpointRegistry):
             return None
         latest = max(candidates, key=lambda row: row["finished_at"] or row["updated_at"])
         return dict(latest)
+
+    def mark_running_interrupted(self, session_key: str, finished_at: str | None = None) -> int:
+        now = finished_at or utc_now()
+        count = 0
+        for row in self._rows.values():
+            if row["session_key"] == session_key and row["status"] == "running":
+                row["status"] = "interrupted"
+                row["finished_at"] = now
+                row["updated_at"] = now
+                count += 1
+        return count
 
     def list_threads(self, session_key: str | None = None) -> list[JsonObject]:
         rows = [
@@ -344,6 +372,11 @@ class CheckpointStore:
     @property
     def is_persistent(self) -> bool:
         return self.backend == "sqlite"
+
+    def has_checkpoints(self, thread_id: str) -> bool:
+        """判断线程在 saver 里是否真的还有快照，防止账本有行、存档已被清掉。"""
+
+        return self.saver.get_tuple({"configurable": {"thread_id": thread_id}}) is not None
 
     def close(self) -> None:
         """先关注册表，再关官方 saver 持有的连接；可重复调用。"""

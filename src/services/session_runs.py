@@ -236,8 +236,20 @@ class SessionRunService:
 
             recovered_at = utc_now()
             was_running = previous_status == "running"
+            interrupted_threads: list[str] = []
             if was_running:
                 self.repo.set_status(session_key, "failed")
+                # 中文注释：进程重启后，把该会话下仍标记 running 的存档线程改成
+                # interrupted，让它进入可续跑集合；已完成的行不受影响。
+                interrupted_threads = [
+                    str(row["thread_id"])
+                    for row in self.checkpoint_store.registry.list_threads(session_key)
+                    if row.get("status") == "running"
+                ]
+                self.checkpoint_store.registry.mark_running_interrupted(
+                    session_key,
+                    finished_at=recovered_at,
+                )
             self.repo.set_run_started_at(session_key, None)
             self.repo.append_event(
                 session_key,
@@ -253,6 +265,7 @@ class SessionRunService:
                     "run_started_at": run_started_at,
                     "recovery_status": "process_restarted",
                     "recovered_at": recovered_at,
+                    "thread_id": interrupted_threads[0] if len(interrupted_threads) == 1 else None,
                 },
                 created_at=recovered_at,
             )
@@ -272,22 +285,26 @@ class SessionRunService:
 
         body = body or {}
         record = self.repo.get(session_key)
-        checkpoint = body.get("read_resume_checkpoint")
+        resume_row: JsonObject | None = None
         if _should_resume_from_last_checkpoint(body):
-            # 中文注释：前端只需要告诉后端“继续当前会话”，不用把很大的恢复现场再传回来。
-            # 后端会从当前会话的历史失败记录里找到最近一次可恢复的位置，再交给原来的恢复流程。
-            checkpoint = _latest_read_resume_checkpoint(record)
-            if checkpoint is None:
+            # 中文注释：续跑只认 checkpoint。先查最近一次可续跑的 run，再校验版本和
+            # 存档是否还在；任何一项不满足都明确拒绝，不回退到手写恢复现场。
+            resume_row = self.checkpoint_store.registry.latest_resumable(session_key)
+            if resume_row is None:
                 raise ValueError("没有找到可继续执行的恢复现场")
-            body = copy.deepcopy(body)
-            body["read_resume_checkpoint"] = checkpoint
-
-        content = str(body.get("content") or "")
-        has_resume_checkpoint = isinstance(checkpoint, dict)
-        if not content.strip() and not body.get("media") and not has_resume_checkpoint:
-            raise ValueError("content is required")
-        if has_resume_checkpoint and not content.strip():
-            content = _content_from_checkpoint(checkpoint)
+            stored_version = int(resume_row.get("graph_version") or 0)
+            if stored_version != GRAPH_VERSION:
+                raise SessionError(
+                    f"checkpoint 存档由旧版本生成（v{stored_version}），当前版本 v{GRAPH_VERSION}；请重新运行。",
+                    409,
+                )
+            if not self.checkpoint_store.has_checkpoints(str(resume_row.get("thread_id") or "")):
+                raise ValueError("该存档的 checkpoint 已不存在，请重新运行")
+            content = str(body.get("content") or "").strip() or "继续上次失败的位置"
+        else:
+            content = str(body.get("content") or "")
+            if not content.strip() and not body.get("media"):
+                raise ValueError("content is required")
 
         if record.run_started_at or record.status == "running":
             raise SessionError("session is already running", 409)
@@ -297,9 +314,15 @@ class SessionRunService:
         run_id = str(body.get("run_id") or f"run_{uuid.uuid4().hex}")
         media = list(body.get("media") or [])
         started_at = utc_now()
-        # 中文注释：普通 run 的线程按「会话 + 轮」命名；续跑复用旧线程的规则
-        # 在阶段 4 的后续提交里接入，这里先生成并登记普通线程。
-        thread_id = f"{session_key}:{turn_id}"
+        if resume_row is not None:
+            # 中文注释：续跑复用失败 run 的线程；新 turn_id 只用于本次用户消息和事件，
+            # 因此事件里的 thread_id 与 turn_id 可以不同。
+            thread_id = str(resume_row["thread_id"])
+            resume = True
+        else:
+            # 普通 run 的线程按「会话 + 轮」命名，每轮互不影响。
+            thread_id = f"{session_key}:{turn_id}"
+            resume = False
         self.checkpoint_store.registry.mark_started(
             thread_id=thread_id,
             session_key=session_key,
@@ -350,7 +373,7 @@ class SessionRunService:
                 content=content,
                 body=copy.deepcopy(body),
                 thread_id=thread_id,
-                resume=False,
+                resume=resume,
             )
         )
         self.broker.attach_task(run_id, task)
@@ -741,7 +764,11 @@ def _should_resume_from_last_checkpoint(body: JsonObject) -> bool:
 
 
 def _latest_read_resume_checkpoint(record: SessionRecord) -> JsonObject | None:
-    """从会话历史里找到最近一次阅读节点保存的恢复现场。"""
+    """从会话历史里找到最近一次阅读节点保存的恢复现场。
+
+    中文注释：阶段 4 起生产续跑改由 checkpoint 驱动，本函数不再被 start_run 调用；
+    保留它只是为了让旧入口和历史数据仍有可读路径，阶段 5b 随手写恢复整体删除。
+    """
 
     # 中文注释：事件是按时间从早到晚保存的，所以倒着找，最先遇到的就是最近一次失败。
     for event in reversed(record.events):
@@ -766,7 +793,10 @@ def _latest_read_resume_checkpoint(record: SessionRecord) -> JsonObject | None:
 
 
 def _content_from_checkpoint(checkpoint: JsonObject) -> str:
-    """恢复执行时没有新输入内容则沿用 checkpoint 里的原始主题。"""
+    """恢复执行时没有新输入内容则沿用 checkpoint 里的原始主题。
+
+    中文注释：阶段 4 起仅旧入口可能用到；阶段 5b 随手写恢复删除。
+    """
 
     request = checkpoint.get("request")
     if isinstance(request, dict):

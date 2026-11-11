@@ -136,6 +136,26 @@ class CheckpointStoreTest(unittest.TestCase):
         self.assertFalse(registry.delete_thread("session-a:turn-2"))
         self.assertEqual(len(registry.list_threads()), 1)
 
+        # 进程重启对账：running → interrupted 后进入可续跑集合，且不会重复计数。
+        registry.mark_started(
+            thread_id="session-a:turn-3",
+            session_key="session-a",
+            turn_id="turn-3",
+            run_id="run-4",
+            graph_version=1,
+            started_at="2026-11-10T12:00:00+00:00",
+        )
+        self.assertEqual(
+            registry.mark_running_interrupted(
+                "session-a", finished_at="2026-11-10T12:05:00+00:00"
+            ),
+            1,
+        )
+        row = registry.get("session-a:turn-3")
+        self.assertEqual(row["status"], "interrupted")
+        self.assertEqual(registry.latest_resumable("session-a")["thread_id"], "session-a:turn-3")
+        self.assertEqual(registry.mark_running_interrupted("session-a"), 0)
+
     def test_mark_finished_validates_status_and_existence(self):
         store = build_checkpoint_store(CheckpointSettings(backend="memory"))
         self.addCleanup(store.close)

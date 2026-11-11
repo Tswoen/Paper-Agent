@@ -5,6 +5,7 @@ import unittest
 from contextlib import closing
 
 from src.graph.checkpointing import build_checkpoint_store
+from src.graph.graph import GRAPH_VERSION
 from src.llm.config import CheckpointSettings
 from src.repositories.sessions.sqlite import SQLiteSessionRepository
 from src.repositories.settings.json import SettingsRepository
@@ -84,17 +85,30 @@ class SessionRunRecoveryTest(unittest.TestCase):
         session = self.repo.create("Restarted app")
         self.repo.set_status(session.key, "running")
         self.repo.set_run_started_at(session.key, "2026-09-18T01:02:03+00:00")
+        checkpoint_store = build_checkpoint_store(CheckpointSettings(backend="memory"))
+        thread_id = f"{session.key}:turn-1"
+        checkpoint_store.registry.mark_started(
+            thread_id=thread_id,
+            session_key=session.key,
+            turn_id="turn-1",
+            run_id="run-orphan",
+            graph_version=GRAPH_VERSION,
+        )
 
         create_app(
             settings_repo=SettingsRepository(initial={}),
             sessions_repo=self.repo,
-            checkpoint_store=build_checkpoint_store(CheckpointSettings(backend="memory")),
+            checkpoint_store=checkpoint_store,
         )
 
         record = self.repo.get(session.key)
         self.assertEqual(record.status, "failed")
         self.assertIsNone(record.run_started_at)
-        self.assertTrue(any(event["event_type"] == "run_interrupted" for event in record.events))
+        interruption_events = [event for event in record.events if event["event_type"] == "run_interrupted"]
+        self.assertEqual(len(interruption_events), 1)
+        # 中文注释：重启对账要把存档线程改成 interrupted，并让事件能对上是哪条线程。
+        self.assertEqual(interruption_events[0]["metadata"]["thread_id"], thread_id)
+        self.assertEqual(checkpoint_store.registry.get(thread_id)["status"], "interrupted")
 
     def test_session_database_uses_wal_journal_mode(self):
         """会话库初始化后应处于 WAL 模式，避免读写互相阻塞。"""
