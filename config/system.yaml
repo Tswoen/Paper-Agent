@@ -45,7 +45,9 @@ read:
 checkpoint:
   backend: sqlite
   path: data/checkpoints.db
-  # sync 保证每个节点结束时快照已经写到磁盘；默认的 async 在崩溃时可能丢最后一个快照。
+  # sync：每个节点结束前同步落盘，崩溃后可从最后成功节点续跑（推荐）。
+  # async：后台异步落盘，崩溃时可能丢最后一个快照。
+  # exit：只在整张图结束时落盘，中途崩溃没有可续的断点。
   durability: sync
   # 过渡期保留策略：完成的 run 保留 7 天，失败/取消/中断的保留 30 天。
   retention:

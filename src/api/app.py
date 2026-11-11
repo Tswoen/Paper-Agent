@@ -67,6 +67,13 @@ def create_app(
     # 中文注释：生产默认按 config/system.yaml 使用 SQLite 存档；测试显式注入内存 bundle，
     # 既不落盘、也不会在仓库里留下 data/checkpoints.db。
     checkpoint_bundle = checkpoint_bundle or build_checkpoint_bundle(SystemConfig.load().checkpoint)
+    # 中文注释：非 sync 的 durability 会削弱崩溃续跑；在启动时明确提醒，避免改配置后
+    # 不知道代价。内存 bundle 本来就不保证持久化，不在此列。
+    if checkpoint_bundle.is_persistent and checkpoint_bundle.settings.durability != "sync":
+        logger.warning(
+            "checkpoint durability 不是 sync，崩溃时可能丢失最后一个快照",
+            extra={"durability": checkpoint_bundle.settings.durability},
+        )
     run_service = SessionRunService(
         repo=sessions_repo,
         message_handler=message_handler,

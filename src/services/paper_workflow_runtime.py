@@ -41,9 +41,15 @@ def build_paper_workflow_message_handler(repo: SessionRepository):
 
         checkpoint = frame.get("read_resume_checkpoint")
         # 中文注释：存档能力来自运行时上下文；直接调用 handler（没有 run service）
-        # 时 store 为空，图就退回“不落盘”的旧行为。
+        # 时 bundle 为空，图就退回“不落盘”的旧行为。
         checkpointer = runtime.checkpoint_bundle.saver if runtime.checkpoint_bundle is not None else None
         thread_id = runtime.thread_id
+        # 中文注释：写入时机跟随 bundle 的配置；没有 bundle 时传 None，表示不配置持久化。
+        durability = (
+            runtime.checkpoint_bundle.settings.durability
+            if runtime.checkpoint_bundle is not None
+            else None
+        )
         # 中文注释：只有同时具备 saver 和线程时才认续跑标记；旧入口即使收到
         # 客户端塞进来的 resume 标记，也退回普通运行，避免在没有存档时误触发。
         resume = bool(frame.get("resume_from_checkpoint")) and checkpointer is not None and thread_id is not None
@@ -75,6 +81,7 @@ def build_paper_workflow_message_handler(repo: SessionRepository):
             checkpointer=checkpointer,
             thread_id=thread_id,
             resume=resume,
+            durability=durability,
         )
 
     return _handler

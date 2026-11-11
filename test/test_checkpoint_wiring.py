@@ -4,10 +4,14 @@ import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
+from unittest import mock
 
+from src.api import create_app
 from src.graph.checkpointing import build_checkpoint_bundle
+from src.graph.runtime import WorkflowRuntimeContext
 from src.llm.config import CheckpointSettings
 from src.repositories.sessions.sqlite import SQLiteSessionRepository
+from src.repositories.settings.json import SettingsRepository
 from src.services.paper_workflow_runtime import build_paper_workflow_message_handler
 from src.services.session_runs import SessionRunService
 
@@ -129,6 +133,65 @@ class CheckpointWiringTest(unittest.TestCase):
 
         self.assertFalse(service.checkpoint_bundle.is_persistent)
         self.assertEqual(service.checkpoint_bundle.registry.list_threads(), [])
+
+    def test_handler_passes_durability_from_bundle_settings(self):
+        """配置里的 durability 要真正传到 run_graph，而不是被默认值吞掉。"""
+
+        async def exercise():
+            temp_dir = tempfile.TemporaryDirectory()
+            self.addCleanup(temp_dir.cleanup)
+            repo = SQLiteSessionRepository(storage_root=Path(temp_dir.name) / "sessions")
+            bundle = build_checkpoint_bundle(
+                CheckpointSettings(backend="memory", durability="async")
+            )
+            runtime = WorkflowRuntimeContext(
+                session_key="s",
+                turn_id="t",
+                thread_id="s:t",
+                checkpoint_bundle=bundle,
+            )
+            handler = build_paper_workflow_message_handler(repo)
+            with mock.patch(
+                "src.services.paper_workflow_runtime.run_graph",
+                new=mock.AsyncMock(),
+            ) as mocked:
+                await handler(
+                    "s",
+                    "topic",
+                    {"turn_id": "t", "run_id": "r", "runtime_context": runtime},
+                    lambda event: event,
+                )
+            return mocked.await_args.kwargs, bundle
+
+        kwargs, bundle = asyncio.run(exercise())
+
+        self.assertEqual(kwargs["durability"], "async")
+        self.assertIs(kwargs["checkpointer"], bundle.saver)
+
+    def test_create_app_warns_when_durability_is_not_sync(self):
+        """持久化 bundle 选了非 sync 时，启动日志要提醒可能丢失最后一个快照。"""
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = SQLiteSessionRepository(storage_root=root / "sessions")
+            bundle = build_checkpoint_bundle(
+                CheckpointSettings(
+                    backend="sqlite",
+                    path=str(root / "checkpoints.db"),
+                    durability="async",
+                )
+            )
+            try:
+                with mock.patch("src.api.app.logger.warning") as warning:
+                    create_app(
+                        settings_repo=SettingsRepository(initial={}),
+                        sessions_repo=repo,
+                        checkpoint_bundle=bundle,
+                    )
+                messages = [str(call) for call in warning.call_args_list]
+                self.assertTrue(any("durability" in message for message in messages))
+            finally:
+                bundle.close()
 
 
 if __name__ == "__main__":

@@ -116,6 +116,7 @@ class CheckpointSettings:
 
     backend: str = "sqlite"
     path: str = "data/checkpoints.db"
+    # sync：每个 superstep 前落盘；async：异步落盘；exit：只在图结束时落盘。
     durability: str = "sync"
     retention_enabled: bool = True
     retention_completed_days: int = 7

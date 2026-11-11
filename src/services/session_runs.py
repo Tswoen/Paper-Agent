@@ -207,8 +207,8 @@ class SessionRunService:
         self.repo = repo
         self.message_handler = message_handler
         self.broker = broker or SessionRunBroker()
-        # 中文注释：生产由 create_app 注入 SQLite store；直接构造服务（测试、脚本）
-        # 默认用内存 store，既能跑同一套代码，又不会在仓库里留下 checkpoint 文件。
+        # 中文注释：生产由 create_app 注入 SQLite bundle；直接构造服务（测试、脚本）
+        # 默认用内存 bundle，既能跑同一套代码，又不会在仓库里留下 checkpoint 文件。
         self.checkpoint_bundle = checkpoint_bundle or build_checkpoint_bundle(
             CheckpointSettings(backend="memory")
         )
