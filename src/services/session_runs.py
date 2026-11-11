@@ -278,6 +278,38 @@ class SessionRunService:
                     "run_started_at": run_started_at,
                 },
             )
+
+        # 中文注释：会话状态可能已经不知道这些行（收尾写失败、进程在两次写之间崩溃、
+        # 或会话已被删除），但 broker 知道本进程还有没有活任务。只清理真正无主的
+        # running 行；有活任务的会话一律跳过，避免误伤正在跑的 run。
+        reconciled_at = utc_now()
+        for row in self.checkpoint_store.registry.list_threads():
+            if row.get("status") != "running":
+                continue
+            owner_session = str(row.get("session_key") or "")
+            if not owner_session or self.broker.has_active_session(owner_session):
+                continue
+            try:
+                self.checkpoint_store.registry.mark_running_interrupted(
+                    owner_session,
+                    finished_at=reconciled_at,
+                )
+                logger.warning(
+                    "清理无主 checkpoint 账本行",
+                    extra={
+                        "session_key": owner_session,
+                        "thread_id": row.get("thread_id"),
+                    },
+                )
+            except Exception:
+                logger.warning(
+                    "清理无主 checkpoint 账本行失败",
+                    extra={
+                        "session_key": owner_session,
+                        "thread_id": row.get("thread_id"),
+                    },
+                    exc_info=True,
+                )
         return recovered
 
     async def start_run(self, session_key: str, body: JsonObject | None = None) -> JsonObject:

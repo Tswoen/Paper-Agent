@@ -118,6 +118,110 @@ class SessionRunRecoveryTest(unittest.TestCase):
 
         self.assertEqual(journal_mode, "wal")
 
+    def test_recover_marks_ownerless_row_without_session_marker(self):
+        """会话已经不在 running，但账本还 running：兜底扫描要把它修成 interrupted。"""
+
+        session = self.repo.create("Stale ledger row")
+        self.repo.set_status(session.key, "failed")
+        self.repo.set_run_started_at(session.key, None)
+        checkpoint_store = build_checkpoint_store(CheckpointSettings(backend="memory"))
+        thread_id = f"{session.key}:t1"
+        checkpoint_store.registry.mark_started(
+            thread_id=thread_id,
+            session_key=session.key,
+            turn_id="t1",
+            run_id="run-stale",
+            graph_version=GRAPH_VERSION,
+        )
+
+        recovered = SessionRunService(
+            self.repo,
+            checkpoint_store=checkpoint_store,
+        ).recover_interrupted_runs()
+
+        self.assertEqual(recovered, [])
+        self.assertEqual(checkpoint_store.registry.get(thread_id)["status"], "interrupted")
+
+    def test_recover_sweeps_row_for_missing_session(self):
+        """会话已被删除时，账本里的无主 running 行也要能清理。"""
+
+        checkpoint_store = build_checkpoint_store(CheckpointSettings(backend="memory"))
+        thread_id = "ghost-session:t1"
+        checkpoint_store.registry.mark_started(
+            thread_id=thread_id,
+            session_key="ghost-session",
+            turn_id="t1",
+            run_id="run-ghost",
+            graph_version=GRAPH_VERSION,
+        )
+
+        recovered = SessionRunService(
+            self.repo,
+            checkpoint_store=checkpoint_store,
+        ).recover_interrupted_runs()
+
+        self.assertEqual(recovered, [])
+        self.assertEqual(checkpoint_store.registry.get(thread_id)["status"], "interrupted")
+
+    def test_recover_sweep_skips_active_broker_session(self):
+        """broker 里确实有活任务时，扫描不能把它的账本行改掉。"""
+
+        session = self.repo.create("Active ledger row")
+        self.repo.set_status(session.key, "running")
+        self.repo.set_run_started_at(session.key, "2026-09-18T01:02:03+00:00")
+        checkpoint_store = build_checkpoint_store(CheckpointSettings(backend="memory"))
+        thread_id = f"{session.key}:t1"
+        checkpoint_store.registry.mark_started(
+            thread_id=thread_id,
+            session_key=session.key,
+            turn_id="t1",
+            run_id="run-active",
+            graph_version=GRAPH_VERSION,
+        )
+        broker = SessionRunBroker()
+
+        async def exercise():
+            await broker.open_run(session.key, "run-active", "turn-active", "2026-09-18T01:02:03+00:00")
+            task = asyncio.create_task(asyncio.sleep(60))
+            broker.attach_task("run-active", task)
+            try:
+                return SessionRunService(
+                    self.repo,
+                    broker=broker,
+                    checkpoint_store=checkpoint_store,
+                ).recover_interrupted_runs()
+            finally:
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+
+        recovered = asyncio.run(exercise())
+
+        self.assertEqual(recovered, [])
+        self.assertEqual(checkpoint_store.registry.get(thread_id)["status"], "running")
+
+    def test_recover_sweep_is_idempotent(self):
+        """连续对账两次，第二次不应再改 finished_at。"""
+
+        checkpoint_store = build_checkpoint_store(CheckpointSettings(backend="memory"))
+        thread_id = "ghost-idempotent:t1"
+        checkpoint_store.registry.mark_started(
+            thread_id=thread_id,
+            session_key="ghost-idempotent",
+            turn_id="t1",
+            run_id="run-ghost",
+            graph_version=GRAPH_VERSION,
+        )
+        service = SessionRunService(self.repo, checkpoint_store=checkpoint_store)
+
+        service.recover_interrupted_runs()
+        first_finished_at = checkpoint_store.registry.get(thread_id)["finished_at"]
+        service.recover_interrupted_runs()
+        second = checkpoint_store.registry.get(thread_id)
+
+        self.assertEqual(second["status"], "interrupted")
+        self.assertEqual(second["finished_at"], first_finished_at)
+
 
 if __name__ == "__main__":
     unittest.main()
