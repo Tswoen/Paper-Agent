@@ -501,6 +501,32 @@ class CheckpointResumeTest(unittest.TestCase):
         self.assertEqual(after_next, ())
         self.assertTrue(pending)
 
+    def test_start_run_rejects_running_session_before_checkpoint_lookup(self):
+        """会话在跑时应直接 409，不能先去做账本/存档查询。"""
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = SQLiteSessionRepository(storage_root=Path(temp_dir) / "sessions")
+            session = repo.create("Running session")
+            repo.set_status(session.key, "running")
+            repo.set_run_started_at(session.key, "2026-11-11T12:00:00+00:00")
+            service = SessionRunService(repo)
+
+            with mock.patch("src.services.session_runs.thread_has_pending_work") as pending:
+                with self.assertRaises(SessionError) as raised:
+                    asyncio.run(
+                        service.start_run(
+                            session.key,
+                            {
+                                "content": "继续",
+                                "turn_id": "t1",
+                                "resume_from_last_checkpoint": True,
+                            },
+                        )
+                    )
+
+            self.assertEqual(raised.exception.status, 409)
+            pending.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

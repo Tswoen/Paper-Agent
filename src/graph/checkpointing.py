@@ -104,11 +104,17 @@ class SqliteCheckpointRegistry(CheckpointRegistry):
     def __init__(self, database_path: Path | str):
         self._database_path = Path(database_path)
         self._database_path.parent.mkdir(parents=True, exist_ok=True)
-        self._connection = sqlite3.connect(self._database_path, check_same_thread=False)
-        self._connection.row_factory = sqlite3.Row
-        self._connection.execute("PRAGMA busy_timeout = 5000")
-        self._connection.executescript(_REGISTRY_SCHEMA)
-        self._connection.commit()
+        connection = sqlite3.connect(self._database_path, check_same_thread=False)
+        try:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA busy_timeout = 5000")
+            connection.executescript(_REGISTRY_SCHEMA)
+            connection.commit()
+        except Exception:
+            # 中文注释：建表失败时先关掉自己的连接，避免半初始化的连接变成文件句柄泄漏。
+            connection.close()
+            raise
+        self._connection = connection
         self._closed = False
 
     def mark_started(
@@ -365,6 +371,16 @@ class CheckpointBundle:
     @property
     def is_persistent(self) -> bool:
         return self.backend == "sqlite"
+
+    def delete_thread(self, thread_id: str) -> None:
+        """删除线程的全部快照与索引。
+
+        中文注释：先删 saver 里的 checkpoint/writes，再删账本行。这样如果中途失败，
+        索引还在，retention 下次能重试；反过来会留下没有索引的孤儿快照。
+        """
+
+        self.saver.delete_thread(thread_id)
+        self.registry.delete_thread(thread_id)
 
     def close(self) -> None:
         """先关注册表，再关官方 saver 持有的连接；可重复调用。"""

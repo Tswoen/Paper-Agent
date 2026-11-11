@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from contextlib import closing, contextmanager
 from pathlib import Path
+from unittest import mock
 
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.sqlite import SqliteSaver
@@ -173,6 +174,51 @@ class CheckpointBundleTest(unittest.TestCase):
             bundle.registry.mark_finished(thread_id="missing", status="running")
         with self.assertRaises(KeyError):
             bundle.registry.mark_finished(thread_id="missing", status="failed")
+
+    def test_bundle_delete_thread_removes_checkpoints_and_index(self):
+        """retention 的删除入口必须同时清掉 saver 快照和账本行。"""
+
+        bundle = build_checkpoint_bundle(CheckpointSettings(backend="memory"))
+        self.addCleanup(bundle.close)
+        thread_id = "delete-thread"
+        config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+        bundle.saver.put(
+            config,
+            {
+                "v": 1,
+                "id": "checkpoint-1",
+                "ts": "2026-11-11T00:00:00+00:00",
+                "channel_values": {},
+                "channel_versions": {},
+                "versions_seen": {},
+                "updated_channels": None,
+            },
+            {"source": "input", "step": 0, "parents": {}},
+            {},
+        )
+        bundle.registry.mark_started(
+            thread_id=thread_id,
+            session_key="session-delete",
+            turn_id="turn-1",
+            run_id="run-1",
+            graph_version=1,
+        )
+
+        bundle.delete_thread(thread_id)
+
+        self.assertIsNone(bundle.saver.get_tuple({"configurable": {"thread_id": thread_id}}))
+        self.assertIsNone(bundle.registry.get(thread_id))
+
+    def test_registry_initialization_failure_closes_connection(self):
+        """建表失败时不能在 Windows 上留下占用文件的连接。"""
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "checkpoints.db"
+            with mock.patch("src.graph.checkpointing._REGISTRY_SCHEMA", "CREATE TABLE ???;"):
+                with self.assertRaises(sqlite3.OperationalError):
+                    build_checkpoint_bundle(
+                        CheckpointSettings(backend="sqlite", path=str(database_path))
+                    )
 
     def test_unknown_backend_is_rejected(self):
         with self.assertRaises(ValueError):

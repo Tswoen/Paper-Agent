@@ -317,6 +317,9 @@ class SessionRunService:
 
         body = body or {}
         record = self.repo.get(session_key)
+        # 中文注释：并发保护优先于续跑查询——会话在跑时直接 409，不再去查账本/存档。
+        if record.run_started_at or record.status == "running":
+            raise SessionError("session is already running", 409)
         resume_row: JsonObject | None = None
         if _should_resume_from_last_checkpoint(body):
             # 中文注释：续跑只认 checkpoint。先找该会话最近一次线程，再校验版本，
@@ -344,9 +347,6 @@ class SessionRunService:
             content = str(body.get("content") or "")
             if not content.strip() and not body.get("media"):
                 raise ValueError("content is required")
-
-        if record.run_started_at or record.status == "running":
-            raise SessionError("session is already running", 409)
 
         # 前端通常会传入回合编号；其他调用方未传时，后端也按统一的人类可读格式生成。
         turn_id = str(body.get("turn_id") or create_readable_id())
