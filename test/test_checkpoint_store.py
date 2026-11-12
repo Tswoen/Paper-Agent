@@ -220,6 +220,33 @@ class CheckpointBundleTest(unittest.TestCase):
                         CheckpointSettings(backend="sqlite", path=str(database_path))
                     )
 
+    def test_latest_thread_is_scoped_to_session(self):
+        """不同会话的线程不能互相串。"""
+
+        bundle = build_checkpoint_bundle(CheckpointSettings(backend="memory"))
+        self.addCleanup(bundle.close)
+        registry = bundle.registry
+        registry.mark_started(
+            thread_id="session-1:t1",
+            session_key="session-1",
+            turn_id="t1",
+            run_id="run-1",
+            graph_version=1,
+        )
+        registry.mark_started(
+            thread_id="session-2:t1",
+            session_key="session-2",
+            turn_id="t1",
+            run_id="run-2",
+            graph_version=1,
+        )
+
+        self.assertEqual(registry.latest_thread("session-1")["thread_id"], "session-1:t1")
+        self.assertEqual(registry.latest_thread("session-2")["thread_id"], "session-2:t1")
+
+        registry.mark_finished(thread_id="session-2:t1", status="completed")
+        self.assertEqual(registry.latest_thread("session-1")["thread_id"], "session-1:t1")
+
     def test_unknown_backend_is_rejected(self):
         with self.assertRaises(ValueError):
             SystemConfig.from_dict({"checkpoint": {"backend": "postgres"}})

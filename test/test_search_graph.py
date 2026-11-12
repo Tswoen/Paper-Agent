@@ -7,7 +7,7 @@ from unittest import mock
 
 from langgraph.checkpoint.memory import InMemorySaver
 
-from graph import build_graph, run_graph
+from graph import build_graph, run_graph, run_graph_sync
 from src.agents import ReviewRequest
 from src.agents.analyseAgent import AnalyseModelResult
 from src.graph.graph import _build_initial_state
@@ -600,6 +600,25 @@ class GraphTest(unittest.TestCase):
                     state_overrides={"current_step": "init"},
                 )
             )
+
+    def test_run_graph_sync_persists_checkpoint(self):
+        """同步兼容入口也能把快照写进指定线程。"""
+
+        saver = InMemorySaver()
+        stub = _StubService()
+        with _fake_backends(stub, search_snapshot=_fake_snapshot(), read_snapshot=_read_snapshot()):
+            result = run_graph_sync(
+                ReviewRequest(
+                    topic="multi-agent literature review",
+                    constraints={"sources": ["openalex"], "max_results": 3},
+                ),
+                checkpointer=saver,
+                thread_id="sync-thread",
+            )
+
+        self.assertEqual(result.state["current_step"], "reply")
+        self.assertEqual(result.thread_id, "sync-thread")
+        self.assertIsNotNone(saver.get_tuple({"configurable": {"thread_id": "sync-thread"}}))
 
 
 if __name__ == "__main__":
