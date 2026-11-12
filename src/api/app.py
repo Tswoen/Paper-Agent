@@ -87,6 +87,13 @@ def create_app(
             "应用启动时恢复了中断的后台会话",
             extra={"recovered_session_count": len(recovered_sessions)},
         )
+    # 中文注释：先对账无主 running 行，再按 7/30 天策略清理过期 checkpoint。
+    purged_checkpoints = run_service.purge_expired_checkpoints()
+    if purged_checkpoints:
+        logger.info(
+            "启动时清理过期 checkpoint",
+            extra={"purged_checkpoint_count": len(purged_checkpoints)},
+        )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):

@@ -6,6 +6,7 @@ import json
 import threading
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from src.graph.checkpointing import CheckpointBundle, build_checkpoint_bundle
@@ -311,6 +312,42 @@ class SessionRunService:
                     exc_info=True,
                 )
         return recovered
+
+    def purge_expired_checkpoints(self, *, now: str | None = None) -> list[str]:
+        """按配置清理过期存档：completed 7 天、failed/cancelled/interrupted 30 天。
+
+        中文注释：先查过期 thread，再走 bundle.delete_thread（先删 saver 快照、再删账本行）。
+        单条失败只记 warning，不阻断其它线程的清理。
+        """
+
+        settings = self.checkpoint_bundle.settings
+        if not settings.retention_enabled:
+            return []
+
+        current = datetime.fromisoformat(now) if now else datetime.now(timezone.utc)
+        completed_before = (
+            current - timedelta(days=settings.retention_completed_days)
+        ).isoformat()
+        failed_before = (current - timedelta(days=settings.retention_failed_days)).isoformat()
+        expired = self.checkpoint_bundle.registry.list_expired(
+            completed_before=completed_before,
+            failed_before=failed_before,
+        )
+
+        purged: list[str] = []
+        for thread_id in expired:
+            try:
+                self.checkpoint_bundle.delete_thread(thread_id)
+                purged.append(thread_id)
+            except Exception:
+                logger.warning(
+                    "清理过期 checkpoint 失败",
+                    extra={"thread_id": thread_id},
+                    exc_info=True,
+                )
+        if purged:
+            logger.info("清理过期 checkpoint", extra={"count": len(purged)})
+        return purged
 
     async def start_run(self, session_key: str, body: JsonObject | None = None) -> JsonObject:
         """创建一次新的后台运行，并立即返回 SSE 地址。"""
@@ -630,6 +667,7 @@ class SessionRunService:
         assistant_buffer.persist(self.repo, session_key, turn_id)
         self.repo.set_status(session_key, "completed")
         self._mark_checkpoint_finished(thread_id, "completed")
+        self.purge_expired_checkpoints()
         self.repo.set_run_started_at(session_key, None)
         self.broker.close_run_nowait(run_id)
 
@@ -661,6 +699,7 @@ class SessionRunService:
         assistant_buffer.persist(self.repo, session_key, turn_id)
         self.repo.set_status(session_key, "cancelled")
         self._mark_checkpoint_finished(thread_id, "cancelled")
+        self.purge_expired_checkpoints()
         self.repo.set_run_started_at(session_key, None)
         self.broker.close_run_nowait(run_id)
 
@@ -707,6 +746,7 @@ class SessionRunService:
         assistant_buffer.persist(self.repo, session_key, turn_id)
         self.repo.set_status(session_key, "failed")
         self._mark_checkpoint_finished(thread_id, "failed")
+        self.purge_expired_checkpoints()
         self.repo.set_run_started_at(session_key, None)
         self.broker.close_run_nowait(run_id)
 

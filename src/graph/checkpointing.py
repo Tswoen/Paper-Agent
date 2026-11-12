@@ -82,6 +82,10 @@ class CheckpointRegistry(ABC):
         """把会话下所有 running 行改成 interrupted，返回影响行数。"""
 
     @abstractmethod
+    def list_expired(self, *, completed_before: str, failed_before: str) -> list[str]:
+        """返回已过期的 thread_id；只读，实际删除由 bundle 负责。"""
+
+    @abstractmethod
     def list_threads(self, session_key: str | None = None) -> list[JsonObject]:
         """按更新时间倒序列出登记记录，可按会话过滤。"""
 
@@ -207,6 +211,18 @@ class SqliteCheckpointRegistry(CheckpointRegistry):
             )
         return cursor.rowcount
 
+    def list_expired(self, *, completed_before: str, failed_before: str) -> list[str]:
+        rows = self._connection.execute(
+            """
+            SELECT thread_id FROM checkpoint_runs
+            WHERE (status = 'completed' AND finished_at IS NOT NULL AND finished_at <= ?)
+               OR (status IN ('failed', 'cancelled', 'interrupted')
+                   AND finished_at IS NOT NULL AND finished_at <= ?)
+            """,
+            (completed_before, failed_before),
+        ).fetchall()
+        return [str(row["thread_id"]) for row in rows]
+
     def delete_thread(self, thread_id: str) -> bool:
         with self._connection:
             cursor = self._connection.execute(
@@ -285,6 +301,19 @@ class MemoryCheckpointRegistry(CheckpointRegistry):
                 row["updated_at"] = now
                 count += 1
         return count
+
+    def list_expired(self, *, completed_before: str, failed_before: str) -> list[str]:
+        expired: list[str] = []
+        for row in self._rows.values():
+            finished_at = row.get("finished_at")
+            if not finished_at:
+                continue
+            status = row["status"]
+            if status == "completed" and finished_at <= completed_before:
+                expired.append(str(row["thread_id"]))
+            elif status in {"failed", "cancelled", "interrupted"} and finished_at <= failed_before:
+                expired.append(str(row["thread_id"]))
+        return expired
 
     def list_threads(self, session_key: str | None = None) -> list[JsonObject]:
         rows = [
