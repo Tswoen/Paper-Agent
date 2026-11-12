@@ -102,6 +102,8 @@ def create_app(
         try:
             yield
         finally:
+            # 中文注释：先取消/等待活跃 run 收尾，再关 checkpoint 连接。
+            await run_service.shutdown()
             checkpoint_bundle.close()
 
     app = FastAPI(title="Papers Agents API", lifespan=lifespan)

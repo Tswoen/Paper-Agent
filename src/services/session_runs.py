@@ -98,6 +98,16 @@ class SessionRunBroker:
                 for state in self._runs.values()
             )
 
+    def active_tasks(self) -> list[asyncio.Task[None]]:
+        """返回当前进程里仍未结束的后台 run 任务。"""
+
+        with self._lock:
+            return [
+                state.task
+                for state in self._runs.values()
+                if state.task is not None and not state.task.done()
+            ]
+
     def cancellation_for(self, run_id: str) -> WorkflowCancellation:
         """返回指定 run 的停止控制对象，供工作流运行时使用。"""
 
@@ -508,6 +518,29 @@ class SessionRunService:
             if str(event.get("session_key") or "") != session_key:
                 continue
             yield event
+
+    async def shutdown(self) -> None:
+        """取消并等待活跃 run，让收尾在 bundle 关闭前完成。
+
+        中文注释：应用正常退出时，后台任务不是 uvicorn 管理的；先把它们取消并等
+        finalize 跑完，再关 checkpoint 连接，避免「关库时还在写」的报错和状态半成品。
+        """
+
+        tasks = self.broker.active_tasks()
+        for task in tasks:
+            task.cancel()
+        if not tasks:
+            return
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True),
+                timeout=10,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "关闭时等待后台 run 超时",
+                extra={"count": len(tasks)},
+            )
 
     async def _run_in_background(
         self,

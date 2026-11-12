@@ -208,6 +208,42 @@ class CheckpointWiringTest(unittest.TestCase):
             finally:
                 bundle.close()
 
+    def test_shutdown_cancels_active_run_and_finalizes_state(self):
+        """应用关闭时先取消活跃 run，让账本/会话在关库前收口。"""
+
+        async def exercise():
+            temp_dir = tempfile.TemporaryDirectory()
+            self.addCleanup(temp_dir.cleanup)
+            repo = SQLiteSessionRepository(storage_root=Path(temp_dir.name) / "sessions")
+            bundle = build_checkpoint_bundle(CheckpointSettings(backend="memory"))
+            session = repo.create("Shutdown")
+            started = asyncio.Event()
+
+            async def handler(chat_id, content, frame, emit):
+                started.set()
+                await asyncio.sleep(60)
+
+            service = SessionRunService(
+                repo,
+                message_handler=handler,
+                checkpoint_bundle=bundle,
+            )
+            accepted = await service.start_run(
+                session.key,
+                {"content": "slow", "turn_id": "t1"},
+            )
+            task = service.broker.get_run(accepted["run_id"]).task
+            await started.wait()
+            await service.shutdown()
+            return task, repo.get(session.key), bundle.registry.get(f"{session.key}:t1")
+
+        task, record, row = asyncio.run(exercise())
+
+        self.assertTrue(task.done())
+        self.assertEqual(record.status, "failed")
+        self.assertIsNotNone(row)
+        self.assertEqual(row["status"], "failed")
+
 
 if __name__ == "__main__":
     unittest.main()
