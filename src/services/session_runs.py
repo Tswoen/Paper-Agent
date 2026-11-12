@@ -612,6 +612,7 @@ class SessionRunService:
                             "event": "turn_end",
                             "status": "completed",
                             "turn_id": turn_id,
+                            "checkpoint_id": self._checkpoint_id(thread_id),
                             "timestamp": utc_now(),
                         }
                     )
@@ -682,6 +683,7 @@ class SessionRunService:
     ) -> None:
         """保存用户停止前已经产生的回复，并把 run 结束为 cancelled。"""
 
+        checkpoint_id = self._checkpoint_id(thread_id)
         if not already_closed:
             self._publish_runtime_event_nowait(
                 session_key,
@@ -692,6 +694,7 @@ class SessionRunService:
                     "status": "cancelled",
                     "message": "任务已按用户请求停止，已保留当前进度",
                     "turn_id": turn_id,
+                    "checkpoint_id": checkpoint_id,
                     "timestamp": utc_now(),
                 },
                 persist_event=True,
@@ -716,6 +719,7 @@ class SessionRunService:
     ) -> None:
         """在 run 失败时补发错误和终止事件，并统一收口状态。"""
 
+        checkpoint_id = self._checkpoint_id(thread_id)
         self._publish_runtime_event_nowait(
             session_key,
             run_id,
@@ -726,6 +730,7 @@ class SessionRunService:
                 "content": str(error),
                 "status": "failed",
                 "turn_id": turn_id,
+                "checkpoint_id": checkpoint_id,
                 "timestamp": utc_now(),
             },
             persist_event=True,
@@ -739,6 +744,7 @@ class SessionRunService:
                     "event": "turn_end",
                     "status": "failed",
                     "turn_id": turn_id,
+                    "checkpoint_id": checkpoint_id,
                     "timestamp": utc_now(),
                 },
                 persist_event=True,
@@ -763,6 +769,21 @@ class SessionRunService:
                 extra={"thread_id": thread_id, "checkpoint_status": status},
                 exc_info=True,
             )
+
+    def _checkpoint_id(self, thread_id: str | None) -> str | None:
+        """读取线程最后一份快照 id；读不到时返回 None，不影响事件发送。"""
+
+        if not thread_id:
+            return None
+        try:
+            return self.checkpoint_bundle.last_checkpoint_id(thread_id)
+        except Exception:
+            logger.warning(
+                "读取 checkpoint_id 失败",
+                extra={"thread_id": thread_id},
+                exc_info=True,
+            )
+            return None
 
     async def _publish_runtime_event(
         self,

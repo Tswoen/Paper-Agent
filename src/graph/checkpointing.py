@@ -411,6 +411,14 @@ class CheckpointBundle:
         self.saver.delete_thread(thread_id)
         self.registry.delete_thread(thread_id)
 
+    def last_checkpoint_id(self, thread_id: str) -> str | None:
+        """返回线程最后一份快照的 id，供事件与日志对齐。"""
+
+        checkpoint_tuple = self.saver.get_tuple({"configurable": {"thread_id": thread_id}})
+        if checkpoint_tuple is None:
+            return None
+        return str(checkpoint_tuple.checkpoint.get("id") or "") or None
+
     def close(self) -> None:
         """先关注册表，再关官方 saver 持有的连接；可重复调用。"""
 

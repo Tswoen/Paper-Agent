@@ -89,6 +89,13 @@ class CheckpointResumeTest(unittest.TestCase):
                     )
                     failed_row = bundle.registry.get(thread_id)
                     self.assertEqual(failed_row["status"], "failed")
+                    error_events = [
+                        event
+                        for event in repo.get(session.key).thread()["events"]
+                        if event["event_type"] == "error"
+                    ]
+                    self.assertTrue(error_events)
+                    self.assertTrue(error_events[-1]["metadata"].get("checkpoint_id"))
                     search_calls_before_resume = len(stub.calls)
 
                     asyncio.run(
@@ -113,6 +120,17 @@ class CheckpointResumeTest(unittest.TestCase):
                     artifact["name"] for artifact in repo.get(session.key).thread()["artifacts"]
                 ]
                 self.assertEqual(artifact_names.count("search_manifest.json"), 1)
+
+                # 中文注释：续跑事件用新 turn_id，但 thread_id 仍是旧线程（A 方案）。
+                resumed_turn_ends = [
+                    event
+                    for event in repo.get(session.key).thread()["events"]
+                    if event["event_type"] == "turn_end"
+                    and event["metadata"].get("turn_id") == "t2"
+                ]
+                self.assertTrue(resumed_turn_ends)
+                self.assertEqual(resumed_turn_ends[-1]["metadata"].get("thread_id"), thread_id)
+                self.assertEqual(resumed_turn_ends[-1]["metadata"].get("turn_id"), "t2")
             finally:
                 bundle.close()
 

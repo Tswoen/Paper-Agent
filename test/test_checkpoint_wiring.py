@@ -121,6 +121,21 @@ class CheckpointWiringTest(unittest.TestCase):
                         (thread_id,),
                     ).fetchone()[0]
                 self.assertGreater(checkpoint_count, 1)
+
+                events = repo.get(session.key).thread()["events"]
+                turn_ends = [
+                    event
+                    for event in events
+                    if event["event_type"] == "turn_end"
+                    and event["metadata"].get("turn_id") == "t1"
+                ]
+                self.assertTrue(turn_ends)
+                expected_checkpoint_id = bundle.last_checkpoint_id(thread_id)
+                self.assertTrue(expected_checkpoint_id)
+                self.assertEqual(
+                    turn_ends[-1]["metadata"].get("checkpoint_id"),
+                    expected_checkpoint_id,
+                )
             finally:
                 bundle.close()
 
