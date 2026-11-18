@@ -299,6 +299,12 @@ def _load_session_read_results(runtime: Runtime[WorkflowRuntimeContext] | None) 
             continue
         if not isinstance(payload, dict):
             continue
+        # 5a-1 的 note 外层保存版本和恢复信息，写作消费方只认其中的 PaperReadResult。
+        nested_result = payload.get("result")
+        if isinstance(nested_result, dict) and "note_version" in payload:
+            payload = nested_result
+        if payload.get("failure") is not None:
+            continue
         # 中文注释：被软丢弃的论文笔记照常落盘用于审计，但写作节点不能引用它们，
         # 否则前面丢弃的无关论文会从这里"复活"进入正文和参考文献。
         relevance = payload.get("relevance")

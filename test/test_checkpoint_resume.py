@@ -221,6 +221,31 @@ class CheckpointResumeTest(unittest.TestCase):
                     )
                 )
 
+    def test_new_run_rejects_existing_thread_without_side_effects(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = SQLiteSessionRepository(storage_root=Path(temp_dir) / "sessions")
+            session = repo.create("Duplicate turn")
+            service = SessionRunService(repo)
+            thread_id = f"{session.key}:t1"
+            service.checkpoint_bundle.registry.mark_started(
+                thread_id=thread_id,
+                session_key=session.key,
+                turn_id="t1",
+                run_id="run-original",
+                graph_version=GRAPH_VERSION,
+            )
+            service.checkpoint_bundle.registry.mark_finished(thread_id=thread_id, status="failed")
+            message_count = len(repo.get(session.key).messages)
+
+            with self.assertRaises(SessionError) as raised:
+                asyncio.run(service.start_run(session.key, {"content": "新运行", "turn_id": "t1"}))
+
+            self.assertEqual(raised.exception.status, 409)
+            self.assertEqual(len(repo.get(session.key).messages), message_count)
+            self.assertEqual(repo.get(session.key).status, "created")
+            self.assertIsNone(repo.get(session.key).run_started_at)
+            self.assertEqual(service.checkpoint_bundle.registry.get(thread_id)["run_id"], "run-original")
+
     def test_restart_marks_orphan_interrupted_then_resume(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

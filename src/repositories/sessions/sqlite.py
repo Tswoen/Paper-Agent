@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import shutil
 import sqlite3
+import threading
 import uuid
+import weakref
 from contextlib import contextmanager
 from pathlib import Path
 from posixpath import normpath
@@ -19,6 +22,21 @@ from .base import JsonObject, SessionRepository
 
 
 logger = get_logger(__name__)
+_ARTIFACT_WRITE_LOCKS: weakref.WeakValueDictionary[str, threading.Lock] = weakref.WeakValueDictionary()
+_ARTIFACT_WRITE_LOCKS_GUARD = threading.Lock()
+
+
+def _artifact_write_lock(storage_root: Path, session_id: str, relative_path: str) -> threading.Lock:
+    """让同一路径的原子文件替换和数据库登记处于同一进程内临界区。"""
+
+    normalized_path = normpath(relative_path).replace("\\", "/").lstrip("/")
+    lock_key = f"{storage_root.resolve()}:{session_id}:{normalized_path}"
+    with _ARTIFACT_WRITE_LOCKS_GUARD:
+        lock = _ARTIFACT_WRITE_LOCKS.get(lock_key)
+        if lock is None:
+            lock = threading.Lock()
+            _ARTIFACT_WRITE_LOCKS[lock_key] = lock
+        return lock
 
 
 class SessionStoreBackend:
@@ -278,12 +296,50 @@ class SessionStoreBackend:
         created_at: str,
         metadata: JsonObject | None = None,
         artifact_id: str | None = None,
+        replace_existing: bool = False,
     ) -> JsonObject:
-        """向产物表追加一条产物登记记录。"""
+        """登记产物；replace_existing 时按会话和路径更新并保留原产物 ID。"""
 
         normalized_artifact_id = artifact_id or uuid.uuid4().hex
         payload = metadata or {}
         with self._connection() as connection:
+            if replace_existing:
+                # 单进程内可能用线程池并发写不同论文；IMMEDIATE 保证同路径查改不竞争。
+                connection.execute("BEGIN IMMEDIATE")
+                existing = connection.execute(
+                    """
+                    SELECT id FROM session_artifact
+                    WHERE session_id = ? AND path = ?
+                    ORDER BY rowid DESC LIMIT 1
+                    """,
+                    (session_id, path),
+                ).fetchone()
+                if existing is not None:
+                    normalized_artifact_id = str(existing["id"])
+                    connection.execute(
+                        """
+                        UPDATE session_artifact
+                        SET artifact_type = ?, name = ?, size = ?, created_at = ?, metadata = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            artifact_type,
+                            name,
+                            size,
+                            created_at,
+                            self._dump_json(payload),
+                            normalized_artifact_id,
+                        ),
+                    )
+                    return {
+                        "id": normalized_artifact_id,
+                        "artifact_type": artifact_type,
+                        "name": name,
+                        "path": path,
+                        "size": size,
+                        "created_at": created_at,
+                        "metadata": payload,
+                    }
             connection.execute(
                 """
                 INSERT INTO session_artifact (id, session_id, artifact_type, name, path, size, created_at, metadata)
@@ -478,10 +534,19 @@ class SessionStoreBackend:
             raise ValueError(f"invalid artifact path: {relative_path}")
         target_path = session_dir / Path(normalized_relative_path)
         target_path.parent.mkdir(parents=True, exist_ok=True)
-        if isinstance(content, bytes):
-            target_path.write_bytes(content)
-        else:
-            target_path.write_text(content, encoding=encoding)
+        temporary_path = target_path.with_name(f".{target_path.name}.tmp")
+        try:
+            if isinstance(content, bytes):
+                temporary_path.write_bytes(content)
+            else:
+                temporary_path.write_text(content, encoding=encoding)
+            os.replace(temporary_path, target_path)
+        finally:
+            # 正常替换后临时文件已不存在；异常时也不能留下半成品冒充完成结果。
+            try:
+                temporary_path.unlink()
+            except FileNotFoundError:
+                pass
         return target_path
 
     def _initialize_schema(self) -> None:
@@ -799,26 +864,30 @@ class SQLiteSessionRepository(SessionRepository):
         metadata: JsonObject | None = None,
         created_at: str | None = None,
         encoding: str = "utf-8",
+        replace_existing: bool = False,
     ) -> JsonObject:
         """向指定会话写入产物文件，并在仓储中登记元数据。"""
 
         self.get(key)
         resolved_created_at = created_at or utc_now()
-        target_path = self.backend.write_artifact_file(
-            session_id=key,
-            relative_path=relative_path,
-            content=content,
-            encoding=encoding,
-        )
-        artifact_record = self.backend.append_artifact_record(
-            session_id=key,
-            artifact_type=artifact_type,
-            name=name,
-            path=str(target_path),
-            size=target_path.stat().st_size,
-            created_at=resolved_created_at,
-            metadata=copy.deepcopy(metadata or {}),
-        )
+        # 当前仅支持单进程；同路径 writer 共用确定性 tmp，因此必须一起串行化。
+        with _artifact_write_lock(self.backend.storage_root, key, relative_path):
+            target_path = self.backend.write_artifact_file(
+                session_id=key,
+                relative_path=relative_path,
+                content=content,
+                encoding=encoding,
+            )
+            artifact_record = self.backend.append_artifact_record(
+                session_id=key,
+                artifact_type=artifact_type,
+                name=name,
+                path=str(target_path),
+                size=target_path.stat().st_size,
+                created_at=resolved_created_at,
+                metadata=copy.deepcopy(metadata or {}),
+                replace_existing=replace_existing,
+            )
         logger.info(
             "写入会话产物",
             extra={

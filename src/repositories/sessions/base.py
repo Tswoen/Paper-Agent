@@ -72,6 +72,7 @@ class SessionRepository(ABC):
         metadata: JsonObject | None = None,
         created_at: str | None = None,
         encoding: str = "utf-8",
+        replace_existing: bool = False,
     ) -> JsonObject:
         """向指定会话写入产物文件，并在仓储中登记元数据。"""
 

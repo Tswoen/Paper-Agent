@@ -409,6 +409,9 @@ class SessionRunService:
             # 普通 run 的线程按「会话 + 轮」命名，每轮互不影响。
             thread_id = f"{session_key}:{turn_id}"
             resume = False
+            if self.checkpoint_bundle.registry.get(thread_id) is not None:
+                # 必须在写消息、状态和账本之前拒绝，避免把旧线程误当成新运行。
+                raise SessionError("该回合编号已经存在；请使用新的 turn_id，或选择继续执行", 409)
         self.checkpoint_bundle.registry.mark_started(
             thread_id=thread_id,
             session_key=session_key,

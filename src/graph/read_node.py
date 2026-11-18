@@ -17,7 +17,7 @@ from src.utils.read_utils.read_fulltext import async_convert_fulltext_to_markdow
 # 计划移除：阅读阶段持续过滤机制稳定运行一段时间后清理
 # from src.models.read_models import FullTextStatus, PaperReadResult, ReadNote, ReadRelevance, calculate_relevance_score, normalize_match_levels
 from src.models.read_models import FullTextStatus, PaperReadResult, ReadNote, ReadRelevance, READ_RELEVANCE_STATUSES
-from src.repositories.node_persistence.read_persistence import ReadPersistenceSink
+from src.repositories.node_persistence.read_persistence import ReadPersistenceSink, read_request_fingerprint
 from src.repositories.chroma.read_vector_store import EmbeddingConnection, async_index_chunk_file, async_index_markdown_chunks
 from src.graph.checkpoint_halt import halt_with_checkpoint
 from src.graph.runtime import WorkflowRuntimeContext
@@ -306,6 +306,7 @@ async def _run_read_node_async(state: State, runtime: Runtime[WorkflowRuntimeCon
     request_payload = request if isinstance(request, dict) else {}
     request_topic = str(request_payload.get("topic") or "")
     request_constraints = dict(request_payload.get("constraints") or {})
+    request_fingerprint = read_request_fingerprint(request_payload)
     system_config = SystemConfig.load()
     config = system_config.read
     checkpoint = _checkpoint_from_state(state)
@@ -315,7 +316,7 @@ async def _run_read_node_async(state: State, runtime: Runtime[WorkflowRuntimeCon
     )
 
     reporter = _resolve_reporter(runtime)
-    sink = _resolve_sink(runtime)
+    sink = _resolve_sink(runtime, request_fingerprint=request_fingerprint)
     runtime_resources = _resolve_runtime_resources(runtime)
     llm = load_read_agent_llm(config.agent_name)
     if ENABLE_FULL_TEXT_EMBEDDING:
@@ -331,6 +332,12 @@ async def _run_read_node_async(state: State, runtime: Runtime[WorkflowRuntimeCon
     recovered_results = _restore_read_results(state, papers, checkpoint)
     results_by_paper_id = {result.paper.id: result for result in recovered_results}
     artifact_refs: list[JsonObject] = list(state.get("read_artifact_refs") or checkpoint.get("read_artifact_refs") or [])
+    note_stages, note_relevance = await _restore_saved_notes(
+        sink,
+        papers,
+        results_by_paper_id=results_by_paper_id,
+        artifact_refs=artifact_refs,
+    )
     paper_runtime_statuses = _restore_paper_runtime_statuses(papers, checkpoint, recovered_results)
     # 中文说明：恢复时，正在进行全文处理的论文会保存在每篇论文的运行状态中。
     # 先把它们放回结果字典，后面统一重新计算名额，不沿用旧的先到先得计数。
@@ -364,6 +371,8 @@ async def _run_read_node_async(state: State, runtime: Runtime[WorkflowRuntimeCon
             runtime_resources=runtime_resources,
             results_by_paper_id=results_by_paper_id,
             artifact_refs=artifact_refs,
+            note_stages=note_stages,
+            note_relevance=note_relevance,
             paper_runtime_statuses=paper_runtime_statuses,
             completed_counter=completed_counter,
             deep_read_limit=deep_read_limit,
@@ -389,13 +398,16 @@ async def _run_read_node_async(state: State, runtime: Runtime[WorkflowRuntimeCon
     if sink is not None:
         try:
             persisted = await asyncio.to_thread(sink.persist_summary, summary, results)
-            artifact_refs.extend(persisted.artifacts)
+            _append_artifact_refs(artifact_refs, persisted.artifacts)
             summary["manifest"] = persisted.artifacts[0] if persisted.artifacts else {}
             if reporter is not None:
                 for artifact in persisted.artifacts:
                     reporter.artifact(artifact, stage="read_artifact_ready")
         except Exception as exc:
             summary["persistence_error"] = str(exc)
+
+    if papers and not any(result.failure is None for result in results):
+        raise RuntimeError("论文阅读阶段失败：所有论文均未产出可用笔记")
 
     if reporter is not None:
         reporter.completed(
@@ -410,7 +422,7 @@ async def _run_read_node_async(state: State, runtime: Runtime[WorkflowRuntimeCon
         )
     # 中文注释：软丢弃的论文不进下游——汇总和产物里保留完整记录（含丢弃理由），
     # 但写回 state 的 read_results 只包含未被丢弃的论文，分析/写作节点自然收窄。
-    kept_results = [result for result in results if not result.relevance.discarded]
+    kept_results = [result for result in results if result.failure is None and not result.relevance.discarded]
     # 中文注释：只返回本节点真正改动的键。LangGraph 的 channel 没有删除语义，
     # 想清空恢复现场只能写一个空 dict；入口用真值判断把 {} 当作"没有现场"。
     updated: dict[str, Any] = {
@@ -564,9 +576,55 @@ def _restore_read_results(state: State, papers: list[PaperDocument], checkpoint:
                 extraction=_json_object(item.get("extraction")),
                 verification=_json_object(item.get("verification")),
                 warnings=_string_list(item.get("warnings")),
+                failure=_failure_from_payload(item.get("failure")),
             )
         )
     return restored[: len(papers)]
+
+
+async def _restore_saved_notes(
+    sink: ReadPersistenceSink | None,
+    papers: list[PaperDocument],
+    *,
+    results_by_paper_id: dict[str, PaperReadResult],
+    artifact_refs: list[JsonObject],
+) -> tuple[dict[str, str], dict[str, JsonObject]]:
+    """合并 note，并保留 checkpoint 中比摘要 note 更新的全文中间现场。"""
+
+    restored_stages: dict[str, str] = {}
+    restored_relevance: dict[str, JsonObject] = {}
+    if sink is None:
+        return restored_stages, restored_relevance
+    for paper in papers:
+        loaded = await asyncio.to_thread(sink.load_paper_note, paper.id)
+        if loaded is None or loaded.stage not in {"abstract_complete", "fulltext_complete", "discarded"}:
+            continue
+        result = _read_result_from_payload(loaded.result, papers)
+        if result is None or result.failure is not None:
+            continue
+        existing = results_by_paper_id.get(paper.id)
+        if existing is None or not _has_progress_beyond_note(existing, loaded.stage):
+            results_by_paper_id[paper.id] = result
+            restored_relevance[paper.id] = result.relevance.to_dict()
+        # 保留更新 checkpoint 时不把旧 note 标成“内容已同步”，后续要迁移写回。
+        restored_stages[paper.id] = loaded.stage
+        _append_artifact_refs(artifact_refs, [loaded.artifact])
+    return restored_stages, restored_relevance
+
+
+def _has_progress_beyond_note(result: PaperReadResult, note_stage: str) -> bool:
+    """摘要 note 不能覆盖已下载、已转换或已提取的 checkpoint 全文进度。"""
+
+    if result.failure is not None or note_stage in {"fulltext_complete", "discarded"}:
+        return False
+    return bool(
+        result.note.evidence_level == "full_text"
+        or result.extraction
+        or result.verification
+        or result.full_text.source_path
+        or result.full_text.markdown_path
+        or result.full_text.status not in {"", "not_requested"}
+    )
 
 
 def _resume_pending_index(
@@ -695,7 +753,26 @@ def _read_result_from_payload(value: Any, papers: list[PaperDocument]) -> PaperR
         extraction=_json_object(value.get("extraction")),
         verification=_json_object(value.get("verification")),
         warnings=_string_list(value.get("warnings")),
+        failure=_failure_from_payload(value.get("failure")),
     )
+
+
+def _append_artifact_refs(artifact_refs: list[JsonObject], new_refs: list[JsonObject]) -> None:
+    """按稳定 artifact_id 合并引用，摘要和全文阶段重复保存也不会累积重复项。"""
+
+    positions = {
+        str(item.get("artifact_id") or ""): index
+        for index, item in enumerate(artifact_refs)
+        if item.get("artifact_id")
+    }
+    for ref in new_refs:
+        artifact_id = str(ref.get("artifact_id") or "")
+        if artifact_id and artifact_id in positions:
+            artifact_refs[positions[artifact_id]] = ref
+        else:
+            if artifact_id:
+                positions[artifact_id] = len(artifact_refs)
+            artifact_refs.append(ref)
 
 
 def _persist_completed_paper(
@@ -711,7 +788,7 @@ def _persist_completed_paper(
         return
     try:
         persisted = sink.persist_paper(result)
-        artifact_refs.extend(persisted.artifacts)
+        _append_artifact_refs(artifact_refs, persisted.artifacts)
         if reporter is not None:
             for artifact in persisted.artifacts:
                 reporter.artifact(artifact, stage="paper_artifact_ready", emit_runtime_event=False)
@@ -862,6 +939,12 @@ def _json_object(value: Any) -> JsonObject:
     """
 
     return dict(value) if isinstance(value, dict) else {}
+
+
+def _failure_from_payload(value: Any) -> JsonObject | None:
+    """旧结果没有 failure 时保持 None，避免把缺失字段误判成失败。"""
+
+    return dict(value) if isinstance(value, dict) else None
 
 
 def _legacy_read_one_paper(
@@ -1084,7 +1167,11 @@ def _resolve_embedding_connection(
         return None, error
 
 
-def _resolve_sink(runtime: Runtime[WorkflowRuntimeContext] | None) -> ReadPersistenceSink | None:
+def _resolve_sink(
+    runtime: Runtime[WorkflowRuntimeContext] | None,
+    *,
+    request_fingerprint: str,
+) -> ReadPersistenceSink | None:
     """仅在运行时上下文完整时启用阅读产物写盘，普通脚本调用仍可直接运行。"""
 
     context = runtime.context if runtime is not None else None
@@ -1095,7 +1182,14 @@ def _resolve_sink(runtime: Runtime[WorkflowRuntimeContext] | None) -> ReadPersis
     turn_id = str(context.turn_id or "").strip()
     if not isinstance(repo, SessionRepository) or not session_key or not turn_id:
         return None
-    return ReadPersistenceSink(repo, session_key=session_key, turn_id=turn_id)
+    thread_id = str(context.thread_id or "").strip() or f"{session_key}:{turn_id}"
+    return ReadPersistenceSink(
+        repo,
+        session_key=session_key,
+        turn_id=turn_id,
+        thread_id=thread_id,
+        request_fingerprint=request_fingerprint,
+    )
 
 
 def _resolve_reporter(runtime: Runtime[WorkflowRuntimeContext] | None):
@@ -1108,11 +1202,13 @@ def _resolve_reporter(runtime: Runtime[WorkflowRuntimeContext] | None):
 
 
 def _build_summary(results: list[PaperReadResult], deep_read_count: int) -> JsonObject:
-    """汇总每篇论文的处理结果，让后续节点不必重新遍历全部阅读详情。"""
+    """汇总每篇论文的处理结果；彻底失败与可用但部分失败分开统计。"""
 
+    failed_results = [item for item in results if item.failure is not None]
+    usable_results = [item for item in results if item.failure is None]
     global_statistics = {
         "total_papers_received": len(results),
-        "passed_abstract_filter": sum(not item.relevance.discarded for item in results),
+        "passed_abstract_filter": sum(not item.relevance.discarded for item in usable_results),
         "fulltext_downloaded": sum(bool(item.full_text.source_path) for item in results),
         "extraction_succeeded": sum(bool(item.extraction and any(str(value).strip() for value in item.extraction.values())) for item in results),
         "vectorized": sum(item.full_text.status == "indexed" for item in results),
@@ -1124,7 +1220,7 @@ def _build_summary(results: list[PaperReadResult], deep_read_count: int) -> Json
     return {
         "total_paper_count": len(results),
         "deep_read_attempt_count": deep_read_count,
-        "deep_read_candidate_count": sum(not item.relevance.discarded for item in results),
+        "deep_read_candidate_count": sum(not item.relevance.discarded for item in usable_results),
         # 中文说明：只要被统一排序选中，就保留在精读清单中；下载、解析或建立
         # 向量索引失败不会改变它已经获得全文名额这一事实。
         "deep_read_paper_count": sum(item.relevance.status == "selected_for_deep_read" for item in results),
@@ -1144,10 +1240,19 @@ def _build_summary(results: list[PaperReadResult], deep_read_count: int) -> Json
             for item in results
             if item.relevance.discarded
         ],
-        "uncertain_paper_count": sum(item.relevance.uncertain for item in results),
+        "failed_paper_count": len(failed_results),
+        "failed_papers": [
+            {
+                "paperId": item.paper.paperId or item.paper.id,
+                "title": item.paper.title,
+                **dict(item.failure or {}),
+            }
+            for item in failed_results
+        ],
+        "uncertain_paper_count": sum(item.relevance.uncertain for item in usable_results),
         "indexed_paper_count": sum(item.full_text.status == "indexed" for item in results),
         "failed_fulltext_count": sum(item.full_text.status in {"download_failed", "parse_failed"} for item in results),
-        "subtopics": _read_subtopics(results),
+        "subtopics": _read_subtopics(usable_results),
         "global_statistics": global_statistics,
     }
 
@@ -1328,6 +1433,8 @@ async def _process_papers_concurrently(
     runtime_resources: WorkflowRuntimeResources | None,
     results_by_paper_id: dict[str, PaperReadResult],
     artifact_refs: list[JsonObject],
+    note_stages: dict[str, str],
+    note_relevance: dict[str, JsonObject],
     paper_runtime_statuses: dict[str, JsonObject],
     completed_counter: CompletedPaperCounter,
     deep_read_limit: int,
@@ -1339,7 +1446,7 @@ async def _process_papers_concurrently(
     abstract_items = [
         PaperTaskInput(paper=paper, position=position, restored_status={}, restored_result=None)
         for position, paper in enumerate(papers, start=1)
-        if paper.id not in results_by_paper_id
+        if paper.id not in results_by_paper_id or results_by_paper_id[paper.id].failure is not None
     ]
     await _run_paper_task_batch(
         abstract_items,
@@ -1361,19 +1468,37 @@ async def _process_papers_concurrently(
         selected_count=0,
     )
 
-    selected_paper_ids = await _assign_deep_read_selection(
-        papers,
-        results_by_paper_id,
-        paper_runtime_statuses,
-        deep_read_limit,
-        topic=topic,
-        llm=llm,
+    needs_selection = bool(abstract_items) or any(
+        result.failure is None and result.relevance.status == "pending"
+        for result in results_by_paper_id.values()
     )
+    if needs_selection:
+        selected_paper_ids = await _assign_deep_read_selection(
+            papers,
+            results_by_paper_id,
+            paper_runtime_statuses,
+            deep_read_limit,
+            topic=topic,
+            llm=llm,
+        )
+    else:
+        # 所有笔记都已带着选择结果恢复时，不再额外调用一次全局比较模型。
+        selected_paper_ids = {
+            paper_id
+            for paper_id, result in results_by_paper_id.items()
+            if result.failure is None and result.relevance.status == "selected_for_deep_read"
+        }
 
-    # 没有获得全文名额的论文到这里已经完成，立即保存其结构化摘要。
+    # 全局选择可能改变恢复笔记的 relevance；只有 stage 和选择内容都没变才跳过写盘。
     for position, paper in enumerate(papers, start=1):
         result = results_by_paper_id[paper.id]
+        note_is_current = (
+            paper.id in note_stages
+            and note_relevance.get(paper.id) == result.relevance.to_dict()
+        )
         if paper.id not in selected_paper_ids:
+            if note_is_current:
+                continue
             await _finalize_paper_result(
                 result,
                 paper_position=position,
@@ -1382,6 +1507,14 @@ async def _process_papers_concurrently(
                 completed_counter=completed_counter,
                 total_paper_count=len(papers),
                 reporter=reporter,
+                sink=sink,
+                artifact_refs=artifact_refs,
+            )
+        elif not note_is_current:
+            # 新摘要或选择变化先更新稳定点；已完成的旧结果缺 note 时也借此迁移。
+            await _persist_note_checkpoint_async(
+                result,
+                stage="abstract_complete" if _deep_read_needs_processing(result) else None,
                 sink=sink,
                 artifact_refs=artifact_refs,
             )
@@ -1482,10 +1615,17 @@ async def _run_paper_task_batch(
                 _set_paper_runtime_status(
                     paper_runtime_statuses,
                     item.paper,
-                    status="running",
-                    current_stage="abstract_ready",
+                    status="failed" if result.failure is not None else "running",
+                    current_stage="abstract_failed" if result.failure is not None else "abstract_ready",
                     result=result,
-                    error_message="",
+                    error_message=str((result.failure or {}).get("message") or ""),
+                )
+                # 每篇摘要一完成就落盘，不能等全部摘要和全局选择结束。
+                await _persist_note_checkpoint_async(
+                    result,
+                    stage=None if result.failure is not None else "abstract_complete",
+                    sink=sink,
+                    artifact_refs=artifact_refs,
                 )
                 continue
             await _finalize_paper_result(
@@ -1600,6 +1740,9 @@ async def _assign_deep_read_selection(
     discarded_items: list[tuple[int, PaperReadResult]] = []
     for position, paper in enumerate(papers, start=1):
         result = results_by_paper_id[paper.id]
+        if result.failure is not None:
+            # 没有可用笔记的论文不参与候选、回捞或精读名额分配。
+            continue
         if not result.relevance.relevant:
             # 软丢弃：只标记，不删除对象；note.json 会带 discarded 字段照常落盘。
             result.relevance.discarded = True
@@ -1790,11 +1933,25 @@ async def _run_one_paper_task(
             raise
         except Exception as exc:
             message = f"当前论文处理失败：{exc}"
-            result = PaperReadResult(
-                paper=item.paper,
-                full_text=FullTextStatus(status="not_requested", reason="当前论文处理发生异常"),
-                warnings=[message],
-            )
+            if process_full_text and item.restored_result is not None:
+                # 全文异常但摘要笔记仍可用，属于部分失败；保留摘要并允许进入下游。
+                result = item.restored_result
+                result.full_text.status = "parse_failed"
+                result.full_text.reason = message
+                result.warnings.append(message)
+                result.failure = None
+            else:
+                result = PaperReadResult(
+                    paper=item.paper,
+                    full_text=FullTextStatus(status="not_requested", reason="当前论文处理发生异常"),
+                    warnings=[message],
+                    failure={
+                        "stage": "fulltext" if process_full_text else "abstract",
+                        "error_kind": type(exc).__name__,
+                        "message": str(exc),
+                        "attempts": 1,
+                    },
+                )
             _set_paper_runtime_status(
                 paper_runtime_statuses,
                 item.paper,
@@ -1844,6 +2001,12 @@ async def _read_one_paper(
             paper=paper,
             full_text=FullTextStatus(status="not_requested", reason="论文没有标题，无法可靠阅读"),
             warnings=["论文缺少标题，未交给模型判断"],
+            failure={
+                "stage": "validation",
+                "error_kind": "ValueError",
+                "message": "论文缺少标题，未交给模型判断",
+                "attempts": 1,
+            },
         )
         _report_progress(
             reporter,
@@ -2339,6 +2502,24 @@ async def _build_abstract_note(
         raise ReadModelUnavailableError(str(exc)) from exc
 
 
+async def _persist_note_checkpoint_async(
+    result: PaperReadResult,
+    *,
+    stage: str | None,
+    sink: ReadPersistenceSink | None,
+    artifact_refs: list[JsonObject],
+) -> None:
+    """保存一个阅读稳定点，不额外发送“论文已完成”的误导事件。"""
+
+    if sink is None:
+        return
+    try:
+        persisted = await asyncio.to_thread(sink.persist_paper, result, stage=stage)
+        _append_artifact_refs(artifact_refs, persisted.artifacts)
+    except Exception as exc:
+        result.warnings.append(f"阅读稳定点无法保存到会话目录：{exc}")
+
+
 async def _persist_completed_paper_async(
     result: PaperReadResult,
     *,
@@ -2355,7 +2536,7 @@ async def _persist_completed_paper_async(
         return True, ""
     try:
         persisted = await asyncio.to_thread(sink.persist_paper, result)
-        artifact_refs.extend(persisted.artifacts)
+        _append_artifact_refs(artifact_refs, persisted.artifacts)
         if reporter is not None:
             # 中文注释：产物列表仍然需要 artifact 事件，但这里关闭自动生成保存步骤卡片。
             # 保存成功这件事由下面的 _report_progress 更新当前论文卡片，避免前端多出一张卡片。

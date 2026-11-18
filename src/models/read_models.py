@@ -131,6 +131,8 @@ class PaperReadResult:
     # 对应的原文引用和失败原因。没有启用验证时保持空字典。
     verification: JsonObject = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+    # 仅记录“没有可用笔记、被放弃”的失败；下载/解析等部分失败仍走 full_text 状态。
+    failure: JsonObject | None = None
 
     def to_dict(self) -> JsonObject:
         """把单篇阅读结果转成可序列化字典。"""
@@ -143,4 +145,5 @@ class PaperReadResult:
             "extraction": dict(self.extraction),
             "verification": dict(self.verification),
             "warnings": list(self.warnings),
+            "failure": dict(self.failure) if isinstance(self.failure, dict) else None,
         }
