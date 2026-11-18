@@ -9,6 +9,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 
 from src.repositories.sessions.base import SessionRepository
 from src.services.session_runs import SessionRunService, encode_sse
+from src.services.trace_bundle import TraceBundleService
 from src.services.sessions import (
     MessageHandler,
     create_session,
@@ -36,6 +37,7 @@ def create_sessions_router(
 
     router = APIRouter(prefix="/api/sessions", tags=["sessions"])
     resolved_run_service = run_service or SessionRunService(repo=repo, message_handler=message_handler)
+    trace_service = TraceBundleService(repo)
 
     @router.get("")
     async def get_sessions() -> JsonObject:
@@ -54,6 +56,26 @@ def create_sessions_router(
         """读取指定会话的完整线程快照。"""
 
         return fetch_thread(repo, session_key)
+
+    @router.get("/{session_key}/traces")
+    async def get_traces(session_key: str) -> JsonObject:
+        """列出会话中已有持久化数据、可导出轨迹的回合。"""
+
+        return await asyncio.to_thread(trace_service.list_traces, session_key)
+
+    @router.get("/{session_key}/traces/{turn_id}")
+    async def download_trace(session_key: str, turn_id: str) -> StreamingResponse:
+        """下载一个回合的脱敏轨迹 zip，不在服务器上保留导出副本。"""
+
+        payload = await asyncio.to_thread(trace_service.build_zip, session_key, turn_id)
+        return StreamingResponse(
+            iter([payload]),
+            media_type="application/zip",
+            headers={
+                "Content-Length": str(len(payload)),
+                "Content-Disposition": f'attachment; filename="{_trace_filename(turn_id)}"',
+            },
+        )
 
     @router.get("/{session_key}/artifacts/{artifact_id}")
     async def get_artifact(session_key: str, artifact_id: str) -> FileResponse:
@@ -141,6 +163,16 @@ async def _json_body(request: Request) -> JsonObject:
     if not isinstance(payload, dict):
         raise ValueError("request body must be a JSON object")
     return payload
+
+
+def _trace_filename(turn_id: str) -> str:
+    """把回合编号转换成安全的下载文件名，避免响应头注入。"""
+
+    safe_turn_id = "".join(
+        character if character.isascii() and (character.isalnum() or character in {"-", "_"}) else "_"
+        for character in turn_id
+    )
+    return f"paper-agent-trace-{safe_turn_id[:100] or 'turn'}.zip"
 
 
 def _artifact_media_type(file_path: Path) -> str:

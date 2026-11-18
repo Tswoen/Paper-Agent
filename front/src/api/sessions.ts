@@ -5,6 +5,7 @@ import type {
   SessionRunStartPayload,
   SessionRuntimeEvent,
   SessionThreadPayload,
+  SessionTraceListPayload,
 } from "../types/sessions";
 
 type JsonObject = Record<string, unknown>;
@@ -69,6 +70,38 @@ export function createSession(payload?: JsonObject): Promise<SessionCreatePayloa
 
 export function fetchSessionThread(sessionKey: string): Promise<SessionThreadPayload> {
   return request<SessionThreadPayload>(`/api/sessions/${encodeURIComponent(sessionKey)}/webui-thread`);
+}
+
+export function fetchSessionTraces(sessionKey: string): Promise<SessionTraceListPayload> {
+  return request<SessionTraceListPayload>(`/api/sessions/${encodeURIComponent(sessionKey)}/traces`);
+}
+
+export async function downloadSessionTrace(sessionKey: string, turnId: string): Promise<void> {
+  const response = await fetch(
+    `/api/sessions/${encodeURIComponent(sessionKey)}/traces/${encodeURIComponent(turnId)}`,
+  );
+  if (!response.ok) {
+    const data = (await response.json().catch(() => ({}))) as {
+      error?: { message?: string };
+      detail?: string | { message?: string };
+    };
+    const detailMessage = typeof data.detail === "string" ? data.detail : data.detail?.message;
+    throw new ApiRequestError(data.error?.message || detailMessage || "轨迹下载失败", response.status);
+  }
+
+  const blobUrl = URL.createObjectURL(await response.blob());
+  const anchor = document.createElement("a");
+  const disposition = response.headers.get("Content-Disposition") ?? "";
+  const filename = disposition.match(/filename="?([^";]+)"?/)?.[1] ?? `paper-agent-trace-${turnId}.zip`;
+  anchor.href = blobUrl;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  try {
+    anchor.click();
+  } finally {
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(blobUrl), 0);
+  }
 }
 
 export function deleteSession(sessionKey: string): Promise<{ deleted: boolean; key: string }> {

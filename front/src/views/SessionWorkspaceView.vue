@@ -6,6 +6,7 @@ import {
   FileDown,
   FileSearch,
   Gauge,
+  History,
   LoaderCircle,
   PackageOpen,
   Timer,
@@ -15,6 +16,7 @@ import {
 import { ApiRequestError, cancelSessionRun, createSession, fetchSessionThread, startSessionRun, subscribeSessionRun } from "../api/sessions";
 import SessionComposer from "../components/session/SessionComposer.vue";
 import SessionTimeline from "../components/session/SessionTimeline.vue";
+import TraceDrawer from "../components/session/TraceDrawer.vue";
 import StatusPill from "../components/StatusPill.vue";
 import { createReadableId } from "../lib/random-id";
 import { SessionStreamAggregator } from "../lib/session-stream-aggregator";
@@ -50,6 +52,7 @@ const activeRunId = ref<string | null>(null);
 const streamSource = ref<EventSource | null>(null);
 const manualClose = ref(false);
 const timelineSnapshot = ref<SessionTimelineSnapshot | null>(null);
+const traceDrawerOpen = ref(false);
 
 const aggregator = new SessionStreamAggregator();
 
@@ -219,6 +222,7 @@ async function selectSession(sessionKey: string) {
   closeStream(true);
   activeRunId.value = null;
   cancelling.value = false;
+  traceDrawerOpen.value = false;
   selectedSessionKey.value = sessionKey;
   constraints.value = {};
   threadLoading.value = true;
@@ -253,6 +257,7 @@ async function selectSession(sessionKey: string) {
  */
 function resetToBlankWorkspace() {
   closeStream(true);
+  traceDrawerOpen.value = false;
   selectedSessionKey.value = "";
   selectedTitle.value = "新的研究主题";
   constraints.value = {};
@@ -531,6 +536,10 @@ function handleError(error: unknown, title: string) {
       </div>
 
       <div class="session-compact-meta">
+        <button class="button compact session-trace-button" type="button" @click="traceDrawerOpen = true">
+          <History :size="14" />
+          轨迹
+        </button>
         <StatusPill :tone="statusTone(currentStatus)" :label="taskStatusLabel" />
         <span class="session-compact-date"><CalendarDays :size="14" />{{ compactUpdatedAt }}</span>
       </div>
@@ -639,5 +648,12 @@ function handleError(error: unknown, title: string) {
         </section>
       </aside>
     </section>
+
+    <TraceDrawer
+      v-if="traceDrawerOpen && selectedSessionKey"
+      :key="selectedSessionKey"
+      :session-key="selectedSessionKey"
+      @close="traceDrawerOpen = false"
+    />
   </section>
 </template>

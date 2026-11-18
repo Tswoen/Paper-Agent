@@ -182,18 +182,23 @@ class SessionStoreBackend:
                 (created_at, created_at, content[:120], session_id),
             )
 
-    def list_messages(self, session_id: str) -> list[JsonObject]:
-        """按时间顺序读取某个会话下的全部消息。"""
+    def list_messages(self, session_id: str, turn_id: str | None = None) -> list[JsonObject]:
+        """按时间顺序读取会话消息，可选择只读取一个回合。"""
 
+        where_clause = "session_id = ?"
+        parameters: list[Any] = [session_id]
+        if turn_id is not None:
+            where_clause += " AND json_extract(metadata, '$.turn_id') = ?"
+            parameters.append(turn_id)
         with self._connection() as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT id, role, content, created_at, parent_id, metadata
                 FROM session_message
-                WHERE session_id = ?
+                WHERE {where_clause}
                 ORDER BY created_at ASC, rowid ASC
                 """,
-                (session_id,),
+                parameters,
             ).fetchall()
         return [self._row_to_message(row) for row in rows]
 
@@ -243,18 +248,23 @@ class SessionStoreBackend:
         self._append_event_jsonl(session_id, event_record)
         return event_record
 
-    def list_events(self, session_id: str) -> list[JsonObject]:
-        """按序号顺序读取指定会话的完整事件流。"""
+    def list_events(self, session_id: str, turn_id: str | None = None) -> list[JsonObject]:
+        """按序号顺序读取事件流，可选择只读取一个回合。"""
 
+        where_clause = "session_id = ?"
+        parameters: list[Any] = [session_id]
+        if turn_id is not None:
+            where_clause += " AND json_extract(metadata, '$.turn_id') = ?"
+            parameters.append(turn_id)
         with self._connection() as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT id, event_type, content, created_at, seq_no, metadata
                 FROM session_event
-                WHERE session_id = ?
+                WHERE {where_clause}
                 ORDER BY seq_no ASC
                 """,
-                (session_id,),
+                parameters,
             ).fetchall()
         return [self._row_to_event(row) for row in rows]
 
@@ -300,20 +310,145 @@ class SessionStoreBackend:
             "metadata": payload,
         }
 
-    def list_artifacts(self, session_id: str) -> list[JsonObject]:
-        """读取会话关联的全部产物记录。"""
+    def list_artifacts(self, session_id: str, turn_id: str | None = None) -> list[JsonObject]:
+        """读取会话产物记录，可选择只读取一个回合。"""
 
+        where_clause = "session_id = ?"
+        parameters: list[Any] = [session_id]
+        if turn_id is not None:
+            where_clause += " AND json_extract(metadata, '$.turn_id') = ?"
+            parameters.append(turn_id)
         with self._connection() as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT id, artifact_type, name, path, size, created_at, metadata
+                FROM session_artifact
+                WHERE {where_clause}
+                ORDER BY created_at ASC, rowid ASC
+                """,
+                parameters,
+            ).fetchall()
+        return [self._row_to_artifact(row) for row in rows]
+
+    def list_trace_turns(self, session_id: str) -> list[JsonObject]:
+        """用轻量字段汇总可导出的回合，避免读取完整事件和消息正文。"""
+
+        with self._connection() as connection:
+            event_rows = connection.execute(
+                """
+                SELECT
+                    event_type,
+                    created_at,
+                    json_extract(metadata, '$.turn_id') AS turn_id,
+                    json_extract(metadata, '$.run_id') AS run_id,
+                    json_extract(metadata, '$.thread_id') AS thread_id,
+                    json_extract(metadata, '$.status') AS status
+                FROM session_event
+                WHERE session_id = ?
+                ORDER BY seq_no ASC
+                """,
+                (session_id,),
+            ).fetchall()
+            message_rows = connection.execute(
+                """
+                SELECT created_at, json_extract(metadata, '$.turn_id') AS turn_id
+                FROM session_message
+                WHERE session_id = ?
+                ORDER BY created_at ASC, rowid ASC
+                """,
+                (session_id,),
+            ).fetchall()
+            artifact_rows = connection.execute(
+                """
+                SELECT created_at, json_extract(metadata, '$.turn_id') AS turn_id
                 FROM session_artifact
                 WHERE session_id = ?
                 ORDER BY created_at ASC, rowid ASC
                 """,
                 (session_id,),
             ).fetchall()
-        return [self._row_to_artifact(row) for row in rows]
+
+        turns: dict[str, JsonObject] = {}
+
+        def _turn(turn_id: Any, created_at: Any) -> JsonObject | None:
+            # turn_id 是调用方提供的精确标识；不能在这里 trim，否则会与 SQL 精确过滤不一致。
+            normalized_turn_id = str(turn_id or "")
+            if not normalized_turn_id:
+                return None
+            timestamp = str(created_at or "")
+            if normalized_turn_id not in turns:
+                turns[normalized_turn_id] = {
+                    "turn_id": normalized_turn_id,
+                    "run_id": None,
+                    "thread_id": None,
+                    "status": "unknown",
+                    "started_at": timestamp or None,
+                    "updated_at": timestamp or None,
+                    "finished_at": None,
+                    "event_count": 0,
+                    "message_count": 0,
+                    "artifact_count": 0,
+                }
+            summary = turns[normalized_turn_id]
+            if timestamp:
+                if not summary["started_at"] or timestamp < str(summary["started_at"]):
+                    summary["started_at"] = timestamp
+                if not summary["updated_at"] or timestamp > str(summary["updated_at"]):
+                    summary["updated_at"] = timestamp
+            return summary
+
+        for row in event_rows:
+            summary = _turn(row["turn_id"], row["created_at"])
+            if summary is None:
+                continue
+            summary["event_count"] += 1
+            summary["run_id"] = str(row["run_id"] or "") or summary["run_id"]
+            summary["thread_id"] = str(row["thread_id"] or "") or summary["thread_id"]
+            event_type = str(row["event_type"] or "")
+            event_status = str(row["status"] or "").strip()
+            if event_type == "status" and event_status:
+                summary["status"] = event_status
+            elif event_type in {"error", "run_interrupted"}:
+                summary["status"] = event_status or "failed"
+                summary["finished_at"] = str(row["created_at"] or "") or None
+            elif event_type == "turn_end":
+                summary["status"] = event_status or "completed"
+                summary["finished_at"] = str(row["created_at"] or "") or None
+
+        for row in message_rows:
+            summary = _turn(row["turn_id"], row["created_at"])
+            if summary is not None:
+                summary["message_count"] += 1
+        for row in artifact_rows:
+            summary = _turn(row["turn_id"], row["created_at"])
+            if summary is not None:
+                summary["artifact_count"] += 1
+
+        # 进程恢复事件历史数据可能只有 thread_id、没有 turn_id。把它归到该线程最近
+        # 仍未结束的回合，避免重启后 Trace 一直显示 running。无法唯一归属时不猜。
+        for row in event_rows:
+            if str(row["event_type"] or "") != "run_interrupted" or str(row["turn_id"] or ""):
+                continue
+            candidates = [
+                summary
+                for summary in turns.values()
+                if summary.get("status") in {"running", "unknown"}
+            ]
+            thread_id = str(row["thread_id"] or "")
+            if thread_id:
+                candidates = [summary for summary in candidates if summary.get("thread_id") == thread_id]
+            elif len(candidates) != 1:
+                continue
+            if not candidates:
+                continue
+            summary = max(candidates, key=lambda item: str(item.get("updated_at") or ""))
+            recovered_at = str(row["created_at"] or "")
+            summary["status"] = str(row["status"] or "").strip() or "failed"
+            summary["finished_at"] = recovered_at or summary["finished_at"]
+            if recovered_at and recovered_at > str(summary.get("updated_at") or ""):
+                summary["updated_at"] = recovered_at
+
+        return sorted(turns.values(), key=lambda item: str(item.get("updated_at") or ""), reverse=True)
 
     def ensure_session_layout(self, session_id: str) -> Path:
         """确保会话目录及其子目录存在，并返回会话根目录。"""
@@ -561,6 +696,36 @@ class SQLiteSessionRepository(SessionRepository):
         """返回按更新时间倒序排列的会话摘要列表。"""
 
         return [self._hydrate_record(item).summary() for item in self.backend.list_sessions()]
+
+    def list_trace_turns(self, key: str) -> list[JsonObject]:
+        """列出可导出的回合，不组装完整会话聚合。"""
+
+        self._ensure_session_exists(key)
+        return self.backend.list_trace_turns(key)
+
+    def list_events(self, key: str, turn_id: str) -> list[JsonObject]:
+        """只读取指定回合的事件。"""
+
+        self._ensure_session_exists(key)
+        return self.backend.list_events(key, turn_id)
+
+    def list_messages(self, key: str, turn_id: str) -> list[JsonObject]:
+        """只读取指定回合的消息。"""
+
+        self._ensure_session_exists(key)
+        return self.backend.list_messages(key, turn_id)
+
+    def list_artifacts(self, key: str, turn_id: str) -> list[JsonObject]:
+        """只读取指定回合的产物。"""
+
+        self._ensure_session_exists(key)
+        return self.backend.list_artifacts(key, turn_id)
+
+    def _ensure_session_exists(self, key: str) -> None:
+        """用主表轻量校验会话是否存在，避免为校验加载全部事件。"""
+
+        if self.backend.get_session(key) is None:
+            raise SessionError(f"session not found: {key}", 404)
 
     def delete(self, key: str) -> None:
         """删除指定会话。"""

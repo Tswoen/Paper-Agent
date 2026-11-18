@@ -26,6 +26,22 @@ class SessionRepository(ABC):
         """返回会话摘要列表。"""
 
     @abstractmethod
+    def list_trace_turns(self, key: str) -> list[JsonObject]:
+        """列出会话中已有轨迹数据的回合，不加载完整事件内容。"""
+
+    @abstractmethod
+    def list_events(self, key: str, turn_id: str) -> list[JsonObject]:
+        """按回合读取事件，并按事件序号排序。"""
+
+    @abstractmethod
+    def list_messages(self, key: str, turn_id: str) -> list[JsonObject]:
+        """按回合读取消息，并按创建时间排序。"""
+
+    @abstractmethod
+    def list_artifacts(self, key: str, turn_id: str) -> list[JsonObject]:
+        """按回合读取产物记录，并按创建时间排序。"""
+
+    @abstractmethod
     def delete(self, key: str) -> None:
         """删除指定会话。"""
 

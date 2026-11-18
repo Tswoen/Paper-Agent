@@ -76,6 +76,24 @@ export interface SessionRunAccepted {
   stream_url: string;
 }
 
+export interface SessionTraceSummary {
+  turn_id: string;
+  run_id: string | null;
+  thread_id: string | null;
+  status: string;
+  started_at: string | null;
+  updated_at: string | null;
+  finished_at: string | null;
+  event_count: number;
+  message_count: number;
+  artifact_count: number;
+  download_url: string;
+}
+
+export interface SessionTraceListPayload {
+  traces: SessionTraceSummary[];
+}
+
 /** 用户可以在提交主题时附带的检索和阅读限制。空字段不会写入请求。 */
 export interface SessionConstraints {
   year_from?: number;
