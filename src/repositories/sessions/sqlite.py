@@ -480,30 +480,9 @@ class SessionStoreBackend:
             if summary is not None:
                 summary["artifact_count"] += 1
 
-        # 进程恢复事件历史数据可能只有 thread_id、没有 turn_id。把它归到该线程最近
-        # 仍未结束的回合，避免重启后 Trace 一直显示 running。无法唯一归属时不猜。
-        for row in event_rows:
-            if str(row["event_type"] or "") != "run_interrupted" or str(row["turn_id"] or ""):
-                continue
-            candidates = [
-                summary
-                for summary in turns.values()
-                if summary.get("status") in {"running", "unknown"}
-            ]
-            thread_id = str(row["thread_id"] or "")
-            if thread_id:
-                candidates = [summary for summary in candidates if summary.get("thread_id") == thread_id]
-            elif len(candidates) != 1:
-                continue
-            if not candidates:
-                continue
-            summary = max(candidates, key=lambda item: str(item.get("updated_at") or ""))
-            recovered_at = str(row["created_at"] or "")
-            summary["status"] = str(row["status"] or "").strip() or "failed"
-            summary["finished_at"] = recovered_at or summary["finished_at"]
-            if recovered_at and recovered_at > str(summary.get("updated_at") or ""):
-                summary["updated_at"] = recovered_at
-
+        # 中文注释：run_interrupted 等终态事件由生产者在发出时就带上 turn_id
+        # （见 SessionRunService.recover_interrupted_runs），这里只按字段分组，
+        # 不为缺 turn_id 的事件推断归属。
         return sorted(turns.values(), key=lambda item: str(item.get("updated_at") or ""), reverse=True)
 
     def ensure_session_layout(self, session_id: str) -> Path:

@@ -201,19 +201,9 @@ def _snapshot_summary(
             observed_status = event_status or "completed"
             observed_finished_at = str(event.get("created_at") or "") or None
 
-    latest_record_at = max(timestamps) if timestamps else ""
-    summary_finished_at = str(summary.get("finished_at") or "")
-    recovery_is_current = (
-        summary.get("status") in {"failed", "cancelled", "interrupted"}
-        and bool(summary_finished_at)
-        and summary_finished_at >= latest_record_at
-    )
-    if recovery_is_current:
-        snapshot["status"] = summary["status"]
-        snapshot["finished_at"] = summary_finished_at
-        if summary_finished_at > str(snapshot.get("updated_at") or ""):
-            snapshot["updated_at"] = summary_finished_at
-    elif observed_status:
+    # 中文注释：终态一律以实际打包的事件为准。进程中断的 run_interrupted 事件
+    # 由生产者带上 turn_id，会正常出现在本回合事件列表里，无需另读会话摘要兜底。
+    if observed_status:
         snapshot["status"] = observed_status
         snapshot["finished_at"] = observed_finished_at
     return snapshot
@@ -226,13 +216,14 @@ def _extract_diagnostics(events: list[JsonObject]) -> JsonObject:
         metadata = event.get("metadata")
         if not isinstance(metadata, dict):
             continue
-        # 生产消息事件的 metadata 会被持久化层再包一层；同时兼容早期的扁平结构。
+        # 中文注释：当前消息事件经 reporter → 持久化后是两层结构——外层是持久化
+        # 信封（整个事件去掉 content），内层是事件自带的 metadata，diagnostics 在内层。
         nested_metadata = metadata.get("metadata")
-        containers = [nested_metadata, metadata] if isinstance(nested_metadata, dict) else [metadata]
-        for container in containers:
-            diagnostics = container.get("diagnostics")
-            if isinstance(diagnostics, dict):
-                return diagnostics
+        if not isinstance(nested_metadata, dict):
+            continue
+        diagnostics = nested_metadata.get("diagnostics")
+        if isinstance(diagnostics, dict):
+            return diagnostics
     return {}
 
 

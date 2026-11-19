@@ -233,6 +233,8 @@ class SessionRunService:
 
         该方法会跳过当前 broker 确实持有的活动任务，因此也可以安全地重复调用。
         非 running 状态只清理异常残留的时间戳，不会覆盖已经完成或取消的结果。
+        中断事件按被中断的线程逐条发出，metadata 自带账本里登记的 turn_id/thread_id，
+        让 Trace 能按回合正常分组，不需要消费端推断归属。
         """
 
         recovered: list[str] = []
@@ -247,13 +249,13 @@ class SessionRunService:
 
             recovered_at = utc_now()
             was_running = previous_status == "running"
-            interrupted_threads: list[str] = []
+            interrupted_rows: list[JsonObject] = []
             if was_running:
                 self.repo.set_status(session_key, "failed")
                 # 中文注释：进程重启后，把该会话下仍标记 running 的存档线程改成
                 # interrupted，让它进入可续跑集合；已完成的行不受影响。
-                interrupted_threads = [
-                    str(row["thread_id"])
+                interrupted_rows = [
+                    row
                     for row in self.checkpoint_bundle.registry.list_threads(session_key)
                     if row.get("status") == "running"
                 ]
@@ -262,24 +264,46 @@ class SessionRunService:
                     finished_at=recovered_at,
                 )
             self.repo.set_run_started_at(session_key, None)
-            self.repo.append_event(
-                session_key,
-                "run_interrupted" if was_running else "run_marker_reconciled",
-                content=(
-                    "后台任务因服务进程中断而停止，可从最近的恢复现场继续执行"
-                    if was_running
-                    else "已清理与会话终态不一致的运行标记"
-                ),
-                metadata={
-                    "status": "failed" if was_running else previous_status,
-                    "previous_status": previous_status,
-                    "run_started_at": run_started_at,
-                    "recovery_status": "process_restarted",
-                    "recovered_at": recovered_at,
-                    "thread_id": interrupted_threads[0] if len(interrupted_threads) == 1 else None,
-                },
-                created_at=recovered_at,
-            )
+            if was_running and interrupted_rows:
+                # 中文注释：按被中断的线程逐条发终态事件，turn_id 直接取自账本行。
+                # Trace 按 metadata.turn_id 分组，事件必须自带归属；消费端不再为
+                # 缺 turn_id 的事件推断它属于哪个回合。
+                for row in interrupted_rows:
+                    self.repo.append_event(
+                        session_key,
+                        "run_interrupted",
+                        content="后台任务因服务进程中断而停止，可从最近的检查点继续执行",
+                        metadata={
+                            "status": "failed",
+                            "previous_status": previous_status,
+                            "run_started_at": run_started_at,
+                            "recovery_status": "process_restarted",
+                            "recovered_at": recovered_at,
+                            "turn_id": str(row.get("turn_id") or ""),
+                            "thread_id": str(row.get("thread_id") or ""),
+                        },
+                        created_at=recovered_at,
+                    )
+            else:
+                # 中文注释：没有登记过线程的 running 残留（理论上不存在，防御性保留）
+                # 只留会话级审计事件；此时也没有任何 turn 需要归属。
+                self.repo.append_event(
+                    session_key,
+                    "run_interrupted" if was_running else "run_marker_reconciled",
+                    content=(
+                        "后台任务因服务进程中断而停止，可从最近的检查点继续执行"
+                        if was_running
+                        else "已清理与会话终态不一致的运行标记"
+                    ),
+                    metadata={
+                        "status": "failed" if was_running else previous_status,
+                        "previous_status": previous_status,
+                        "run_started_at": run_started_at,
+                        "recovery_status": "process_restarted",
+                        "recovered_at": recovered_at,
+                    },
+                    created_at=recovered_at,
+                )
             recovered.append(session_key)
             logger.warning(
                 "已对账服务重启后遗留的会话运行标记",

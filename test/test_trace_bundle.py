@@ -175,16 +175,34 @@ class TraceBundleTest(unittest.TestCase):
             metadata={"turn_id": turn_id, "thread_id": thread_id, "status": "running"},
             created_at="2026-11-18T12:00:00+00:00",
         )
+        # 中文注释：当前契约要求中断事件由生产者自带 turn_id（见 recover_interrupted_runs），
+        # Trace 只按字段分组，不做归属推断。
         self.repo.append_event(
             self.session_key,
             "run_interrupted",
-            metadata={"status": "failed", "thread_id": thread_id, "recovery_status": "process_restarted"},
+            metadata={
+                "turn_id": turn_id,
+                "status": "failed",
+                "thread_id": thread_id,
+                "recovery_status": "process_restarted",
+            },
             created_at="2026-11-18T12:01:00+00:00",
+        )
+
+        # 中文注释：另一个没有收到中断事件的 running 回合不能被波及——
+        # 终态只落在事件自带的 turn_id 上，不存在跨回合猜测。
+        self.repo.append_event(
+            self.session_key,
+            "status",
+            metadata={"turn_id": "keep-running", "thread_id": f"{self.session_key}:keep-running", "status": "running"},
+            created_at="2026-11-18T12:00:30+00:00",
         )
 
         summary = next(item for item in self.service.list_traces(self.session_key)["traces"] if item["turn_id"] == turn_id)
         self.assertEqual(summary["status"], "failed")
         self.assertEqual(summary["finished_at"], "2026-11-18T12:01:00+00:00")
+        untouched = next(item for item in self.service.list_traces(self.session_key)["traces"] if item["turn_id"] == "keep-running")
+        self.assertEqual(untouched["status"], "running")
         with self._zip(turn_id) as archive:
             manifest = json.loads(archive.read("manifest.json"))
         self.assertEqual(manifest["status"], "failed")
