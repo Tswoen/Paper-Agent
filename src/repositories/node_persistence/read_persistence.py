@@ -12,7 +12,6 @@ from src.repositories.sessions.base import SessionRepository
 
 
 JsonObject = dict[str, Any]
-READ_NOTE_VERSION = 1
 _READ_NOTE_STAGES = frozenset({"abstract_complete", "fulltext_complete", "discarded"})
 
 
@@ -25,7 +24,7 @@ class ReadPersistenceResult:
 
 @dataclass(slots=True)
 class LoadedPaperNote:
-    """通过版本和请求指纹校验的单篇笔记及其稳定产物引用。"""
+    """通过归属与请求指纹校验的单篇笔记及其稳定产物引用。"""
 
     stage: str | None
     result: JsonObject
@@ -55,15 +54,19 @@ class ReadPersistenceSink:
         *,
         session_key: str,
         turn_id: str,
-        thread_id: str | None = None,
-        request_fingerprint: str = "",
+        thread_id: str,
+        request_fingerprint: str,
     ):
-        """初始化写盘上下文；thread 路径在续跑换 turn 后仍保持稳定。"""
+        """初始化写盘上下文；thread 路径在续跑换 turn 后仍保持稳定。
+
+        中文注释：thread_id 与 request_fingerprint 必填——它们决定 note 的归属
+        与可恢复性，漏传会立刻报错，而不是静默写出无法恢复的笔记。
+        """
 
         self._repo = repo
         self._session_key = session_key
         self._turn_id = turn_id
-        self._thread_id = thread_id or f"{session_key}:{turn_id}"
+        self._thread_id = thread_id
         self._request_fingerprint = request_fingerprint
 
     def persist_paper(self, result: PaperReadResult, *, stage: str | None = None) -> ReadPersistenceResult:
@@ -75,7 +78,6 @@ class ReadPersistenceSink:
             raise ValueError(f"unsupported read note stage: {resolved_stage}")
         failure = result.failure if isinstance(result.failure, dict) else None
         payload = {
-            "note_version": READ_NOTE_VERSION,
             "paper_id": result.paper.id,
             "thread_id": self._thread_id,
             "stage": resolved_stage,
@@ -103,7 +105,7 @@ class ReadPersistenceSink:
         return ReadPersistenceResult(artifacts=[_artifact_ref(record)])
 
     def load_paper_note(self, paper_id: str) -> LoadedPaperNote | None:
-        """读取一篇有效笔记；损坏、版本或请求不匹配时都按未恢复处理。"""
+        """读取一篇有效笔记；损坏、归属或请求不匹配时都按未恢复处理。"""
 
         relative_path = self._paper_note_path(paper_id)
         record = self._find_artifact(relative_path)
@@ -120,8 +122,6 @@ class ReadPersistenceSink:
         except (OSError, ValueError, TypeError):
             return None
         if not isinstance(payload, dict):
-            return None
-        if payload.get("note_version") != READ_NOTE_VERSION:
             return None
         if str(payload.get("paper_id") or "") != paper_id:
             return None

@@ -123,7 +123,6 @@ class ReadNotePersistenceTest(unittest.TestCase):
         record = self.repo.get(self.session_key).artifacts[0]
         self.assertIn("artifacts/read/threads/session_thread-1/papers/paper-1/note.json", record["path"].replace("\\", "/"))
         payload = json.loads(Path(record["path"]).read_text(encoding="utf-8"))
-        self.assertEqual(payload["note_version"], 1)
         self.assertEqual(payload["stage"], "abstract_complete")
         self.assertEqual(payload["request_fingerprint"], self.fingerprint)
         self.assertIsNone(payload["last_error"])
@@ -144,12 +143,23 @@ class ReadNotePersistenceTest(unittest.TestCase):
         self.assertEqual(loaded[0]["paper"]["id"], "paper-1")
         self.assertEqual(loaded[0]["extraction"], {"methods": ["agent workflow"]})
 
+        # 中文注释：扁平形状的笔记不被消费——当前 schema 只认 envelope。
+        self.repo.write_artifact(
+            self.session_key,
+            artifact_type="paper_read_note",
+            name="flat_note.json",
+            content=json.dumps(self._result().to_dict()),
+            relative_path="artifacts/read/threads/session_thread-1/papers/paper-flat/note.json",
+            metadata={"turn_id": "turn-1"},
+        )
+        self.assertEqual(len(_load_session_read_results(runtime)), 1)
+
         result.relevance.discarded = True
         result.relevance.status = "discarded"
         self.sink.persist_paper(result, stage="discarded")
         self.assertEqual(_load_session_read_results(runtime), [])
 
-    def test_load_valid_note_and_reject_corruption_version_or_fingerprint(self):
+    def test_load_valid_note_and_reject_corruption_flat_or_fingerprint(self):
         persisted = self.sink.persist_paper(self._result(), stage="abstract_complete").artifacts[0]
         path = self.repo.read_artifact_path(self.session_key, persisted["artifact_id"])
         self.assertIsNotNone(path)
@@ -163,15 +173,8 @@ class ReadNotePersistenceTest(unittest.TestCase):
         path.write_text("{broken", encoding="utf-8")
         self.assertIsNone(self.sink.load_paper_note("paper-1"))
 
-        payload = self._result().to_dict()
-        path.write_text(json.dumps({
-            "note_version": 2,
-            "paper_id": "paper-1",
-            "thread_id": "session:thread-1",
-            "stage": "abstract_complete",
-            "request_fingerprint": self.fingerprint,
-            "result": payload,
-        }), encoding="utf-8")
+        # 中文注释：当前 schema 只认 envelope；缺少归属字段的扁平结果不能恢复。
+        path.write_text(json.dumps(self._result().to_dict()), encoding="utf-8")
         self.assertIsNone(self.sink.load_paper_note("paper-1"))
 
         self.sink.persist_paper(self._result(), stage="abstract_complete")
