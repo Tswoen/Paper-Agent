@@ -120,9 +120,6 @@ function resumeHint(event: UIRuntimeTimelineEvent) {
   if (event.completed !== null && event.total !== null) {
     return `已完成 ${event.completed}/${event.total}，可从失败位置继续`;
   }
-  if (event.nextPosition !== null) {
-    return `将从第 ${event.nextPosition + 1} 项附近继续`;
-  }
   return "可从上次失败位置继续";
 }
 </script>

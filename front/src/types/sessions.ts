@@ -152,9 +152,8 @@ export interface SessionRuntimeEvent {
   selected_paper_count?: number;
   artifact_count?: number;
   search_halted?: boolean;
-  checkpoint?: Record<string, unknown>;
-  recovery_status?: string;
-  next_position?: number;
+  // 中文注释：官方 Checkpointer 最后一份快照的 id，由 turn_end 携带，决定是否可续跑。
+  checkpoint_id?: string | null;
   completed?: number;
   total?: number;
   input_tokens?: number;
@@ -191,8 +190,6 @@ export interface UIRuntimeTimelineEvent {
   children: UIRuntimeTimelineEvent[];
   isCollapsed: boolean;
   resumeAvailable: boolean;
-  recoveryStatus: string | null;
-  nextPosition: number | null;
   completed: number | null;
   total: number | null;
   inputTokens: number;
