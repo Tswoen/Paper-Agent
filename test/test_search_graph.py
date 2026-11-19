@@ -448,6 +448,64 @@ class GraphTest(unittest.TestCase):
             ]
             self.assertEqual(waiting_events, [])
 
+    def test_run_graph_resumes_after_read_node_failure(self):
+        """阅读节点失败后官方续跑重跑 read：检索不重跑，最终跑完全链路。"""
+
+        stub = _StubService()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = SQLiteSessionRepository(storage_root=temp_dir)
+            session = repo.create("Resume after read failure")
+            saver = InMemorySaver()
+            thread_id = f"{session.key}:turn-1"
+
+            with _fake_backends(
+                stub,
+                search_snapshot=_fake_snapshot(),
+                read_snapshot=_fake_snapshot(
+                    response=LLMResponse(
+                        content="model unavailable",
+                        finish_reason="error",
+                        error_kind="server_error",
+                        error_status_code=503,
+                    )
+                ),
+            ):
+                with self.assertRaises(RuntimeError):
+                    asyncio.run(
+                        run_graph(
+                            ReviewRequest(
+                                topic="multi-agent literature review",
+                                constraints={"sources": ["openalex"], "max_results": 3},
+                            ),
+                            session_repo=repo,
+                            session_key=session.key,
+                            turn_id="turn-1",
+                            checkpointer=saver,
+                            thread_id=thread_id,
+                        )
+                    )
+            search_calls_before_resume = len(stub.calls)
+
+            # 中文注释：模型修好后续跑——官方 Checkpointer 从失败的 read 节点继续，
+            # 检索节点不能重跑。
+            with _fake_backends(stub, search_snapshot=_fake_snapshot(), read_snapshot=_read_snapshot()):
+                result = asyncio.run(
+                    run_graph(
+                        None,
+                        resume=True,
+                        session_repo=repo,
+                        session_key=session.key,
+                        turn_id="turn-1",
+                        checkpointer=saver,
+                        thread_id=thread_id,
+                    )
+                )
+
+            self.assertEqual(result.state["current_step"], "reply")
+            self.assertEqual(len(stub.calls), search_calls_before_resume)
+            artifact_names = [artifact["name"] for artifact in repo.get(session.key).thread()["artifacts"]]
+            self.assertEqual(artifact_names.count("search_manifest.json"), 1)
+
     def test_run_graph_persists_checkpoints_when_saver_is_provided(self):
         """带 saver 时状态会落到指定线程，返回值回显 thread_id。"""
 

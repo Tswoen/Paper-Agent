@@ -190,6 +190,19 @@ class ReadNotePersistenceTest(unittest.TestCase):
         loaded = self.sink.load_paper_note("paper-1")
         self.assertIsNone(loaded.stage)
 
+    def test_note_from_other_thread_is_not_loaded(self):
+        """note 的 thread 归属校验：别的线程写下的笔记不能被当前线程恢复。"""
+
+        self.sink.persist_paper(self._result(), stage="abstract_complete")
+        other = ReadPersistenceSink(
+            self.repo,
+            session_key=self.session_key,
+            turn_id="turn-1",
+            thread_id="session:other-thread",
+            request_fingerprint=self.fingerprint,
+        )
+        self.assertIsNone(other.load_paper_note("paper-1"))
+
     def test_fingerprint_is_stable_for_constraint_key_order(self):
         reordered = {
             "language": "zh",
@@ -322,6 +335,34 @@ class ReadNodeIdempotencyTest(unittest.TestCase):
         self.assertEqual(fulltext_calls, ["paper-1"])
         self.assertIn(note_artifact["artifact_id"], [item["artifact_id"] for item in result["read_artifact_refs"]])
 
+    def test_state_read_results_is_not_a_recovery_source(self):
+        """state.read_results 只写回供下游消费；没有 note 时论文必须重读。"""
+
+        paper = PaperDocument(id="paper-1", title="Agent paper", abstract="abstract")
+        fabricated = PaperReadResult(
+            paper=paper,
+            note=ReadNote(short_summary="伪造完成", evidence_level="full_text"),
+            relevance=ReadRelevance(relevant=True, status="selected_for_deep_read"),
+            full_text=FullTextStatus(status="chunks_saved"),
+        )
+        abstract_calls = []
+
+        async def fake_abstract(paper, **kwargs):
+            abstract_calls.append(paper.id)
+            return ReadNote(short_summary="重新摘要"), ReadRelevance(relevant=False, reason="无关"), []
+
+        state = self._state([paper])
+        state["read_results"] = [fabricated.to_dict()]
+        with (
+            mock.patch("src.graph.read_node.MIN_USABLE_PAPERS", 0),
+            mock.patch("src.graph.read_node.load_read_agent_llm", return_value=None),
+            mock.patch("src.graph.read_node._build_abstract_note", new=fake_abstract),
+        ):
+            result = asyncio.run(_run_read_node_async(state, self._runtime("turn-1")))
+
+        self.assertEqual(abstract_calls, ["paper-1"])
+        self.assertEqual(result["read_summary"]["discarded_paper_count"], 1)
+
     def test_fulltext_error_preserves_usable_abstract_as_partial_failure(self):
         paper = PaperDocument(id="paper-1", title="Agent paper", abstract="abstract")
         note_artifact = self._persist_abstract(paper)
@@ -369,63 +410,6 @@ class ReadNodeIdempotencyTest(unittest.TestCase):
         self.assertEqual(notes[0]["metadata"]["paper_id"], "done")
         payload = json.loads(Path(notes[0]["path"]).read_text(encoding="utf-8"))
         self.assertEqual(payload["stage"], "abstract_complete")
-
-    def test_abstract_note_does_not_overwrite_newer_fulltext_checkpoint(self):
-        paper = PaperDocument(id="paper-1", title="Agent paper")
-        self._persist_abstract(paper)
-        newer = PaperReadResult(
-            paper=paper,
-            note=ReadNote(short_summary="摘要"),
-            relevance=ReadRelevance(relevant=True, status="selected_for_deep_read"),
-            full_text=FullTextStatus(status="converting", markdown_path="data/paper_cache/paper-1/fulltext.md"),
-        )
-        seen_paths = []
-
-        async def fake_fulltext(item, **kwargs):
-            if not kwargs.get("process_full_text"):
-                return await actual_read_one_paper(item, **kwargs)
-            seen_paths.append(item.restored_result.full_text.markdown_path)
-            item.restored_result.note.evidence_level = "full_text"
-            item.restored_result.full_text.status = "chunks_saved"
-            return item.restored_result
-
-        state = self._state([paper])
-        state["read_results"] = [newer.to_dict()]
-        with (
-            mock.patch("src.graph.read_node.load_read_agent_llm", return_value=None),
-            mock.patch("src.graph.read_node._read_one_paper", new=fake_fulltext),
-        ):
-            result = asyncio.run(_run_read_node_async(state, self._runtime("turn-1")))
-
-        self.assertEqual(seen_paths, ["data/paper_cache/paper-1/fulltext.md"])
-        self.assertEqual(result["read_results"][0]["full_text"]["markdown_path"], "data/paper_cache/paper-1/fulltext.md")
-
-    def test_completed_checkpoint_upgrades_stale_abstract_note(self):
-        paper = PaperDocument(id="paper-1", title="Agent paper")
-        note_artifact = self._persist_abstract(paper)
-        completed = PaperReadResult(
-            paper=paper,
-            note=ReadNote(short_summary="全文笔记", evidence_level="full_text"),
-            relevance=ReadRelevance(relevant=True, status="selected_for_deep_read"),
-            full_text=FullTextStatus(status="chunks_saved"),
-        )
-        state = self._state([paper])
-        state["read_results"] = [completed.to_dict()]
-
-        async def unexpected_read(item, **kwargs):
-            raise AssertionError("已完成 checkpoint 不应重跑阅读")
-
-        with (
-            mock.patch("src.graph.read_node.load_read_agent_llm", return_value=None),
-            mock.patch("src.graph.read_node._read_one_paper", new=unexpected_read),
-        ):
-            result = asyncio.run(_run_read_node_async(state, self._runtime("turn-1")))
-
-        self.assertEqual(len(result["read_results"]), 1)
-        path = self.repo.read_artifact_path(self.session_key, note_artifact["artifact_id"])
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        self.assertEqual(payload["stage"], "fulltext_complete")
-        self.assertEqual(payload["result"]["note"]["short_summary"], "全文笔记")
 
     def test_pending_note_selection_is_written_back_and_then_stable(self):
         paper = PaperDocument(id="paper-1", title="Pending paper")

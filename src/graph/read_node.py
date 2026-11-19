@@ -18,7 +18,7 @@ from src.utils.read_utils.read_fulltext import async_convert_fulltext_to_markdow
 # from src.models.read_models import FullTextStatus, PaperReadResult, ReadNote, ReadRelevance, calculate_relevance_score, normalize_match_levels
 from src.models.read_models import FullTextStatus, PaperReadResult, ReadNote, ReadRelevance, READ_RELEVANCE_STATUSES
 from src.repositories.node_persistence.read_persistence import ReadPersistenceSink, read_request_fingerprint
-from src.repositories.chroma.read_vector_store import EmbeddingConnection, async_index_chunk_file, async_index_markdown_chunks
+from src.repositories.chroma.read_vector_store import EmbeddingConnection, async_index_chunk_file
 from src.graph.runtime import WorkflowRuntimeContext
 from src.graph.runtime_resources import WorkflowRuntimeResources
 from src.graph.state_models import JsonObject, State
@@ -45,20 +45,11 @@ _FULL_TEXT_COMPLETED_STATUSES = frozenset({"indexed", "chunks_saved"})
 
 
 class ReadResourceUnavailableError(RuntimeError):
-    """表示阅读节点依赖的外部资源不可用，按普通失败中断当前节点。"""
+    """表示阅读节点依赖的外部资源不可用，按普通失败中断当前节点。
 
-    recovery_status = "waiting_resource"
-    current_step = "read_waiting_resource"
-    failure_stage = "read_resource_unavailable"
-    diagnostic_key = "read_resource_unavailable"
-
-    def __init__(self, message: str, *, details: JsonObject | None = None):
-        """保存可展示错误信息和用于恢复现场的结构化细节。"""
-
-        super().__init__(message)
-        # 中文注释：details 只保存能写进 JSON 的普通数据，不保存 provider、repo
-        # 这类运行时对象，避免 checkpoint 写盘或前端传递时无法序列化。
-        self.details = dict(details or {})
+    中文注释：只用于错误分类（区分"资源不可用"与"单篇处理异常"）。恢复由官方
+    Checkpointer 负责：用户重试时重跑本节点，note 跳过已完成论文。
+    """
 
 
 class ReadModelUnavailableError(ReadResourceUnavailableError):
@@ -73,36 +64,13 @@ class ReadModelUnavailableError(ReadResourceUnavailableError):
     内容质量不好时，也不算模型不可用，阅读节点会改用保守笔记继续处理。
     """
 
-    recovery_status = "waiting_model"
-    current_step = "read_waiting_model"
-    failure_stage = "read_model_unavailable"
-    diagnostic_key = "read_model_unavailable"
-
-
-class ReadEmbeddingUnavailableError(ReadResourceUnavailableError):
-    """表示 embedding 服务不可用，需要保存 Markdown 现场后等待用户处理。"""
-
-    recovery_status = "waiting_embedding"
-    current_step = "read_waiting_embedding"
-    failure_stage = "read_embedding_unavailable"
-    diagnostic_key = "read_embedding_unavailable"
-
-    def __init__(self, message: str, *, pending_result: PaperReadResult, details: JsonObject | None = None):
-        """保存已经转换到 Markdown、但还没有写入向量库的论文结果。"""
-
-        super().__init__(message, details=details)
-        # 中文注释：pending_result 是当前论文的中间成果，里面包含 Markdown 路径。
-        # 恢复时优先从这个 Markdown 继续建索引，避免重新下载和转换全文。
-        self.pending_result = pending_result
-
 
 @dataclass(slots=True)
 class PaperTaskInput:
-    """保存一篇论文并发处理时需要的固定输入和恢复现场。"""
+    """保存一篇论文并发处理时需要的固定输入。"""
 
     paper: PaperDocument
     position: int
-    restored_status: JsonObject
     restored_result: PaperReadResult | None = None
 
 
@@ -126,164 +94,6 @@ class CompletedPaperCounter:
         return self._count
 
 
-# def _legacy_run_read_node_serial():
-#     """生成执行图中的阅读节点，按论文顺序完成摘要、全文和索引处理。"""
-
-#     def _node(state: State) -> State:
-#         """读取检索结果并保留全部已有状态，模型不可用时保存现场并中断。"""
-
-#         request = state.get("request")
-#         if request is None:
-#             raise ValueError("阅读节点缺少用户请求，无法判断论文主题")
-#         system_config = SystemConfig.load()
-#         config = system_config.read
-
-#         # 中文注释：恢复执行时，调用方会把上次中断保存的 read_resume_checkpoint
-#         # 放回 state。此时 search_results 可能为空，所以论文列表优先读当前 state，
-#         # 读不到再从 checkpoint 还原，确保可以跳过检索节点直接回到阅读节点。
-#         checkpoint = _checkpoint_from_state(state)
-#         papers = _deduplicate_papers(list(state.get("search_results") or _papers_from_payload(checkpoint.get("search_results"))))
-
-#         reporter = _resolve_reporter(state)
-#         sink = _resolve_sink(state)
-#         runtime_resources = _resolve_runtime_resources(state)
-#         llm = _resolve_llm(state, config.agent_name)
-#         embedding_connection, embedding_error = _resolve_embedding_connection(
-#             system_config,
-#             config.download_timeout_seconds,
-#             runtime_resources=runtime_resources,
-#         )
-
-#         # 中文注释：恢复执行的核心是不重复处理已经成功完成的论文。
-#         # checkpoint/read_results 中的条目会被恢复成 PaperReadResult，循环从
-#         # start_position 继续；这样用户验证模型可用后，不会重新下载、转换或重写
-#         # 已经完成的前几篇论文。
-#         recovered_results = _restore_read_results(state, papers, checkpoint)
-#         results: list[PaperReadResult] = list(recovered_results)
-#         artifact_refs: list[JsonObject] = list(state.get("read_artifact_refs") or [])
-#         deep_read_count = _restore_deep_read_count(results, checkpoint)
-#         deep_read_limit = _deep_read_limit(request.constraints, len(papers))
-
-#         if reporter is not None:
-#             reporter.started(
-#                 f"准备阅读 {len(papers)} 篇论文",
-#                 stage="read_start",
-#                 total=len(papers),
-#                 completed=len(results),
-#                 resumed_paper_count=len(results),
-#             )
-
-#         # 中文注释：如果上次是在“全文已转成 Markdown，但 embedding 不可用”时中断，
-#         # checkpoint 里会保存 pending_read_result。这里优先复用这份 Markdown 继续建索引，
-#         # 避免重新下载和转换同一篇论文。
-#         deep_read_count = _resume_pending_index(
-#             state,
-#             papers=papers,
-#             results=results,
-#             artifact_refs=artifact_refs,
-#             checkpoint=checkpoint,
-#             config=config,
-#             embedding_connection=embedding_connection,
-#             embedding_error=embedding_error,
-#             sink=sink,
-#             reporter=reporter,
-#             deep_read_count=deep_read_count,
-#             deep_read_limit=deep_read_limit,
-#             runtime_resources=runtime_resources,
-#         )
-#         start_position = len(results) + 1
-
-#         for position, paper in enumerate(papers[start_position - 1 :], start=start_position):
-#             _report_progress(reporter, paper, "reading_abstract", position - 1, len(papers))
-#             try:
-#                 # 阅读每一篇论文，返回论文阅读的结果，以及是否采用了全文精读
-#                 result, used_deep_read = _legacy_read_one_paper(
-#                     paper,
-#                     topic=request.topic,
-#                     constraints=request.constraints,
-#                     llm=llm,
-#                     config=config,
-#                     embedding_connection=embedding_connection,
-#                     embedding_error=embedding_error,
-#                     allow_deep_read=deep_read_count < deep_read_limit,
-#                     reporter=reporter,
-#                     runtime_resources=runtime_resources,
-#                 )
-#                 if used_deep_read:
-#                     deep_read_count += 1
-#             except ReadResourceUnavailableError as exc:
-#                 # 中文注释：模型或 embedding 这类外部资源不可用时，不是“当前论文失败”，
-#                 # 而是需要用户修好配置后继续。这里保存已完成结果和恢复位置后中断。
-#                 pending_deep_read_count = deep_read_count + (1 if isinstance(exc, ReadEmbeddingUnavailableError) else 0)
-#                 _halt_for_resource_unavailable(
-#                     state,
-#                     papers=papers,
-#                     results=results,
-#                     artifact_refs=artifact_refs,
-#                     position=position,
-#                     error=exc,
-#                     sink=sink,
-#                     reporter=reporter,
-#                     deep_read_count=pending_deep_read_count,
-#                     deep_read_limit=deep_read_limit,
-#                 )
-#             except Exception as exc:
-#                 # 中文注释：未知异常也只影响当前论文，不能让一次批量阅读全部中断。
-#                 result = PaperReadResult(
-#                     paper=paper,
-#                     full_text=FullTextStatus(status="not_requested", reason="当前论文处理发生异常"),
-#                     warnings=[f"当前论文处理失败：{exc}"],
-#                 )
-#             results.append(result)
-#             _persist_completed_paper(result, sink=sink, artifact_refs=artifact_refs, reporter=reporter)
-#             _report_progress(
-#                 reporter,
-#                 paper,
-#                 "paper_completed",
-#                 position,
-#                 len(papers),
-#                 current_status=result.full_text.status,
-#             )
-
-#         summary = _build_summary(results, deep_read_count)
-#         if sink is not None:
-#             try:
-#                 persisted = sink.persist_summary(summary, results)
-#                 artifact_refs.extend(persisted.artifacts)
-#                 summary["manifest"] = persisted.artifacts[0] if persisted.artifacts else {}
-#                 if reporter is not None:
-#                     for artifact in persisted.artifacts:
-#                         reporter.artifact(artifact, stage="read_artifact_ready")
-#             except Exception as exc:
-#                 summary["persistence_error"] = str(exc)
-
-#         if reporter is not None:
-#             reporter.completed(
-#                 "论文阅读节点已完成",
-#                 stage="read_done",
-#                 total=len(papers),
-#                 completed=len(papers),
-#                 indexed_paper_count=summary["indexed_paper_count"],
-#             )
-#         updated = dict(state)
-#         updated.update(
-#             read_results=[result.to_dict() for result in results],
-#             read_summary=summary,
-#             read_artifact_refs=artifact_refs,
-#             current_step="read",
-#         )
-#         if checkpoint:
-#             # 中文注释：恢复运行可能没有经过检索节点，因此需要把 checkpoint
-#             # 还原出来的论文列表写回最终 state，供回复节点和调用方继续展示。
-#             updated["search_results"] = papers
-#         # 中文注释：阅读节点成功跑完后，旧 checkpoint 已经失效，避免后续节点
-#         # 或下一次调用误以为仍处于“等待模型恢复”的状态。
-#         updated.pop("read_resume_checkpoint", None)
-#         return cast(State, updated)
-
-#     return _node
-
-
 def run_read_node():
     """生成执行图中的阅读节点，直接返回异步节点实现。"""
 
@@ -296,7 +106,7 @@ def run_read_node():
 
 
 async def _run_read_node_async(state: State, runtime: Runtime[WorkflowRuntimeContext] | None) -> State:
-    """并发处理多篇论文，并在资源不可用时按论文状态保存恢复现场。"""
+    """并发处理多篇论文；论文级幂等由 note 负责，节点级恢复由官方 Checkpointer 负责。"""
 
     request = state.get("request")
     if request is None:
@@ -308,11 +118,9 @@ async def _run_read_node_async(state: State, runtime: Runtime[WorkflowRuntimeCon
     request_fingerprint = read_request_fingerprint(request_payload)
     system_config = SystemConfig.load()
     config = system_config.read
-    checkpoint = _checkpoint_from_state(state)
     # 中文注释：State 里存的是 dict，阅读链路内部继续使用 PaperDocument，这里统一还原一次。
-    papers = _deduplicate_papers(
-        _papers_from_payload(list(state.get("search_results") or checkpoint.get("search_results") or []))
-    )
+    # 论文列表只有当前检索结果这一个来源；续跑时由官方 Checkpointer 恢复 search_results。
+    papers = _deduplicate_papers(_papers_from_payload(list(state.get("search_results") or [])))
 
     reporter = _resolve_reporter(runtime)
     sink = _resolve_sink(runtime, request_fingerprint=request_fingerprint)
@@ -328,22 +136,17 @@ async def _run_read_node_async(state: State, runtime: Runtime[WorkflowRuntimeCon
         # 中文说明：关闭向量嵌入时不读取 embedding 配置，避免配置缺失影响全文分块保存。
         embedding_connection, embedding_error = None, None
 
-    recovered_results = _restore_read_results(state, papers, checkpoint)
-    results_by_paper_id = {result.paper.id: result for result in recovered_results}
-    artifact_refs: list[JsonObject] = list(state.get("read_artifact_refs") or checkpoint.get("read_artifact_refs") or [])
-    note_stages, note_relevance = await _restore_saved_notes(
+    # 中文注释：论文级恢复只有当前格式 note 这一个来源。state.read_results 只在
+    # 节点完成时写回供下游消费，不作为恢复来源；全文中间产物按 paper_cache 文件复用。
+    results_by_paper_id: dict[str, PaperReadResult] = {}
+    artifact_refs: list[JsonObject] = list(state.get("read_artifact_refs") or [])
+    note_stages, note_relevance = await _restore_paper_notes(
         sink,
         papers,
         results_by_paper_id=results_by_paper_id,
         artifact_refs=artifact_refs,
     )
-    paper_runtime_statuses = _restore_paper_runtime_statuses(papers, checkpoint, recovered_results)
-    # 中文说明：恢复时，正在进行全文处理的论文会保存在每篇论文的运行状态中。
-    # 先把它们放回结果字典，后面统一重新计算名额，不沿用旧的先到先得计数。
-    for paper in papers:
-        restored_result = _paper_result_from_runtime_status(paper_runtime_statuses.get(paper.id) or {}, paper)
-        if restored_result is not None:
-            results_by_paper_id.setdefault(paper.id, restored_result)
+    paper_runtime_statuses = _initial_paper_runtime_statuses(papers, results_by_paper_id)
     deep_read_limit = _deep_read_limit(request_constraints, len(papers))
     completed_counter = CompletedPaperCounter(len(results_by_paper_id))
 
@@ -352,8 +155,8 @@ async def _run_read_node_async(state: State, runtime: Runtime[WorkflowRuntimeCon
             f"准备阅读 {len(papers)} 篇论文",
             stage="read_start",
             total=len(papers),
-            completed=len(recovered_results),
-            resumed_paper_count=len(recovered_results),
+            completed=len(results_by_paper_id),
+            resumed_paper_count=len(results_by_paper_id),
         )
 
     # 中文注释：资源不可用按普通失败处理——异常直接冒泡让 run 失败，已完成论文
@@ -417,111 +220,21 @@ async def _run_read_node_async(state: State, runtime: Runtime[WorkflowRuntimeCon
         "diagnostics": dict(state.get("diagnostics") or {}),
         "current_step": "read",
     }
-    if checkpoint:
-        updated["search_results"] = [paper.to_dict() for paper in papers]
     return cast(State, updated)
 
 
-# def _legacy_build_resume_checkpoint(
-#     state: State,
-#     *,
-#     papers: list[PaperDocument],
-#     results: list[PaperReadResult],
-#     artifact_refs: list[JsonObject],
-#     position: int,
-#     error: ReadResourceUnavailableError,
-#     deep_read_count: int,
-#     deep_read_limit: int,
-# ) -> JsonObject:
-#     """构造可以通过 state_overrides 注入并继续执行的阅读现场。"""
-
-#     request = state.get("request")
-#     # 中文注释：这里保存的是纯 JSON，不保存 provider、repo、reporter 等运行时对象。
-#     # 运行时对象在恢复请求中重新注入；checkpoint 只负责描述“业务进度”和
-#     # “还原输入”，因此可以安全写入文件、事件 metadata 或前端状态。
-#     checkpoint = {
-#         "recovery_status": error.recovery_status,
-#         "current_step": error.current_step,
-#         "message": str(error),
-#         "error_details": dict(error.details),
-#         "next_position": position,
-#         "completed_count": len(results),
-#         "total_count": len(papers),
-#         "deep_read_count": deep_read_count,
-#         "deep_read_limit": deep_read_limit,
-#         "request": {
-#             "topic": getattr(request, "topic", ""),
-#             "constraints": dict(getattr(request, "constraints", {}) or {}),
-#             "language": getattr(request, "language", "zh"),
-#         },
-#         "search_results": [paper.to_dict() for paper in papers],
-#         "read_results": [result.to_dict() for result in results],
-#         "read_artifact_refs": list(artifact_refs),
-#         "resume_hint": "外部资源验证可用后，把此 checkpoint 作为 read_resume_checkpoint 注入即可从 next_position 继续阅读。",
-#     }
-#     if isinstance(error, ReadModelUnavailableError):
-#         checkpoint["resume_hint"] = "模型验证可用后，把此 checkpoint 作为 read_resume_checkpoint 注入即可从 next_position 继续阅读。"
-#     if isinstance(error, ReadEmbeddingUnavailableError):
-#         # 中文注释：embedding 失败发生在当前论文中间，所以当前论文不能放进
-#         # read_results，否则恢复时会被当成“已完成”而跳过。这里单独保存 pending。
-#         checkpoint.update(
-#             pending_read_result=error.pending_result.to_dict(),
-#             pending_position=position,
-#             pending_resume_phase="index_markdown",
-#             resume_hint="embedding 服务验证可用后，把此 checkpoint 作为 read_resume_checkpoint 注入即可从已保存的 Markdown 继续建立索引。",
-#         )
-#     return checkpoint
-
-
-def _checkpoint_from_state(state: State) -> JsonObject:
-    """读取调用方注入的阅读恢复现场。"""
-
-    checkpoint = state.get("read_resume_checkpoint")
-    return dict(checkpoint) if isinstance(checkpoint, dict) else {}
-
-
-def _restore_read_results(state: State, papers: list[PaperDocument], checkpoint: JsonObject | None = None) -> list[PaperReadResult]:
-    """从状态或 checkpoint 恢复已完成论文，避免重跑已保存的阅读结果。"""
-
-    checkpoint = checkpoint or {}
-    # 中文注释：优先使用 state 中较新的 read_results；如果恢复运行直接从
-    # checkpoint 进入阅读节点，state 可能还没被 graph 合并，则退回 checkpoint。
-    raw_results = list(state.get("read_results") or checkpoint.get("read_results") or [])
-    papers_by_id = {paper.id: paper for paper in papers}
-    restored: list[PaperReadResult] = []
-    for item in raw_results:
-        if not isinstance(item, dict):
-            continue
-        paper_payload = item.get("paper")
-        paper = _paper_from_payload(paper_payload) if isinstance(paper_payload, dict) else None
-        if paper is None:
-            continue
-        # 中文注释：如果当前检索结果里已经有同 ID 论文，使用当前对象，避免
-        # checkpoint 中的旧 metadata 覆盖新版检索节点补充的字段。
-        paper = papers_by_id.get(paper.id, paper)
-        restored.append(
-            PaperReadResult(
-                paper=paper,
-                note=_read_note_from_payload(item.get("note")),
-                relevance=_read_relevance_from_payload(item.get("relevance")),
-                full_text=_full_text_from_payload(item.get("full_text")),
-                extraction=_json_object(item.get("extraction")),
-                verification=_json_object(item.get("verification")),
-                warnings=_string_list(item.get("warnings")),
-                failure=_failure_from_payload(item.get("failure")),
-            )
-        )
-    return restored[: len(papers)]
-
-
-async def _restore_saved_notes(
+async def _restore_paper_notes(
     sink: ReadPersistenceSink | None,
     papers: list[PaperDocument],
     *,
     results_by_paper_id: dict[str, PaperReadResult],
     artifact_refs: list[JsonObject],
 ) -> tuple[dict[str, str], dict[str, JsonObject]]:
-    """合并 note，并保留 checkpoint 中比摘要 note 更新的全文中间现场。"""
+    """逐篇加载当前格式 note——论文级恢复的唯一来源。
+
+    有效 note 直接进结果池；返回各篇的 stage 与 relevance，供全局选择后判断
+    是否需要把新的选择结果写回磁盘。
+    """
 
     restored_stages: dict[str, str] = {}
     restored_relevance: dict[str, JsonObject] = {}
@@ -534,33 +247,15 @@ async def _restore_saved_notes(
         result = _read_result_from_payload(loaded.result, papers)
         if result is None or result.failure is not None:
             continue
-        existing = results_by_paper_id.get(paper.id)
-        if existing is None or not _has_progress_beyond_note(existing, loaded.stage):
-            results_by_paper_id[paper.id] = result
-            restored_relevance[paper.id] = result.relevance.to_dict()
-        # 保留更新 checkpoint 时不把旧 note 标成“内容已同步”，后续要迁移写回。
+        results_by_paper_id[paper.id] = result
         restored_stages[paper.id] = loaded.stage
+        restored_relevance[paper.id] = result.relevance.to_dict()
         _append_artifact_refs(artifact_refs, [loaded.artifact])
     return restored_stages, restored_relevance
 
 
-def _has_progress_beyond_note(result: PaperReadResult, note_stage: str) -> bool:
-    """摘要 note 不能覆盖已下载、已转换或已提取的 checkpoint 全文进度。"""
-
-    if result.failure is not None or note_stage in {"fulltext_complete", "discarded"}:
-        return False
-    return bool(
-        result.note.evidence_level == "full_text"
-        or result.extraction
-        or result.verification
-        or result.full_text.source_path
-        or result.full_text.markdown_path
-        or result.full_text.status not in {"", "not_requested"}
-    )
-
-
 def _read_result_from_payload(value: Any, papers: list[PaperDocument]) -> PaperReadResult | None:
-    """把 checkpoint 中单篇论文阅读结果恢复为 PaperReadResult。"""
+    """把 note 中单篇论文阅读结果恢复为 PaperReadResult。"""
 
     if not isinstance(value, dict):
         return None
@@ -568,7 +263,7 @@ def _read_result_from_payload(value: Any, papers: list[PaperDocument]) -> PaperR
     paper = _paper_from_payload(paper_payload) if isinstance(paper_payload, dict) else None
     if paper is None:
         return None
-    # 中文注释：优先使用当前论文列表中的对象，避免 checkpoint 里的旧字段覆盖新检索结果。
+    # 中文注释：优先使用当前论文列表中的对象，避免 note 里的旧字段覆盖新检索结果。
     papers_by_id = {item.id: item for item in papers}
     paper = papers_by_id.get(paper.id, paper)
     return PaperReadResult(
@@ -601,31 +296,8 @@ def _append_artifact_refs(artifact_refs: list[JsonObject], new_refs: list[JsonOb
             artifact_refs.append(ref)
 
 
-def _persist_completed_paper(
-    result: PaperReadResult,
-    *,
-    sink: ReadPersistenceSink | None,
-    artifact_refs: list[JsonObject],
-    reporter: Any,
-) -> None:
-    """单篇论文完成后立刻写入产物目录，避免后续论文失败导致结果丢失。"""
-
-    if sink is None:
-        return
-    try:
-        persisted = sink.persist_paper(result)
-        _append_artifact_refs(artifact_refs, persisted.artifacts)
-        if reporter is not None:
-            for artifact in persisted.artifacts:
-                reporter.artifact(artifact, stage="paper_artifact_ready", emit_runtime_event=False)
-    except Exception as exc:
-        # 中文注释：写单篇结果失败不应该让整次阅读中断；把原因放进 warnings，
-        # 后续汇总或回复时仍能看到这篇论文处理过但保存失败。
-        result.warnings.append(f"阅读结果无法保存到会话目录：{exc}")
-
-
 def _papers_from_payload(value: Any) -> list[PaperDocument]:
-    """把 checkpoint 里的论文 JSON 恢复成 PaperDocument 列表。"""
+    """把论文 JSON 列表恢复成 PaperDocument 列表。"""
 
     if not isinstance(value, list):
         return []
@@ -668,7 +340,7 @@ def _paper_from_payload(value: Any) -> PaperDocument | None:
 
 
 def _read_note_from_payload(value: Any) -> ReadNote:
-    """把 checkpoint 中的笔记 JSON 恢复为 ReadNote。"""
+    """把 note 中的笔记 JSON 恢复为 ReadNote。"""
 
     payload = value if isinstance(value, dict) else {}
     return ReadNote(
@@ -684,11 +356,10 @@ def _read_note_from_payload(value: Any) -> ReadNote:
 
 
 def _read_relevance_from_payload(value: Any) -> ReadRelevance:
-    """把 checkpoint 中的相关性 JSON 恢复为 ReadRelevance。
+    """把 note 中的相关性 JSON 恢复为 ReadRelevance。
 
-    中文注释：新版结构是 {relevant, reason, discarded, uncertain, status}。
-    relevant 缺失时按"拿不准判有关"保底；旧版 checkpoint 里的 match_levels
-    和 score 字段不再解析，统一按默认值恢复。
+    中文注释：结构是 {relevant, reason, discarded, uncertain, status}。
+    relevant 缺失时按"拿不准判有关"保底；status 非法时回退 pending。
     """
 
     payload = value if isinstance(value, dict) else {}
@@ -708,7 +379,7 @@ def _read_relevance_from_payload(value: Any) -> ReadRelevance:
 
 
 def _full_text_from_payload(value: Any) -> FullTextStatus:
-    """把 checkpoint 中的全文状态 JSON 恢复为 FullTextStatus。"""
+    """把 note 中的全文状态 JSON 恢复为 FullTextStatus。"""
 
     payload = value if isinstance(value, dict) else {}
     return FullTextStatus(
@@ -720,23 +391,6 @@ def _full_text_from_payload(value: Any) -> FullTextStatus:
         page_count=_optional_int(payload.get("page_count")),
         chunk_count=_score_value(payload.get("chunk_count")),
     )
-
-
-def _embedding_error_details(result: PaperReadResult, *, stage: str, message: str) -> JsonObject:
-    """整理 embedding 不可用时写入 checkpoint 的诊断信息。"""
-
-    # 中文注释：这里只放论文编号、标题、Markdown 路径和错误阶段等普通字段，
-    # 不保存 embedding_connection 这类可能包含密钥或无法序列化的运行时对象。
-    return {
-        "resource": "embedding",
-        "stage": stage,
-        "message": message,
-        "paper_id": result.paper.id,
-        "paper_title": result.paper.title,
-        "source_path": result.full_text.source_path,
-        "markdown_path": result.full_text.markdown_path,
-        "source_url": result.full_text.source_url,
-    }
 
 
 def _optional_text(value: Any) -> str | None:
@@ -758,155 +412,25 @@ def _optional_int(value: Any) -> int | None:
 
 
 def _json_object(value: Any) -> JsonObject:
-    """把可能来自旧状态的字段整理成普通字典。
+    """把可能缺失的字段整理成普通字典。
 
-    中文注释：恢复 checkpoint 时不能假设旧数据一定规整。如果 extraction 不是字典，
-    就返回空字典，避免一篇旧记录影响整批阅读恢复。
+    中文注释：note 内容损坏时不能假设字段一定规整。如果 extraction 不是字典，
+    就返回空字典，避免一篇坏记录影响整批阅读恢复。
     """
 
     return dict(value) if isinstance(value, dict) else {}
 
 
 def _failure_from_payload(value: Any) -> JsonObject | None:
-    """旧结果没有 failure 时保持 None，避免把缺失字段误判成失败。"""
+    """failure 缺失或不是字典时保持 None，避免把缺失字段误判成失败。"""
 
     return dict(value) if isinstance(value, dict) else None
-
-
-def _legacy_read_one_paper(
-    paper: PaperDocument,
-    *,
-    topic: str,
-    constraints: JsonObject,
-    llm: ProviderSnapshot | None,
-    config: Any,
-    embedding_connection: EmbeddingConnection | None,
-    embedding_error: str | None,
-    allow_deep_read: bool,
-    reporter: Any,
-    runtime_resources: WorkflowRuntimeResources | None = None,
-) -> tuple[PaperReadResult, bool]:
-    """处理一篇论文：先做摘要笔记，再按判断尝试下载、转换和建立全文索引。"""
-
-    title = paper.title.strip()
-    if not title:
-        return (
-            PaperReadResult(
-                paper=paper,
-                full_text=FullTextStatus(status="not_requested", reason="论文没有标题，无法可靠阅读"),
-                warnings=["论文缺少标题，未交给模型判断"],
-            ),
-            False,
-        )
-    note, relevance, warnings = _legacy_build_abstract_note(paper, topic=topic, constraints=constraints, llm=llm)
-    result = PaperReadResult(paper=paper, note=note, relevance=relevance, warnings=warnings)
-    # 这个旧同步入口仅保留给独立调试使用，主流程不会调用它。
-    # 新版判断改为二元 relevant：模型判无关就不进入全文处理。
-    should_deep_read = relevance.relevant
-    if not should_deep_read:
-        result.full_text = FullTextStatus(status="not_requested", reason="当前论文只保留摘要笔记")
-        return result, False
-    if not allow_deep_read:
-        result.full_text = FullTextStatus(status="not_requested", reason="已达到本次全文精读数量上限")
-        return result, False
-
-    _report_progress(reporter, paper, "downloading_full_text", 0, 0)
-    downloaded = download_paper_fulltext(
-        paper,
-        cache_dir=config.paper_cache_dir,
-        connect_timeout_seconds=config.connect_timeout_seconds,
-        download_timeout_seconds=config.download_timeout_seconds,
-        max_file_size_mb=config.max_file_size_mb,
-        runtime_resources=runtime_resources,
-    )
-    full_text = FullTextStatus(status=downloaded.status, reason=downloaded.reason, source_url=downloaded.source_url)
-    # 只有下载成功的file_path才不为None,且file_path=data/cache/{sha256编码}/{source.pdf/source.html}
-    if downloaded.file_path is None:
-        result.full_text = full_text
-        return result, True
-    full_text.source_path = str(downloaded.file_path)
-
-    _report_progress(reporter, paper, "converting_markdown", 0, 0)
-    converted = convert_fulltext_to_markdown(
-        paper,
-        source_path=downloaded.file_path,
-        source_url=downloaded.source_url,
-    )
-    if converted.markdown_path is None:
-        result.full_text = FullTextStatus(
-            status="parse_failed",
-            reason="；".join(converted.warnings) or "无法将全文转换为 Markdown",
-            source_url=downloaded.source_url,
-            source_path=str(downloaded.file_path),
-        )
-        return result, True
-    full_text.status = "markdown_ready"
-    full_text.markdown_path = str(converted.markdown_path)
-    full_text.page_count = converted.page_count
-    if converted.warnings:
-        result.warnings.extend(converted.warnings)
-
-    _report_progress(reporter, paper, "saving_chunks", 0, 0)
-    result.full_text = full_text
-    if embedding_connection is None:
-        # 中文注释：能走到这里说明全文已经下载并转成 Markdown，只差写入向量库。
-        # embedding 不可用时不能把这篇论文当成完成，否则用户修好配置后无法补建索引。
-        full_text.reason = embedding_error or "未配置可用的 embedding 服务，全文尚未写入向量库"
-        raise ReadEmbeddingUnavailableError(
-            full_text.reason,
-            pending_result=result,
-            details=_embedding_error_details(result, stage="embedding_config", message=full_text.reason),
-        )
-    try:
-        index_result = index_markdown_chunks(
-            paper,
-            markdown_path=converted.markdown_path,
-            source_url=downloaded.source_url,
-            vector_store_path=config.vector_store_path,
-            collection_name=config.vector_store_collection,
-            chunk_size=config.chunk_size,
-            chunk_overlap=config.chunk_overlap,
-            embedding_connection=embedding_connection,
-            runtime_resources=runtime_resources,
-        )
-    except RuntimeError as exc:
-        # 中文注释：read_vector_store.py 用 RuntimeError 表示 embedding 接口调用失败、
-        # 返回格式不对或向量数量不一致。这类问题通常需要用户修好 embedding 服务后恢复。
-        full_text.reason = f"全文已转成 Markdown，但 embedding 服务不可用：{exc}"
-        raise ReadEmbeddingUnavailableError(
-            full_text.reason,
-            pending_result=result,
-            details=_embedding_error_details(result, stage="embedding_call", message=str(exc)),
-        ) from exc
-    except (OSError, ValueError) as exc:
-        full_text.reason = f"全文已转成 Markdown，但建立索引失败：{exc}"
-        result.full_text = full_text
-        return result, True
-    full_text.status = "indexed"
-    full_text.chunk_count = index_result.chunk_count
-    result.full_text = full_text
-    return result, True
 
 
 def _read_agent_from_llm(llm: ProviderSnapshot | None, usage_callback: Any | None = None):
     """根据节点已经解析出的模型快照创建阅读 Agent。"""
 
     return build_read_agent(llm, usage_callback=usage_callback)
-
-
-def _legacy_build_abstract_note(
-    paper: PaperDocument,
-    *,
-    topic: str,
-    constraints: JsonObject,
-    llm: ProviderSnapshot | None,
-) -> tuple[ReadNote, ReadRelevance, list[str]]:
-    """通过 ReadAgent 完成同步摘要阅读，节点只负责把错误转成可恢复中断。"""
-
-    try:
-        return _read_agent_from_llm(llm).read_abstract(paper, topic=topic, constraints=constraints).as_tuple()
-    except ReadAgentModelUnavailableError as exc:
-        raise ReadModelUnavailableError(str(exc)) from exc
 
 
 # 中文说明：全文精读预算的默认值。相关论文不超过这个数时全部精读（零新增调用）；
@@ -944,12 +468,6 @@ def _resolve_runtime_resources(runtime: Runtime[WorkflowRuntimeContext] | None) 
     if context is None:
         return None
     return context.resources if isinstance(context.resources, WorkflowRuntimeResources) else None
-
-
-def load_read_node_llm(agent_name: str | None = None) -> ProviderSnapshot | None:
-    """兼容旧导入点，实际模型装配逻辑已经放到 ReadAgent 中。"""
-
-    return load_read_agent_llm(agent_name)
 
 
 def _resolve_embedding_connection(
@@ -1270,7 +788,7 @@ async def _process_papers_concurrently(
     # 中文说明：第一阶段只调用一次摘要模型，不会下载任何全文。这样模型较早返回的论文
     # 也不能提前占用全文名额，所有论文都拿到固定分数后才会一起排序。
     abstract_items = [
-        PaperTaskInput(paper=paper, position=position, restored_status={}, restored_result=None)
+        PaperTaskInput(paper=paper, position=position)
         for position, paper in enumerate(papers, start=1)
         if paper.id not in results_by_paper_id or results_by_paper_id[paper.id].failure is not None
     ]
@@ -1291,7 +809,6 @@ async def _process_papers_concurrently(
         completed_counter=completed_counter,
         total_paper_count=len(papers),
         process_full_text=False,
-        selected_count=0,
     )
 
     needs_selection = bool(abstract_items) or any(
@@ -1337,8 +854,8 @@ async def _process_papers_concurrently(
                 artifact_refs=artifact_refs,
             )
         elif not note_is_current:
-            # 新摘要或选择变化先更新稳定点；已完成的旧结果缺 note 时也借此迁移。
-            await _persist_note_checkpoint_async(
+            # 新摘要或全局选择改变了 relevance 时，把最新稳定点写回 note。
+            await _persist_note_async(
                 result,
                 stage="abstract_complete" if _deep_read_needs_processing(result) else None,
                 sink=sink,
@@ -1351,7 +868,6 @@ async def _process_papers_concurrently(
         PaperTaskInput(
             paper=paper,
             position=position,
-            restored_status=dict(paper_runtime_statuses.get(paper.id) or {}),
             restored_result=results_by_paper_id[paper.id],
         )
         for position, paper in enumerate(papers, start=1)
@@ -1374,7 +890,6 @@ async def _process_papers_concurrently(
         completed_counter=completed_counter,
         total_paper_count=len(papers),
         process_full_text=True,
-        selected_count=len(selected_paper_ids),
     )
     return len(selected_paper_ids)
 
@@ -1397,9 +912,8 @@ async def _run_paper_task_batch(
     completed_counter: CompletedPaperCounter,
     total_paper_count: int,
     process_full_text: bool,
-    selected_count: int,
 ) -> None:
-    """执行一个阶段的论文任务，并在资源不可用时保留已完成结果。"""
+    """执行一个阶段的论文任务；资源不可用时取消同批任务并冒泡原始异常。"""
 
     if not work_items:
         return
@@ -1447,7 +961,7 @@ async def _run_paper_task_batch(
                     error_message=str((result.failure or {}).get("message") or ""),
                 )
                 # 每篇摘要一完成就落盘，不能等全部摘要和全局选择结束。
-                await _persist_note_checkpoint_async(
+                await _persist_note_async(
                     result,
                     stage=None if result.failure is not None else "abstract_complete",
                     sink=sink,
@@ -1466,10 +980,11 @@ async def _run_paper_task_batch(
                 artifact_refs=artifact_refs,
             )
         if resource_error is not None:
+            # 中文注释：资源不可用时取消同批其余任务，避免继续浪费模型调用，
+            # 然后把原始异常冒泡成普通节点失败（fail-fast 并发控制）。
             for task in pending:
                 task.cancel()
             await asyncio.gather(*pending, return_exceptions=True)
-            setattr(resource_error, "deep_read_count", selected_count)
             raise resource_error
 
 
@@ -1696,8 +1211,8 @@ def _deep_read_needs_processing(result: PaperReadResult) -> bool:
     # 中文说明：下载、转换失败已经是这一轮的最终结果；Markdown 已生成或正在等待
     # embedding 时则返回真，让恢复流程从现有文件继续。
     if result.full_text.status in _FULL_TEXT_COMPLETED_STATUSES:
-        # 中文注释：旧流程可能只生成了切块文件，没有完成全文结构化摘要。只有笔记
-        # 明确标记为 full_text 后，才把这篇精读论文视为全部完成。
+        # 中文注释：只有切块文件、还没完成全文结构化摘要时不算全部完成；
+        # 只有笔记明确标记为 full_text 后，才把这篇精读论文视为全部完成。
         return result.note.evidence_level != "full_text"
     return result.full_text.status not in {"download_failed", "parse_failed", "no_url"}
 
@@ -1895,13 +1410,11 @@ async def _read_one_paper(
     if result.relevance.status != "selected_for_deep_read":
         return result
 
-    restored_stage = str(item.restored_status.get("current_stage") or "").strip()
-    resume_stages = {"downloading_full_text", "converting_markdown", "chunking_full_text", "extracting_full_text", "saving_chunks"}
     _set_paper_runtime_status(
         paper_runtime_statuses,
         paper,
         status="running",
-        current_stage=restored_stage if restored_stage in resume_stages else "selected_for_deep_read",
+        current_stage="selected_for_deep_read",
         result=result,
         error_message="",
         deep_read_reserved=True,
@@ -2049,7 +1562,7 @@ async def _read_one_paper(
         raise ReadModelUnavailableError("未配置可用的阅读模型，无法生成全文结构化摘要")
     try:
         # 中文注释：先提取全文结构化信息，再回读原文做证据验证；验证不通过的
-        # 字段会反馈给模型重提，最多按配置重试几次。模型不可用仍会抛错走恢复现场。
+        # 字段会反馈给模型重提，最多按配置重试几次。模型不可用仍会抛错，按普通失败中断节点。
         # 提取提示词里同时要求模型判断全文是否真的与主题相关，明显无关时返回
         # irrelevant 标记，这里就地止损，跳过后续提取核查（只中断本篇）。
         extraction_record, verification = await _extract_and_verify(
@@ -2085,7 +1598,7 @@ async def _read_one_paper(
         if isinstance(extraction_record, dict) and extraction_record.get("status") == "extraction_failed":
             # 修复：提取格式违规已在 _extract_and_verify 内重试仍未通过。这里保留摘要阶段
             # 结果、置空全文提取，并把 verification 落成 skipped_extraction_failed（而非空 {}），
-            # 让"核查因提取失败被跳过"可观测。论文不丢弃，继续走分块入库，与旧 ValueError 路径一致。
+            # 让"核查因提取失败被跳过"可观测。论文不丢弃，继续走分块入库。
             reason = str(extraction_record.get("reason") or "全文提取未通过格式校验")
             result.extraction = empty_extraction()
             result.verification = verification
@@ -2136,14 +1649,24 @@ async def _read_one_paper(
         total_paper_count,
         paper_position=item.position,
     )
+    # 中文注释：embedding 不可用或索引失败按单篇部分失败处理——摘要与切分成果
+    # 照常保留，不再保存"等待 embedding 恢复"的中间现场。
     if embedding_connection is None:
         full_text.reason = embedding_error or "未配置可用的 embedding 服务，全文尚未写入向量库"
         result.full_text = full_text
-        raise ReadEmbeddingUnavailableError(
-            full_text.reason,
-            pending_result=result,
-            details=_embedding_error_details(result, stage="embedding_config", message=full_text.reason),
+        _report_progress(
+            reporter,
+            paper,
+            "paper_completed",
+            completed_counter.current(),
+            total_paper_count,
+            runtime_status="failed",
+            message="全文索引失败，已保留阅读结果",
+            current_status=result.full_text.status,
+            paper_position=item.position,
+            error_message=full_text.reason,
         )
+        return result
     try:
         index_result = await async_index_chunk_file(
             paper,
@@ -2154,15 +1677,7 @@ async def _read_one_paper(
             embedding_connection=embedding_connection,
             runtime_resources=runtime_resources,
         )
-    except RuntimeError as exc:
-        full_text.reason = f"全文已转成 Markdown，但 embedding 服务不可用：{exc}"
-        result.full_text = full_text
-        raise ReadEmbeddingUnavailableError(
-            full_text.reason,
-            pending_result=result,
-            details=_embedding_error_details(result, stage="embedding_call", message=str(exc)),
-        ) from exc
-    except (OSError, ValueError) as exc:
+    except (RuntimeError, OSError, ValueError) as exc:
         full_text.reason = f"全文已转成 Markdown，但建立索引失败：{exc}"
         result.full_text = full_text
         _report_progress(
@@ -2253,7 +1768,7 @@ async def _extract_and_verify(
             # 被吞成空 extraction + 一条笼统 warning，重试机制一次都跑不到（见 EVAL_NOTES.md 第六节）。
             # 现在把它纳入重试：把具体错误通过 feedback 回灌给模型，下一轮针对性修正。
             # 注意：只捕获 ValueError（格式问题）；RuntimeError（模型不可用）不在此捕获，
-            #       继续冒泡到调用方转 ReadModelUnavailableError，走 checkpoint 中断恢复。
+            #       继续冒泡到调用方转 ReadModelUnavailableError，按普通失败中断节点。
             if attempt >= max_retries:
                 # 重试耗尽仍不合格：返回结构化失败，让调用方能区分"提取失败"与"核查跳过"，
                 # 不再静默留空 verification。
@@ -2327,7 +1842,7 @@ async def _build_abstract_note(
         raise ReadModelUnavailableError(str(exc)) from exc
 
 
-async def _persist_note_checkpoint_async(
+async def _persist_note_async(
     result: PaperReadResult,
     *,
     stage: str | None,
@@ -2400,46 +1915,22 @@ async def _persist_completed_paper_async(
         return False, message
 
 
-def _restore_paper_runtime_statuses(
+def _initial_paper_runtime_statuses(
     papers: list[PaperDocument],
-    checkpoint: JsonObject,
-    recovered_results: list[PaperReadResult],
+    results_by_paper_id: dict[str, PaperReadResult],
 ) -> dict[str, JsonObject]:
-    """从 checkpoint 中恢复每篇论文自己的处理状态，供并发任务继续运行。"""
+    """初始化每篇论文的实时进度卡片（纯内存，不序列化、不从 checkpoint 恢复）。
+
+    已从 note 恢复的论文按实际完成状态回填，被软丢弃的保持 discarded，
+    不能统一标成 completed，否则前端卡片和后续判断都会出错。
+    """
 
     statuses = {paper.id: _default_paper_runtime_status(paper) for paper in papers}
-    for item in list(checkpoint.get("paper_runtime_statuses") or []):
-        if not isinstance(item, dict):
-            continue
-        paper_id = str(item.get("paper_id") or "").strip()
-        paper = next((candidate for candidate in papers if candidate.id == paper_id), None)
-        if paper is None:
-            continue
-        statuses[paper_id] = _merge_runtime_status(statuses[paper_id], item, paper)
-
-    # 中文注释：这里兼容旧版本 checkpoint 里“pending_read_result + pending_resume_phase”的写法。
-    pending_result = _read_result_from_payload(checkpoint.get("pending_read_result"), papers)
-    if pending_result is not None:
-        statuses[pending_result.paper.id] = {
-            **statuses.get(pending_result.paper.id, _default_paper_runtime_status(pending_result.paper)),
-            "paper_id": pending_result.paper.id,
-            "paper_title": pending_result.paper.title,
-            "status": str(checkpoint.get("recovery_status") or "waiting_embedding"),
-            "current_stage": str(checkpoint.get("pending_resume_phase") or "saving_chunks"),
-            "source_path": pending_result.full_text.source_path,
-            "markdown_path": pending_result.full_text.markdown_path,
-            "error_message": str(checkpoint.get("message") or ""),
-            "deep_read_reserved": True,
-            "result": pending_result.to_dict(),
-        }
-
-    for result in recovered_results:
-        statuses[result.paper.id] = {
-            **statuses.get(result.paper.id, _default_paper_runtime_status(result.paper)),
+    for paper_id, result in results_by_paper_id.items():
+        statuses[paper_id] = {
+            **statuses.get(paper_id, _default_paper_runtime_status(result.paper)),
             "paper_id": result.paper.id,
             "paper_title": result.paper.title,
-            # 中文注释：恢复时按论文实际完成状态回填，被软丢弃的论文保持 discarded，
-            # 不能统一标成 completed，否则前端卡片和后续判断都会出错。
             "status": _paper_completion_runtime_status(result),
             "current_stage": "paper_completed",
             "source_path": result.full_text.source_path,
@@ -2449,31 +1940,6 @@ def _restore_paper_runtime_statuses(
             "result": result.to_dict(),
         }
     return statuses
-
-
-def _build_pending_paper_tasks(
-    papers: list[PaperDocument],
-    paper_runtime_statuses: dict[str, JsonObject],
-    results_by_paper_id: dict[str, PaperReadResult],
-) -> list[PaperTaskInput]:
-    """找出还没完成的论文，整理成待投递的并发任务输入。"""
-
-    tasks: list[PaperTaskInput] = []
-    for position, paper in enumerate(papers, start=1):
-        if paper.id in results_by_paper_id:
-            continue
-        status = dict(paper_runtime_statuses.get(paper.id) or _default_paper_runtime_status(paper))
-        if str(status.get("status") or "") == "completed":
-            continue
-        tasks.append(
-            PaperTaskInput(
-                paper=paper,
-                position=position,
-                restored_status=status,
-                restored_result=_paper_result_from_runtime_status(status, paper),
-            )
-        )
-    return tasks
 
 
 def _ordered_results(papers: list[PaperDocument], results_by_paper_id: dict[str, PaperReadResult]) -> list[PaperReadResult]:
@@ -2498,36 +1964,6 @@ def _default_paper_runtime_status(paper: PaperDocument) -> JsonObject:
     }
 
 
-def _merge_runtime_status(base: JsonObject, payload: JsonObject, paper: PaperDocument) -> JsonObject:
-    """把 checkpoint 里恢复出来的论文状态整理成统一结构。"""
-
-    result_payload = payload.get("result")
-    result = _paper_result_from_runtime_status({"result": result_payload}, paper)
-    return {
-        **base,
-        "paper_id": paper.id,
-        "paper_title": paper.title,
-        "status": str(payload.get("status") or base.get("status") or "pending"),
-        "current_stage": str(payload.get("current_stage") or base.get("current_stage") or "pending"),
-        "source_path": _optional_text(payload.get("source_path")) or (result.full_text.source_path if result is not None else base.get("source_path")),
-        "markdown_path": _optional_text(payload.get("markdown_path")) or (result.full_text.markdown_path if result is not None else base.get("markdown_path")),
-        "error_message": str(payload.get("error_message") or base.get("error_message") or ""),
-        "deep_read_reserved": bool(payload.get("deep_read_reserved") if payload.get("deep_read_reserved") is not None else (result is not None and _infer_deep_read_reserved(result))),
-        "result": result.to_dict() if result is not None else base.get("result"),
-    }
-
-
-def _paper_result_from_runtime_status(payload: JsonObject, paper: PaperDocument) -> PaperReadResult | None:
-    """从单篇论文状态里恢复出中间结果，便于从下载后或 Markdown 后继续执行。"""
-
-    result_payload = payload.get("result")
-    if not isinstance(result_payload, dict):
-        return None
-    merged = dict(result_payload)
-    merged["paper"] = paper.to_dict()
-    return _read_result_from_payload(merged, [paper])
-
-
 def _set_paper_runtime_status(
     paper_runtime_statuses: dict[str, JsonObject],
     paper: PaperDocument,
@@ -2538,7 +1974,7 @@ def _set_paper_runtime_status(
     error_message: str,
     deep_read_reserved: bool | None = None,
 ) -> None:
-    """更新某篇论文的当前状态，保证 checkpoint 里随时都有可恢复的信息。"""
+    """更新某篇论文的实时进度卡片（纯内存，供前端展示与选择逻辑使用）。"""
 
     current = dict(paper_runtime_statuses.get(paper.id) or _default_paper_runtime_status(paper))
     current.update(
@@ -2571,32 +2007,21 @@ def _mark_paper_waiting_resource(
     paper: PaperDocument,
     error: ReadResourceUnavailableError,
 ) -> None:
-    """在模型或 embedding 不可用时，把当前论文的中间结果和等待原因记下来。"""
+    """在模型或 embedding 不可用时，把当前论文的中间结果和失败原因记入实时卡片。"""
 
-    result = error.pending_result if isinstance(error, ReadEmbeddingUnavailableError) else _paper_result_from_runtime_status(
-        paper_runtime_statuses.get(paper.id) or {},
-        paper,
-    )
-    current_stage = str((paper_runtime_statuses.get(paper.id) or {}).get("current_stage") or "reading_abstract")
+    payload = paper_runtime_statuses.get(paper.id) or {}
+    result_payload = payload.get("result")
+    result = _read_result_from_payload(result_payload, [paper]) if isinstance(result_payload, dict) else None
+    current_stage = str(payload.get("current_stage") or "reading_abstract")
     _set_paper_runtime_status(
         paper_runtime_statuses,
         paper,
-        status=error.recovery_status,
+        status="failed",
         current_stage=current_stage,
         result=result,
         error_message=str(error),
-        deep_read_reserved=_infer_deep_read_reserved(result) if result is not None else bool((paper_runtime_statuses.get(paper.id) or {}).get("deep_read_reserved")),
+        deep_read_reserved=_infer_deep_read_reserved(result) if result is not None else bool(payload.get("deep_read_reserved")),
     )
-
-
-def _paper_has_reserved_deep_read(paper_runtime_statuses: dict[str, JsonObject], paper: PaperDocument) -> bool:
-    """判断这篇论文是否已经占用了全文精读名额，避免恢复时重复扣减。"""
-
-    payload = paper_runtime_statuses.get(paper.id) or {}
-    if bool(payload.get("deep_read_reserved")):
-        return True
-    result = _paper_result_from_runtime_status(payload, paper)
-    return _infer_deep_read_reserved(result)
 
 
 def _infer_deep_read_reserved(result: PaperReadResult | None) -> bool:
