@@ -400,13 +400,13 @@ class GraphTest(unittest.TestCase):
                 self.assertTrue(ref.get("artifact_id"))
                 self.assertIsNotNone(repo.read_artifact_path(session.key, ref["artifact_id"]))
 
-    def test_read_node_saves_checkpoint_when_model_is_unavailable(self):
-        """验证阅读模型不可用时不会走保守摘要，而是保存现场并中断。"""
+    def test_read_node_model_unavailable_is_plain_failure(self):
+        """阅读模型不可用按普通失败中断：不保存手写现场，也不产生旧恢复产物。"""
 
         stub = _StubService()
         with tempfile.TemporaryDirectory() as temp_dir:
             repo = SQLiteSessionRepository(storage_root=temp_dir)
-            session = repo.create("Paper read checkpoint")
+            session = repo.create("Paper read failure")
 
             with _fake_backends(
                 stub,
@@ -429,66 +429,24 @@ class GraphTest(unittest.TestCase):
                             ),
                             session_repo=repo,
                             session_key=session.key,
-                            turn_id="turn-read-checkpoint",
+                            turn_id="turn-read-failure",
                         )
                     )
 
             thread = repo.get(session.key).thread()
-            checkpoint_artifacts = [
-                artifact for artifact in thread["artifacts"] if artifact["artifact_type"] == "paper_read_checkpoint"
-            ]
-            failed_events = [
+            # 中文注释：旧手写恢复的现场产物和 waiting_model 事件都不应再出现；
+            # 恢复交给官方 Checkpointer，论文级进度交给 note。
+            self.assertEqual(
+                [artifact for artifact in thread["artifacts"] if artifact["artifact_type"] == "paper_read_checkpoint"],
+                [],
+            )
+            waiting_events = [
                 event
                 for event in thread["events"]
                 if event["event_type"] == "runtime_event"
-                and event["metadata"].get("status") == "failed"
                 and event["metadata"].get("metadata", {}).get("recovery_status") == "waiting_model"
             ]
-
-            self.assertEqual(len(checkpoint_artifacts), 1)
-            self.assertEqual(checkpoint_artifacts[0]["name"], "read_checkpoint.json")
-            self.assertTrue(failed_events)
-            self.assertEqual(failed_events[-1]["metadata"]["metadata"]["recovery_status"], "waiting_model")
-
-    def test_read_node_can_resume_from_checkpoint(self):
-        """验证模型恢复可用后可跳过检索并从 checkpoint 继续阅读。"""
-
-        checkpoint = {
-            "request": {
-                "topic": "multi-agent literature review",
-                "constraints": {"sources": ["openalex"], "max_results": 3},
-                "language": "zh",
-            },
-            "search_results": [
-                {
-                    "id": "resume-paper-1",
-                    "title": "Resume Paper One",
-                    "authors": ["Tester"],
-                    "abstract": "multi-agent literature review",
-                    "year": 2026,
-                    "source": "openalex",
-                    "metadata": {},
-                }
-            ],
-            "read_results": [],
-            "read_artifact_refs": [],
-            "next_position": 1,
-        }
-        stub = _StubService()
-
-        with _fake_backends(stub, read_snapshot=_read_snapshot()):
-            result = asyncio.run(
-                run_graph(
-                    ReviewRequest(topic="placeholder"),
-                    state_overrides={"read_resume_checkpoint": checkpoint},
-                )
-            )
-
-        self.assertEqual(stub.calls, [])
-        self.assertEqual(result.state["current_step"], "reply")
-        self.assertIsInstance(result.state["search_results"][0], dict)
-        self.assertEqual(result.state["search_results"][0]["id"], "resume-paper-1")
-        self.assertEqual(result.state["read_results"][0]["note"]["short_summary"], "agent search summary")
+            self.assertEqual(waiting_events, [])
 
     def test_run_graph_persists_checkpoints_when_saver_is_provided(self):
         """带 saver 时状态会落到指定线程，返回值回显 thread_id。"""

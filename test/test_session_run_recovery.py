@@ -5,7 +5,6 @@ import unittest
 from contextlib import closing
 
 from src.graph.checkpointing import build_checkpoint_bundle
-from src.graph.graph import GRAPH_VERSION
 from src.llm.config import CheckpointSettings
 from src.repositories.sessions.sqlite import SQLiteSessionRepository
 from src.repositories.settings.json import SettingsRepository
@@ -92,7 +91,6 @@ class SessionRunRecoveryTest(unittest.TestCase):
             session_key=session.key,
             turn_id="turn-1",
             run_id="run-orphan",
-            graph_version=GRAPH_VERSION,
         )
 
         create_app(
@@ -125,7 +123,6 @@ class SessionRunRecoveryTest(unittest.TestCase):
                 session_key=session.key,
                 turn_id=turn_id,
                 run_id=f"run-{turn_id}",
-                graph_version=GRAPH_VERSION,
             )
 
         recovered = SessionRunService(
@@ -165,7 +162,6 @@ class SessionRunRecoveryTest(unittest.TestCase):
             session_key=session.key,
             turn_id="t1",
             run_id="run-stale",
-            graph_version=GRAPH_VERSION,
         )
 
         recovered = SessionRunService(
@@ -186,7 +182,6 @@ class SessionRunRecoveryTest(unittest.TestCase):
             session_key="ghost-session",
             turn_id="t1",
             run_id="run-ghost",
-            graph_version=GRAPH_VERSION,
         )
 
         recovered = SessionRunService(
@@ -210,7 +205,6 @@ class SessionRunRecoveryTest(unittest.TestCase):
             session_key=session.key,
             turn_id="t1",
             run_id="run-active",
-            graph_version=GRAPH_VERSION,
         )
         broker = SessionRunBroker()
 
@@ -244,7 +238,6 @@ class SessionRunRecoveryTest(unittest.TestCase):
             session_key="ghost-idempotent",
             turn_id="t1",
             run_id="run-ghost",
-            graph_version=GRAPH_VERSION,
         )
         service = SessionRunService(self.repo, checkpoint_bundle=checkpoint_bundle)
 

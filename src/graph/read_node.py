@@ -6,7 +6,7 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NoReturn, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from src.agents.Prompts import READ_DEEP_READ_SELECTION_PROMPT
 from src.agents.readAgent import ReadAgentModelUnavailableError, build_read_agent, load_read_agent_llm
@@ -19,7 +19,6 @@ from src.utils.read_utils.read_fulltext import async_convert_fulltext_to_markdow
 from src.models.read_models import FullTextStatus, PaperReadResult, ReadNote, ReadRelevance, READ_RELEVANCE_STATUSES
 from src.repositories.node_persistence.read_persistence import ReadPersistenceSink, read_request_fingerprint
 from src.repositories.chroma.read_vector_store import EmbeddingConnection, async_index_chunk_file, async_index_markdown_chunks
-from src.graph.checkpoint_halt import halt_with_checkpoint
 from src.graph.runtime import WorkflowRuntimeContext
 from src.graph.runtime_resources import WorkflowRuntimeResources
 from src.graph.state_models import JsonObject, State
@@ -46,7 +45,7 @@ _FULL_TEXT_COMPLETED_STATUSES = frozenset({"indexed", "chunks_saved"})
 
 
 class ReadResourceUnavailableError(RuntimeError):
-    """表示阅读节点依赖的外部资源不可用，需要保存现场后等待用户处理。"""
+    """表示阅读节点依赖的外部资源不可用，按普通失败中断当前节点。"""
 
     recovery_status = "waiting_resource"
     current_step = "read_waiting_resource"
@@ -63,7 +62,7 @@ class ReadResourceUnavailableError(RuntimeError):
 
 
 class ReadModelUnavailableError(ReadResourceUnavailableError):
-    """表示阅读模型当前不可用，需要保存现场后等待用户处理。
+    """表示阅读模型当前不可用，按普通失败中断当前节点。
 
     这个异常只用于“用户修好模型后可以继续”的场景，例如：
     1. 没有配置阅读模型；
@@ -357,41 +356,28 @@ async def _run_read_node_async(state: State, runtime: Runtime[WorkflowRuntimeCon
             resumed_paper_count=len(recovered_results),
         )
 
-    try:
-        deep_read_count = await _process_papers_concurrently(
-            papers=papers,
-            topic=request_topic,
-            constraints=request_constraints,
-            config=config,
-            llm=llm,
-            embedding_connection=embedding_connection,
-            embedding_error=embedding_error,
-            reporter=reporter,
-            sink=sink,
-            runtime_resources=runtime_resources,
-            results_by_paper_id=results_by_paper_id,
-            artifact_refs=artifact_refs,
-            note_stages=note_stages,
-            note_relevance=note_relevance,
-            paper_runtime_statuses=paper_runtime_statuses,
-            completed_counter=completed_counter,
-            deep_read_limit=deep_read_limit,
-        )
-    except ReadResourceUnavailableError as exc:
-        deep_read_count = int(getattr(exc, "deep_read_count", 0))
-        _halt_for_resource_unavailable(
-            state,
-            papers=papers,
-            results=_ordered_results(papers, results_by_paper_id),
-            artifact_refs=artifact_refs,
-            position=_next_pending_position(papers, paper_runtime_statuses),
-            error=exc,
-            sink=sink,
-            reporter=reporter,
-            deep_read_count=deep_read_count,
-            deep_read_limit=deep_read_limit,
-            paper_runtime_statuses=paper_runtime_statuses,
-        )
+    # 中文注释：资源不可用按普通失败处理——异常直接冒泡让 run 失败，已完成论文
+    # 的 note 早已逐篇落盘；用户重试时由官方 Checkpointer 重跑本节点，note 跳过
+    # 已完成论文。不再保存手写恢复现场。
+    deep_read_count = await _process_papers_concurrently(
+        papers=papers,
+        topic=request_topic,
+        constraints=request_constraints,
+        config=config,
+        llm=llm,
+        embedding_connection=embedding_connection,
+        embedding_error=embedding_error,
+        reporter=reporter,
+        sink=sink,
+        runtime_resources=runtime_resources,
+        results_by_paper_id=results_by_paper_id,
+        artifact_refs=artifact_refs,
+        note_stages=note_stages,
+        note_relevance=note_relevance,
+        paper_runtime_statuses=paper_runtime_statuses,
+        completed_counter=completed_counter,
+        deep_read_limit=deep_read_limit,
+    )
 
     results = _ordered_results(papers, results_by_paper_id)
     summary = _build_summary(results, deep_read_count)
@@ -423,71 +409,17 @@ async def _run_read_node_async(state: State, runtime: Runtime[WorkflowRuntimeCon
     # 中文注释：软丢弃的论文不进下游——汇总和产物里保留完整记录（含丢弃理由），
     # 但写回 state 的 read_results 只包含未被丢弃的论文，分析/写作节点自然收窄。
     kept_results = [result for result in results if result.failure is None and not result.relevance.discarded]
-    # 中文注释：只返回本节点真正改动的键。LangGraph 的 channel 没有删除语义，
-    # 想清空恢复现场只能写一个空 dict；入口用真值判断把 {} 当作"没有现场"。
+    # 中文注释：只返回本节点真正改动的键。
     updated: dict[str, Any] = {
         "read_results": [result.to_dict() for result in kept_results],
         "read_summary": summary,
         "read_artifact_refs": artifact_refs,
-        "read_resume_checkpoint": {},
-        # 中文注释：_resume_pending_index 可能就地补过 diagnostics，这里显式带出去。
         "diagnostics": dict(state.get("diagnostics") or {}),
         "current_step": "read",
     }
     if checkpoint:
         updated["search_results"] = [paper.to_dict() for paper in papers]
     return cast(State, updated)
-
-
-def _halt_for_resource_unavailable(
-    state: State,
-    *,
-    papers: list[PaperDocument],
-    results: list[PaperReadResult],
-    artifact_refs: list[JsonObject],
-    position: int,
-    error: ReadResourceUnavailableError,
-    sink: ReadPersistenceSink | None,
-    reporter: Any,
-    deep_read_count: int,
-    deep_read_limit: int,
-    paper_runtime_statuses: dict[str, JsonObject],
-) -> NoReturn:
-    """保存阅读节点现场并抛出明确错误，等待用户修好外部资源后恢复。"""
-
-    # 中文注释：checkpoint 必须包含“继续执行所需的最小信息”：原始请求、全部论文、
-    # 已完成结果、产物引用、当前位置和精读计数。具体字段由阅读节点负责构造，
-    # 通用模块只负责写盘、上报、写回 state 和抛错。
-    checkpoint = _build_resume_checkpoint(
-        state,
-        papers=papers,
-        results=results,
-        artifact_refs=artifact_refs,
-        position=position,
-        error=error,
-        deep_read_count=deep_read_count,
-        deep_read_limit=deep_read_limit,
-        paper_runtime_statuses=paper_runtime_statuses,
-    )
-    halt_with_checkpoint(
-        state,
-        checkpoint=checkpoint,
-        error=error,
-        persist_checkpoint=sink.persist_checkpoint if sink is not None else None,
-        reporter=reporter,
-        results_payload=[result.to_dict() for result in results],
-        artifact_refs=artifact_refs,
-        checkpoint_key="read_resume_checkpoint",
-        results_key="read_results",
-        artifact_refs_key="read_artifact_refs",
-        diagnostics_key=error.diagnostic_key,
-        current_step=error.current_step,
-        failure_stage=error.failure_stage,
-        recovery_status=error.recovery_status,
-        total=len(papers),
-        completed=len(results),
-        next_position=position,
-    )
 
 
 # def _legacy_build_resume_checkpoint(
@@ -625,112 +557,6 @@ def _has_progress_beyond_note(result: PaperReadResult, note_stage: str) -> bool:
         or result.full_text.markdown_path
         or result.full_text.status not in {"", "not_requested"}
     )
-
-
-def _resume_pending_index(
-    state: State,
-    *,
-    papers: list[PaperDocument],
-    results: list[PaperReadResult],
-    artifact_refs: list[JsonObject],
-    checkpoint: JsonObject,
-    config: Any,
-    embedding_connection: EmbeddingConnection | None,
-    embedding_error: str | None,
-    sink: ReadPersistenceSink | None,
-    reporter: Any,
-    deep_read_count: int,
-    deep_read_limit: int,
-    runtime_resources: WorkflowRuntimeResources | None = None,
-) -> int:
-    """如果 checkpoint 里有等待入库的 Markdown，就优先从这里继续建立索引。"""
-
-    if checkpoint.get("pending_resume_phase") != "index_markdown":
-        return deep_read_count
-    pending_position = _optional_int(checkpoint.get("pending_position")) or 0
-    expected_position = len(results) + 1
-    pending_result = _read_result_from_payload(checkpoint.get("pending_read_result"), papers)
-    if pending_result is None or pending_position != expected_position or not pending_result.full_text.markdown_path:
-        # 中文注释：pending 现场不完整时不能硬继续，否则可能把错误论文写入向量库。
-        # 这里只记录诊断信息，然后退回普通流程，从当前论文重新阅读和转换。
-        diagnostics = dict(state.get("diagnostics") or {})
-        diagnostics["read_pending_resume_skipped"] = {
-            "reason": "checkpoint 中等待入库的论文现场不完整，已退回普通阅读流程",
-            "pending_position": pending_position,
-            "expected_position": expected_position,
-        }
-        state["diagnostics"] = diagnostics
-        return deep_read_count
-
-    _report_progress(reporter, pending_result.paper, "saving_chunks", pending_position - 1, len(papers))
-    if embedding_connection is None:
-        reason = embedding_error or "未配置可用的 embedding 服务，全文尚未写入向量库"
-        pending_result.full_text.reason = reason
-        _halt_for_resource_unavailable(
-            state,
-            papers=papers,
-            results=results,
-            artifact_refs=artifact_refs,
-            position=pending_position,
-            error=ReadEmbeddingUnavailableError(
-                reason,
-                pending_result=pending_result,
-                details=_embedding_error_details(pending_result, stage="embedding_config", message=reason),
-            ),
-            sink=sink,
-            reporter=reporter,
-            deep_read_count=deep_read_count,
-            deep_read_limit=deep_read_limit,
-        )
-    try:
-        index_result = index_markdown_chunks(
-            pending_result.paper,
-            markdown_path=Path(pending_result.full_text.markdown_path),
-            source_url=pending_result.full_text.source_url,
-            vector_store_path=config.vector_store_path,
-            collection_name=config.vector_store_collection,
-            chunk_size=config.chunk_size,
-            chunk_overlap=config.chunk_overlap,
-            embedding_connection=embedding_connection,
-            runtime_resources=runtime_resources,
-        )
-    except RuntimeError as exc:
-        # 中文注释：恢复时如果 embedding 服务仍然调用失败，就再次保存同一份 Markdown
-        # 现场，让用户修好服务后还能继续从这里恢复。
-        pending_result.full_text.reason = f"全文已转成 Markdown，但 embedding 服务不可用：{exc}"
-        _halt_for_resource_unavailable(
-            state,
-            papers=papers,
-            results=results,
-            artifact_refs=artifact_refs,
-            position=pending_position,
-            error=ReadEmbeddingUnavailableError(
-                pending_result.full_text.reason,
-                pending_result=pending_result,
-                details=_embedding_error_details(pending_result, stage="embedding_call", message=str(exc)),
-            ),
-            sink=sink,
-            reporter=reporter,
-            deep_read_count=deep_read_count,
-            deep_read_limit=deep_read_limit,
-        )
-    except (OSError, ValueError) as exc:
-        pending_result.full_text.reason = f"全文已转成 Markdown，但建立索引失败：{exc}"
-    else:
-        pending_result.full_text.status = "indexed"
-        pending_result.full_text.reason = ""
-        pending_result.full_text.chunk_count = index_result.chunk_count
-    results.append(pending_result)
-    _persist_completed_paper(pending_result, sink=sink, artifact_refs=artifact_refs, reporter=reporter)
-    _report_progress(
-        reporter,
-        pending_result.paper,
-        "paper_completed",
-        pending_position,
-        len(papers),
-        current_status=pending_result.full_text.status,
-    )
-    return deep_read_count
 
 
 def _read_result_from_payload(value: Any, papers: list[PaperDocument]) -> PaperReadResult | None:
@@ -1914,8 +1740,8 @@ async def _run_one_paper_task(
             )
         except ReadResourceUnavailableError as exc:
             _mark_paper_waiting_resource(paper_runtime_statuses, item.paper, exc)
-            # 中文注释：资源不可用会让整个阅读节点暂停。这里先更新当前论文卡片，
-            # 让用户一眼看到具体是哪篇论文卡在模型或向量服务上。
+            # 中文注释：资源不可用会让整个阅读节点按普通失败中断。这里先更新当前
+            # 论文卡片，让用户一眼看到具体是哪篇论文卡在模型或向量服务上。
             _report_progress(
                 reporter,
                 item.paper,
@@ -1926,7 +1752,6 @@ async def _run_one_paper_task(
                 message=str(exc),
                 paper_position=item.position,
                 error_message=str(exc),
-                recovery_status=exc.recovery_status,
             )
             raise
         except asyncio.CancelledError:
@@ -2657,25 +2482,6 @@ def _ordered_results(papers: list[PaperDocument], results_by_paper_id: dict[str,
     return [results_by_paper_id[paper.id] for paper in papers if paper.id in results_by_paper_id]
 
 
-def _ordered_paper_runtime_statuses(
-    papers: list[PaperDocument],
-    paper_runtime_statuses: dict[str, JsonObject],
-) -> list[JsonObject]:
-    """把每篇论文的运行状态按原顺序输出，便于恢复和前端展示。"""
-
-    return [dict(paper_runtime_statuses.get(paper.id) or _default_paper_runtime_status(paper)) for paper in papers]
-
-
-def _next_pending_position(papers: list[PaperDocument], paper_runtime_statuses: dict[str, JsonObject]) -> int:
-    """找出当前批次里第一篇未完成论文的位置，兼容旧前端依赖的 next_position 字段。"""
-
-    for position, paper in enumerate(papers, start=1):
-        status = str((paper_runtime_statuses.get(paper.id) or {}).get("status") or "pending")
-        if status != "completed":
-            return position
-    return len(papers) + 1
-
-
 def _default_paper_runtime_status(paper: PaperDocument) -> JsonObject:
     """给每篇论文准备一个最基础的运行状态记录。"""
 
@@ -2801,49 +2607,6 @@ def _infer_deep_read_reserved(result: PaperReadResult | None) -> bool:
     full_text = result.full_text
     return bool(full_text.source_path or full_text.markdown_path or full_text.status in _FULL_TEXT_COMPLETED_STATUSES | {"downloaded", "markdown_ready", "download_failed", "parse_failed"})
 
-
-def _build_resume_checkpoint(
-    state: State,
-    *,
-    papers: list[PaperDocument],
-    results: list[PaperReadResult],
-    artifact_refs: list[JsonObject],
-    position: int,
-    error: ReadResourceUnavailableError,
-    deep_read_count: int,
-    deep_read_limit: int,
-    paper_runtime_statuses: dict[str, JsonObject],
-) -> JsonObject:
-    """新的恢复现场按论文保存状态，不再主要依赖串行位置。"""
-
-    request = state.get("request") or {}
-    request_payload = request if isinstance(request, dict) else {}
-    checkpoint = {
-        "recovery_status": error.recovery_status,
-        "current_step": error.current_step,
-        "message": str(error),
-        "error_details": dict(error.details),
-        "next_position": position,
-        "completed_count": len(results),
-        "total_count": len(papers),
-        "deep_read_count": deep_read_count,
-        "deep_read_limit": deep_read_limit,
-        "request": {
-            "topic": str(request_payload.get("topic") or ""),
-            "constraints": dict(request_payload.get("constraints") or {}),
-            "language": str(request_payload.get("language") or "zh"),
-        },
-        "search_results": [paper.to_dict() for paper in papers],
-        "read_results": [result.to_dict() for result in results],
-        "read_artifact_refs": list(artifact_refs),
-        "paper_runtime_statuses": _ordered_paper_runtime_statuses(papers, paper_runtime_statuses),
-        "resume_hint": "外部资源验证可用后，把此 checkpoint 作为 read_resume_checkpoint 注入即可继续未完成的论文。",
-    }
-    if isinstance(error, ReadModelUnavailableError):
-        checkpoint["resume_hint"] = "阅读模型验证可用后，把此 checkpoint 作为 read_resume_checkpoint 注入即可继续未完成的论文。"
-    if isinstance(error, ReadEmbeddingUnavailableError):
-        checkpoint["resume_hint"] = "embedding 服务验证可用后，把此 checkpoint 作为 read_resume_checkpoint 注入即可继续未完成的论文。"
-    return checkpoint
 
 def _report_progress(reporter: Any, paper: PaperDocument, stage: str, completed: int, total: int, **extra: Any) -> None:
     """按论文维度上报实时进度，让同一篇论文始终更新同一张卡片。"""

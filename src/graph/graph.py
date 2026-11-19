@@ -35,11 +35,6 @@ class GraphRunResult:
 
 GraphState = State
 
-# 中文注释：图和 State 形状的版本号，随 checkpoint 一起登记。
-# 阶段 5a 的破坏性改造（Send/reducer/删字段）必须 bump 本常量，让旧 checkpoint
-# 在恢复前被显式拒绝，而不是悄悄恢复出一个字段对不上的旧状态。
-GRAPH_VERSION = 1
-
 # 中文注释：`TypedDict` 只在类型检查阶段生效，运行时它就是普通 dict。节点返回一个
 # 未声明的字段不会报错，它会悄悄进入图状态（曾经出现过的 `read_paper_statuses` 就是
 # 这种情况）。这里把声明过的字段名固化成集合，在节点返回值的边界上做断言。
@@ -62,17 +57,6 @@ def _check_declared_state_keys(origin: str, payload: Any) -> None:
         )
 
 
-def _entrypoint(state: State) -> str:
-    """根据是否带阅读恢复现场决定从检索还是阅读节点开始。
-
-    中文注释：这里用真值判断而不是 isinstance。LangGraph 的 channel 没有删除语义，
-    阅读节点成功时会写一个空 dict 表示"现场已清空"；isinstance 会把 {} 也当成
-    "有待恢复"，导致下次错误地从阅读节点开始。
-    """
-
-    return "run_read" if state.get("read_resume_checkpoint") else "run_search_agent"
-
-
 def build_graph(*, checkpointer: Any = None):
     """构建当前论文工作流使用的执行图。
 
@@ -87,7 +71,9 @@ def build_graph(*, checkpointer: Any = None):
     workflow.add_node("run_writing_outline", _with_cancellation_boundary("run_writing_outline", run_writing_outline_node()))
     workflow.add_node("run_writing", _with_cancellation_boundary("run_writing", run_writing_node()))
     workflow.add_node("compose_reply", _with_cancellation_boundary("compose_reply", run_compose_reply_node()))
-    workflow.add_conditional_edges(START, _entrypoint, {"run_search_agent": "run_search_agent", "run_read": "run_read"})
+    # 中文注释：固定直线入口。节点级恢复由官方 Checkpointer 负责（resume 时从
+    # 失败节点继续），不再依据手写恢复现场选择入口。
+    workflow.add_edge(START, "run_search_agent")
     workflow.add_edge("run_search_agent", "run_read")
     workflow.add_edge("run_read", "run_analyse")
     workflow.add_edge("run_analyse", "run_writing_outline")
@@ -303,7 +289,7 @@ def _request_payload(request: ReviewRequest) -> dict[str, Any]:
     """把领域对象转成可持久化的纯 dict。
 
     中文说明：State 里只放 JSON 数据，`ReviewRequest` 属于领域对象；在入口转换一次，
-    节点内部统一按 dict 读取。以后若增减字段，只改这里和 `_merge_read_checkpoint`。
+    节点内部统一按 dict 读取。以后若增减字段，只改这里。
     """
 
     return {
@@ -350,33 +336,7 @@ def _build_initial_state(
     if state_overrides:
         _check_declared_state_keys("state_overrides", state_overrides)
         initial_state.update(state_overrides)
-    return _merge_read_checkpoint(initial_state)
-
-
-def _merge_read_checkpoint(state: State) -> State:
-    """把恢复现场中的请求、检索结果和已读结果合并回初始状态。"""
-
-    checkpoint = state.get("read_resume_checkpoint")
-    if not isinstance(checkpoint, dict):
-        return state
-    request_payload = checkpoint.get("request")
-    if isinstance(request_payload, dict) and str(request_payload.get("topic") or "").strip():
-        state["request"] = {
-            "topic": str(request_payload.get("topic") or ""),
-            "constraints": dict(request_payload.get("constraints") or {}),
-            "language": str(request_payload.get("language") or "zh"),
-        }
-    search_results = [dict(item) for item in list(checkpoint.get("search_results") or []) if isinstance(item, dict)]
-    if search_results and not state.get("search_results"):
-        state["search_results"] = search_results
-    if checkpoint.get("read_results") and not state.get("read_results"):
-        state["read_results"] = list(checkpoint.get("read_results") or [])
-    if checkpoint.get("read_artifact_refs") and not state.get("read_artifact_refs"):
-        state["read_artifact_refs"] = list(checkpoint.get("read_artifact_refs") or [])
-    # 中文注释：旧 checkpoint 只有阅读模型恢复一种情况，所以这里以前固定写成
-    # read_waiting_model。现在 embedding 也可能等待恢复，优先使用 checkpoint 自带步骤。
-    state["current_step"] = str(checkpoint.get("current_step") or "read_waiting_model")
-    return state
+    return initial_state
 
 
 def _build_repository_emitter(repo: SessionRepository, session_key: str):

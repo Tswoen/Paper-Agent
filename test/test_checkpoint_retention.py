@@ -35,7 +35,6 @@ def _seed(registry, thread_id: str, *, status: str, finished_at: str | None) -> 
         session_key="session-a",
         turn_id=thread_id,
         run_id="run-1",
-        graph_version=1,
         started_at="2026-01-01T00:00:00+00:00",
     )
     if status != "running":

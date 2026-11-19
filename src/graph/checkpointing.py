@@ -21,14 +21,13 @@ JsonObject = dict[str, Any]
 _FINISHED_STATUSES = frozenset({"completed", "failed", "cancelled", "interrupted"})
 
 # 中文注释：checkpoint 由官方 saver 自己建表；这里只建“哪个 thread 属于哪个
-# 会话、版本是多少、现在什么状态”这份小账本，用于续跑选择、版本校验和保留期清理。
+# 会话、现在什么状态”这份小账本，用于续跑选择和保留期清理。
 _REGISTRY_SCHEMA = """
 CREATE TABLE IF NOT EXISTS checkpoint_runs (
     thread_id TEXT PRIMARY KEY,
     session_key TEXT NOT NULL,
     turn_id TEXT NOT NULL,
     run_id TEXT,
-    graph_version INTEGER NOT NULL,
     status TEXT NOT NULL,
     started_at TEXT NOT NULL,
     finished_at TEXT,
@@ -45,8 +44,8 @@ class CheckpointRegistry(ABC):
     """记录 run 与 checkpoint thread 对应关系的最小账本。
 
     中文注释：LangGraph 的 checkpointer 只回答“某个 thread 的最后快照是什么”，
-    它不知道“哪个 thread 属于哪个会话、是否已经结束、版本是多少”。这些信息只
-    用于启动续跑、版本校验和保留期清理，所以单独成表，不混进 State。
+    它不知道“哪个 thread 属于哪个会话、是否已经结束”。这些信息只用于启动续跑
+    和保留期清理，所以单独成表，不混进 State。
 
     TODO(4-postgres): 上 Postgres 时新增 PostgresCheckpointRegistry 实现，
     SessionRunService 只依赖本接口，不再关心底层存储。
@@ -60,10 +59,9 @@ class CheckpointRegistry(ABC):
         session_key: str,
         turn_id: str,
         run_id: str | None,
-        graph_version: int,
         started_at: str | None = None,
     ) -> None:
-        """登记一次 run 开始；续跑时复用同一 thread_id 并保留首次记录的版本号。"""
+        """登记一次 run 开始；续跑时复用同一 thread_id 与首次登记的会话/轮次。"""
 
     @abstractmethod
     def mark_finished(self, *, thread_id: str, status: str, finished_at: str | None = None) -> None:
@@ -128,19 +126,18 @@ class SqliteCheckpointRegistry(CheckpointRegistry):
         session_key: str,
         turn_id: str,
         run_id: str | None,
-        graph_version: int,
         started_at: str | None = None,
     ) -> None:
         now = started_at or utc_now()
         with self._connection:
             # 中文注释：续跑复用同一 thread_id 时，只把状态改回 running，
-            # 不覆盖首次登记的 graph_version——版本校验要以最初那份存档为准。
+            # 不覆盖首次登记的会话与轮次。
             self._connection.execute(
                 """
                 INSERT INTO checkpoint_runs (
-                    thread_id, session_key, turn_id, run_id, graph_version,
+                    thread_id, session_key, turn_id, run_id,
                     status, started_at, finished_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, 'running', ?, NULL, ?)
+                ) VALUES (?, ?, ?, ?, 'running', ?, NULL, ?)
                 ON CONFLICT(thread_id) DO UPDATE SET
                     run_id = excluded.run_id,
                     status = 'running',
@@ -148,7 +145,7 @@ class SqliteCheckpointRegistry(CheckpointRegistry):
                     finished_at = NULL,
                     updated_at = excluded.updated_at
                 """,
-                (thread_id, session_key, turn_id, run_id, graph_version, now, now),
+                (thread_id, session_key, turn_id, run_id, now, now),
             )
 
     def mark_finished(self, *, thread_id: str, status: str, finished_at: str | None = None) -> None:
@@ -251,18 +248,16 @@ class MemoryCheckpointRegistry(CheckpointRegistry):
         session_key: str,
         turn_id: str,
         run_id: str | None,
-        graph_version: int,
         started_at: str | None = None,
     ) -> None:
         now = started_at or utc_now()
         previous = self._rows.get(thread_id)
         self._rows[thread_id] = {
             "thread_id": thread_id,
+            # 中文注释：与 SQLite 实现保持一致，续跑不覆盖首次登记的会话与轮次。
             "session_key": previous["session_key"] if previous else session_key,
             "turn_id": previous["turn_id"] if previous else turn_id,
             "run_id": run_id,
-            # 中文注释：与 SQLite 实现保持一致，续跑不覆盖首次登记的版本号。
-            "graph_version": previous["graph_version"] if previous else graph_version,
             "status": "running",
             "started_at": now,
             "finished_at": None,

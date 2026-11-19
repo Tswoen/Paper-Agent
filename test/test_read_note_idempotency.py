@@ -220,7 +220,6 @@ class ReadNodeIdempotencyTest(unittest.TestCase):
             "search_results": [paper.to_dict() for paper in papers],
             "read_results": [],
             "read_artifact_refs": [],
-            "read_resume_checkpoint": {},
             "diagnostics": {},
         }
 

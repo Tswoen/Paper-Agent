@@ -66,6 +66,8 @@ class StateContractTest(unittest.TestCase):
             "read_paper_statuses",
             # 阶段 3.1：与 writing_report["sections"] 重复的平铺副本，已删除。
             "writing_sections",
+            # 版本断代：旧手写阅读恢复现场字段，恢复改由官方 Checkpointer + note 负责。
+            "read_resume_checkpoint",
         }
         self.assertEqual(removed & set(State.__annotations__), set())
 

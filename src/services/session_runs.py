@@ -10,11 +10,11 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from src.graph.checkpointing import CheckpointBundle, build_checkpoint_bundle
-from src.graph.graph import GRAPH_VERSION, thread_has_pending_work
+from src.graph.graph import thread_has_pending_work
 from src.graph.runtime import InlineWorkflowSyncPort, WorkflowCancellation, WorkflowRuntimeContext
 from src.graph.runtime_resources import WorkflowRuntimeResources
 from src.llm.config import CheckpointSettings
-from src.models.sessions import SessionRecord, utc_now
+from src.models.sessions import utc_now
 from src.repositories.sessions.base import SessionRepository
 from src.services.sessions import AssistantMessageBuffer, MessageHandler, SessionError, invoke_message_handler_async
 from src.utils import get_logger, logging_context
@@ -393,18 +393,12 @@ class SessionRunService:
             raise SessionError("session is already running", 409)
         resume_row: JsonObject | None = None
         if _should_resume_from_last_checkpoint(body):
-            # 中文注释：续跑只认 checkpoint。先找该会话最近一次线程，再校验版本，
-            # 最后问 checkpointer 还有没有待执行的节点/待重放的写入；账本状态不再
-            # 决定能不能续，找不到活或版本不符都明确拒绝。
+            # 中文注释：续跑只认官方 checkpoint。先找该会话最近一次线程，再问
+            # checkpointer 还有没有待执行的节点/待重放的写入；账本状态不决定
+            # 能不能续，找不到活就明确拒绝。
             resume_row = self.checkpoint_bundle.registry.latest_thread(session_key)
             if resume_row is None:
                 raise ValueError("没有找到可继续执行的恢复现场")
-            stored_version = int(resume_row.get("graph_version") or 0)
-            if stored_version != GRAPH_VERSION:
-                raise SessionError(
-                    f"checkpoint 存档由旧版本生成（v{stored_version}），当前版本 v{GRAPH_VERSION}；请重新运行。",
-                    409,
-                )
             thread_id = str(resume_row["thread_id"])
             # 中文注释：running 只说明账本没来得及收尾；broker 里没有该会话的活任务，
             # 才是真正的“无主”。这时把它改成 interrupted；如果本进程确实还在跑，
@@ -441,7 +435,6 @@ class SessionRunService:
             session_key=session_key,
             turn_id=turn_id,
             run_id=run_id,
-            graph_version=GRAPH_VERSION,
             started_at=started_at,
         )
 
@@ -921,49 +914,6 @@ def _should_resume_from_last_checkpoint(body: JsonObject) -> bool:
     # 中文注释：正常 JSON 请求会传布尔值 true；这里额外兼容字符串，方便以后调试接口时手写请求。
     flag = body.get("resume_from_last_checkpoint")
     return flag is True or str(flag).lower() in {"1", "true", "yes"}
-
-
-def _latest_read_resume_checkpoint(record: SessionRecord) -> JsonObject | None:
-    """从会话历史里找到最近一次阅读节点保存的恢复现场。
-
-    中文注释：阶段 4 起生产续跑改由 checkpoint 驱动，本函数不再被 start_run 调用；
-    保留它只是为了让旧入口和历史数据仍有可读路径，阶段 5b 随手写恢复整体删除。
-    """
-
-    # 中文注释：事件是按时间从早到晚保存的，所以倒着找，最先遇到的就是最近一次失败。
-    for event in reversed(record.events):
-        metadata = event.get("metadata")
-        if not isinstance(metadata, dict):
-            continue
-
-        # 中文注释：新版执行过程统一用 runtime_event，checkpoint 会放在 runtime_event.metadata.checkpoint 里。
-        # 这里保留旧 node_failed 的读取方式，是为了用户从旧失败现场继续时也能找到恢复数据。
-        event_type = str(event.get("event_type") or "")
-        if event_type == "runtime_event":
-            runtime_metadata = metadata.get("metadata")
-            if isinstance(runtime_metadata, dict):
-                checkpoint = runtime_metadata.get("checkpoint")
-                if isinstance(checkpoint, dict):
-                    return copy.deepcopy(checkpoint)
-        if event_type == "node_failed":
-            checkpoint = metadata.get("checkpoint")
-            if isinstance(checkpoint, dict):
-                return copy.deepcopy(checkpoint)
-    return None
-
-
-def _content_from_checkpoint(checkpoint: JsonObject) -> str:
-    """恢复执行时没有新输入内容则沿用 checkpoint 里的原始主题。
-
-    中文注释：阶段 4 起仅旧入口可能用到；阶段 5b 随手写恢复删除。
-    """
-
-    request = checkpoint.get("request")
-    if isinstance(request, dict):
-        topic = str(request.get("topic") or "").strip()
-        if topic:
-            return topic
-    return "继续阅读恢复现场"
 
 
 def encode_sse(event: JsonObject) -> str:

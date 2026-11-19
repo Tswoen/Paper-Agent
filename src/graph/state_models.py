@@ -27,7 +27,6 @@ class State(TypedDict, total=False):
     read_results: list[JsonObject]
     read_summary: JsonObject
     read_artifact_refs: list[JsonObject]
-    read_resume_checkpoint: JsonObject
     analysis_report: JsonObject
     analysis_artifact_refs: list[JsonObject]
     writing_outline: JsonObject

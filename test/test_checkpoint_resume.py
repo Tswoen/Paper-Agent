@@ -10,7 +10,7 @@ from graph import build_graph, run_graph
 from src.agents import ReviewRequest
 from src.agents.analyseAgent import AnalyseModelResult
 from src.graph.checkpointing import build_checkpoint_bundle
-from src.graph.graph import GRAPH_VERSION, thread_has_pending_work
+from src.graph.graph import thread_has_pending_work
 from src.llm.config import CheckpointSettings
 from src.repositories.sessions.sqlite import SQLiteSessionRepository
 from src.services.paper_workflow_runtime import build_paper_workflow_message_handler
@@ -42,7 +42,7 @@ class _FlakyAnalyseAgent:
 
 
 class CheckpointResumeTest(unittest.TestCase):
-    """验证续跑只认 checkpoint、复用旧线程，并拒绝版本不符或缺失存档。"""
+    """验证续跑只认官方 checkpoint、复用旧线程，并拒绝缺失存档或无待执行内容。"""
 
     async def _run_to_end(self, service: SessionRunService, session_key: str, body: dict):
         accepted = await service.start_run(session_key, body)
@@ -134,44 +134,6 @@ class CheckpointResumeTest(unittest.TestCase):
             finally:
                 bundle.close()
 
-    def test_resume_refuses_graph_version_mismatch(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            repo = SQLiteSessionRepository(storage_root=root / "sessions")
-            session = repo.create("Version mismatch")
-            bundle = build_checkpoint_bundle(
-                CheckpointSettings(backend="sqlite", path=str(root / "checkpoints.db"))
-            )
-            try:
-                service = SessionRunService(repo, checkpoint_bundle=bundle)
-                thread_id = f"{session.key}:legacy"
-                bundle.registry.mark_started(
-                    thread_id=thread_id,
-                    session_key=session.key,
-                    turn_id="legacy",
-                    run_id="run-legacy",
-                    graph_version=GRAPH_VERSION - 1,
-                )
-                bundle.registry.mark_finished(thread_id=thread_id, status="failed")
-
-                with self.assertRaises(SessionError) as raised:
-                    asyncio.run(
-                        service.start_run(
-                            session.key,
-                            {
-                                "content": "继续上次失败的位置",
-                                "turn_id": "t2",
-                                "resume_from_last_checkpoint": True,
-                            },
-                        )
-                    )
-
-                self.assertEqual(raised.exception.status, 409)
-                self.assertIn(f"v{GRAPH_VERSION - 1}", str(raised.exception))
-                self.assertIn(f"v{GRAPH_VERSION}", str(raised.exception))
-            finally:
-                bundle.close()
-
     def test_resume_without_checkpoint_raises(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             repo = SQLiteSessionRepository(storage_root=Path(temp_dir) / "sessions")
@@ -203,7 +165,6 @@ class CheckpointResumeTest(unittest.TestCase):
                 session_key=session.key,
                 turn_id="t1",
                 run_id="run-done",
-                graph_version=GRAPH_VERSION,
             )
             service.checkpoint_bundle.registry.mark_finished(
                 thread_id=thread_id, status="completed"
@@ -232,7 +193,6 @@ class CheckpointResumeTest(unittest.TestCase):
                 session_key=session.key,
                 turn_id="t1",
                 run_id="run-original",
-                graph_version=GRAPH_VERSION,
             )
             service.checkpoint_bundle.registry.mark_finished(thread_id=thread_id, status="failed")
             message_count = len(repo.get(session.key).messages)
@@ -290,7 +250,6 @@ class CheckpointResumeTest(unittest.TestCase):
                         session_key=session.key,
                         turn_id="t1",
                         run_id="run-killed",
-                        graph_version=GRAPH_VERSION,
                     )
                     repo.set_status(session.key, "running")
                     repo.set_run_started_at(session.key, "2026-11-10T12:00:00+00:00")
@@ -355,7 +314,6 @@ class CheckpointResumeTest(unittest.TestCase):
                 session_key=session.key,
                 turn_id="t1",
                 run_id="run-1",
-                graph_version=GRAPH_VERSION,
             )
             registry.mark_finished(
                 thread_id=old_thread,
@@ -367,7 +325,6 @@ class CheckpointResumeTest(unittest.TestCase):
                 session_key=session.key,
                 turn_id="t2",
                 run_id="run-2",
-                graph_version=GRAPH_VERSION,
             )
             registry.mark_finished(
                 thread_id=new_thread,
@@ -416,7 +373,6 @@ class CheckpointResumeTest(unittest.TestCase):
                 session_key=session.key,
                 turn_id="t1",
                 run_id="run-1",
-                graph_version=GRAPH_VERSION,
             )
             captured = {}
 
@@ -476,7 +432,6 @@ class CheckpointResumeTest(unittest.TestCase):
                 session_key=session.key,
                 turn_id="t1",
                 run_id="run-1",
-                graph_version=GRAPH_VERSION,
             )
 
             async def fake_pending(checkpointer, tid):

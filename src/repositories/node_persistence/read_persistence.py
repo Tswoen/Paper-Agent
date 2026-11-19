@@ -170,27 +170,6 @@ class ReadPersistenceSink:
         )
         return ReadPersistenceResult(artifacts=[_artifact_ref(record)])
 
-    def persist_checkpoint(self, checkpoint: JsonObject) -> ReadPersistenceResult:
-        """保存旧式阅读现场；该冻结路径将在 5b 随旧恢复机制一起删除。"""
-
-        payload = dict(checkpoint)
-        payload.setdefault("turn_id", self._turn_id)
-        payload.setdefault("created_at", utc_now())
-        record = self._repo.write_artifact(
-            self._session_key,
-            artifact_type="paper_read_checkpoint",
-            name="read_checkpoint.json",
-            content=json.dumps(payload, ensure_ascii=False, indent=2),
-            relative_path=f"artifacts/read/{self._turn_id}/read_checkpoint.json",
-            metadata={
-                "turn_id": self._turn_id,
-                "format": "json",
-                "recovery_status": str(payload.get("recovery_status") or "waiting_model"),
-                "next_position": payload.get("next_position", 0),
-            },
-        )
-        return ReadPersistenceResult(artifacts=[_artifact_ref(record)])
-
     def _paper_note_path(self, paper_id: str) -> str:
         return (
             f"artifacts/read/threads/{_safe_path_component(self._thread_id)}"

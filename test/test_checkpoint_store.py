@@ -74,32 +74,28 @@ class CheckpointBundleTest(unittest.TestCase):
             session_key="session-a",
             turn_id="turn-1",
             run_id="run-1",
-            graph_version=1,
             started_at="2026-11-10T10:00:00+00:00",
         )
         row = registry.get("session-a:turn-1")
         self.assertIsNotNone(row)
         self.assertEqual(row["status"], "running")
-        self.assertEqual(row["graph_version"], 1)
         # 账本只负责“找最近线程”，不判断能不能续；running 也能被取到。
         latest = registry.latest_thread("session-a")
         self.assertIsNotNone(latest)
         self.assertEqual(latest["thread_id"], "session-a:turn-1")
         self.assertEqual(latest["status"], "running")
 
-        # 续跑：同一 thread 重新开始，状态回到 running，但版本号保留首次登记值。
+        # 续跑：同一 thread 重新开始，状态回到 running。
         registry.mark_started(
             thread_id="session-a:turn-1",
             session_key="session-a",
             turn_id="turn-1",
             run_id="run-2",
-            graph_version=99,
             started_at="2026-11-10T10:01:00+00:00",
         )
         row = registry.get("session-a:turn-1")
         self.assertEqual(row["status"], "running")
         self.assertEqual(row["run_id"], "run-2")
-        self.assertEqual(row["graph_version"], 1)
         # 中文注释：续跑只更新 run_id/时间，首次登记的会话与轮次不能被覆盖。
         self.assertEqual(row["session_key"], "session-a")
         self.assertEqual(row["turn_id"], "turn-1")
@@ -129,7 +125,6 @@ class CheckpointBundleTest(unittest.TestCase):
             session_key="session-a",
             turn_id="turn-2",
             run_id="run-3",
-            graph_version=1,
             started_at="2026-11-10T11:00:00+00:00",
         )
         registry.mark_finished(
@@ -152,7 +147,6 @@ class CheckpointBundleTest(unittest.TestCase):
             session_key="session-a",
             turn_id="turn-3",
             run_id="run-4",
-            graph_version=1,
             started_at="2026-11-10T12:00:00+00:00",
         )
         self.assertEqual(
@@ -201,7 +195,6 @@ class CheckpointBundleTest(unittest.TestCase):
             session_key="session-delete",
             turn_id="turn-1",
             run_id="run-1",
-            graph_version=1,
         )
 
         bundle.delete_thread(thread_id)
@@ -231,14 +224,12 @@ class CheckpointBundleTest(unittest.TestCase):
             session_key="session-1",
             turn_id="t1",
             run_id="run-1",
-            graph_version=1,
         )
         registry.mark_started(
             thread_id="session-2:t1",
             session_key="session-2",
             turn_id="t1",
             run_id="run-2",
-            graph_version=1,
         )
 
         self.assertEqual(registry.latest_thread("session-1")["thread_id"], "session-1:t1")
