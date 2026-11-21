@@ -13,6 +13,10 @@
    进行中 os._exit(1)；resume 重跑 read 节点。
    验收点：检索不重跑、已完成摘要的论文不重跑摘要（note 幂等）、
    未完成论文重做摘要、账本 completed、最终 current_step == reply。
+3. writing：crash 在写作节点内部——第一节正文的 section.json 落盘后、
+   第二节写作中 os._exit(1)；resume 重跑 writing 节点。
+   验收点：检索不重跑、已完成小节不重写（section 幂等）、缺失小节补写、
+   最终报告只有一份、账本 completed、最终 current_step == reply。
 
 这个文件不以 test_ 开头，也不在 test/manual 下被 unittest discover 收集。
 """
@@ -153,6 +157,54 @@ def _make_read_resume_abstract():
     return logging_abstract
 
 
+def _make_writing_crash_agent(workdir: Path):
+    """writing 场景的崩溃桩：第一节正常完成，第二节等首节稳定点落盘后硬杀进程。"""
+
+    class _CrashWritingAgent:
+        async def async_write_section(self, *, section_id, **kwargs):
+            marker = Path(os.environ["SECTION_MARKER"])
+            with marker.open("a", encoding="utf-8") as handle:
+                handle.write(f"{section_id}\n")
+            sessions_dir = workdir / "data" / "sessions"
+            if not list(sessions_dir.glob("**/artifacts/writing/threads/*/sections/*/section.json")):
+                # 中文注释：第一节返回正常结果，让节点把稳定点落盘。
+                return {
+                    "section_id": section_id,
+                    "content": "崩溃前已完成的小节正文",
+                    "cited_paper_ids": [],
+                    "completed": True,
+                    "warnings": [],
+                }
+            # 中文注释：首节稳定点已落盘，第二节写作中硬杀进程。
+            Path(os.environ["CRASH_MARKER"]).write_text("reached", encoding="utf-8")
+            os._exit(1)
+
+        async def async_write_abstract(self, **kwargs):
+            return "摘要", "ok"
+
+    return _CrashWritingAgent()
+
+
+def _make_writing_resume_agent():
+    """writing 场景的续跑桩：记录小节调用，再委托真实 Agent（hermetic 模型）。"""
+
+    from src.agents.writingAgent import build_writing_agent
+
+    real_agent = build_writing_agent(None)
+
+    class _LoggingWritingAgent:
+        async def async_write_section(self, *, section_id, **kwargs):
+            marker = Path(os.environ["SECTION_MARKER"])
+            with marker.open("a", encoding="utf-8") as handle:
+                handle.write(f"{section_id}\n")
+            return await real_agent.async_write_section(section_id=section_id, **kwargs)
+
+        async def async_write_abstract(self, **kwargs):
+            return await real_agent.async_write_abstract(**kwargs)
+
+    return _LoggingWritingAgent()
+
+
 def _run_crash(workdir: Path, scenario: str) -> None:
     workdir.mkdir(parents=True, exist_ok=True)
     repo = _make_repo(workdir)
@@ -169,9 +221,12 @@ def _run_crash(workdir: Path, scenario: str) -> None:
     search_marker.write_text("", encoding="utf-8")
     abstract_marker = workdir / "abstract_calls.log"
     abstract_marker.write_text("", encoding="utf-8")
+    section_marker = workdir / "section_calls.log"
+    section_marker.write_text("", encoding="utf-8")
     crash_marker = workdir / "crash_reached.marker"
     os.environ["CRASH_MARKER"] = str(crash_marker)
     os.environ["ABSTRACT_MARKER"] = str(abstract_marker)
+    os.environ["SECTION_MARKER"] = str(section_marker)
 
     bundle = _make_bundle(workdir)
     service = SessionRunService(
@@ -188,6 +243,18 @@ def _run_crash(workdir: Path, scenario: str) -> None:
         crash_patch = mock.patch(
             "src.graph.read_node._build_abstract_note",
             new=_make_read_crash_abstract(workdir),
+        )
+        agent_patch = mock.patch(
+            "src.graph.analyse_node.build_analyse_agent",
+            lambda *args, **kwargs: _SuccessAgent(),
+        )
+    elif scenario == "writing":
+        # 中文注释：兜底大纲有 5 个小节；第一节完成并落盘稳定点后，
+        # 第二节写作中硬杀进程。
+        constraints = {"sources": ["openalex"], "max_results": 3}
+        crash_patch = mock.patch(
+            "src.graph.writing_node.build_writing_agent",
+            lambda *args, **kwargs: _make_writing_crash_agent(workdir),
         )
         agent_patch = mock.patch(
             "src.graph.analyse_node.build_analyse_agent",
@@ -229,7 +296,9 @@ def _run_resume(workdir: Path, scenario: str) -> None:
     thread_id = str(state["thread_id"])
     search_marker = workdir / "search_calls.log"
     abstract_marker = workdir / "abstract_calls.log"
+    section_marker = workdir / "section_calls.log"
     os.environ["ABSTRACT_MARKER"] = str(abstract_marker)
+    os.environ["SECTION_MARKER"] = str(section_marker)
 
     repo = _make_repo(workdir)
     bundle = _make_bundle(workdir)
@@ -254,6 +323,13 @@ def _run_resume(workdir: Path, scenario: str) -> None:
         )
     else:
         abstract_patch = nullcontext()
+    if scenario == "writing":
+        writing_patch = mock.patch(
+            "src.graph.writing_node.build_writing_agent",
+            lambda *args, **kwargs: _make_writing_resume_agent(),
+        )
+    else:
+        writing_patch = nullcontext()
 
     async def exercise():
         with hermetic_graph_llms(), _fake_backends(
@@ -263,7 +339,7 @@ def _run_resume(workdir: Path, scenario: str) -> None:
         ), mock.patch(
             "src.graph.analyse_node.build_analyse_agent",
             lambda *args, **kwargs: _SuccessAgent(),
-        ), abstract_patch:
+        ), abstract_patch, writing_patch:
             accepted = await service.start_run(
                 session_key,
                 {
@@ -339,6 +415,40 @@ def _run_resume(workdir: Path, scenario: str) -> None:
             )
             print(f"[resume] abstract_calls={abstract_calls}")
             print("[resume] note_reuse=ok")
+
+        if scenario == "writing":
+            section_calls = [
+                line.strip()
+                for line in section_marker.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            # 中文注释：第一节在崩溃前已完成——续跑绝不能重写它（全程恰好 1 次）；
+            # 第二节崩溃时未完成——崩溃尝试 1 次 + 续跑重写 1 次 = 2 次。
+            first_section = section_calls[0]
+            second_section = section_calls[1]
+            assert section_calls.count(first_section) == 1, (
+                f"已完成小节被重写: {section_calls}"
+            )
+            assert section_calls.count(second_section) == 2, (
+                f"未完成小节重写次数异常: {section_calls}"
+            )
+            first_artifacts = [
+                artifact
+                for artifact in artifacts
+                if artifact["artifact_type"] == "writing_section"
+                and artifact["metadata"].get("section_id") == first_section
+            ]
+            assert len(first_artifacts) == 1, f"首节稳定点数量异常: {len(first_artifacts)}"
+            section_path = repo.read_artifact_path(session_key, first_artifacts[0]["id"])
+            section_payload = json.loads(section_path.read_text(encoding="utf-8"))
+            assert section_payload["section"]["content"] == "崩溃前已完成的小节正文", (
+                "崩溃前的小节稳定点没有被复用"
+            )
+            assert artifact_names.count("writing.json") == 1, (
+                f"最终报告数量异常: {artifact_names}"
+            )
+            print(f"[resume] section_calls={section_calls}")
+            print("[resume] section_reuse=ok")
     finally:
         bundle.close()
 
@@ -422,15 +532,15 @@ def _run_scenario(scenario: str) -> None:
 
 
 def _run_parent() -> None:
-    for scenario in ("analyse", "read"):
+    for scenario in ("analyse", "read", "writing"):
         _run_scenario(scenario)
-    print("PASS: real kill -> restart -> resume (analyse + read)")
+    print("PASS: real kill -> restart -> resume (analyse + read + writing)")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="真实进程 kill 后续跑冒烟测试")
     parser.add_argument("--role", choices=["parent", "crash", "resume"], default="parent")
-    parser.add_argument("--scenario", choices=["analyse", "read"], default="analyse")
+    parser.add_argument("--scenario", choices=["analyse", "read", "writing"], default="analyse")
     parser.add_argument("--workdir", default="")
     args = parser.parse_args()
 

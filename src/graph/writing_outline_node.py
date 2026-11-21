@@ -21,10 +21,6 @@ if TYPE_CHECKING:
     from langgraph.runtime import Runtime
 
 
-# 中文说明：标题字段和正文范围发生了变化，使用新版本号便于识别旧产物。
-WRITING_OUTLINE_VERSION = "1.1"
-
-
 def run_writing_outline_node():
     """生成论文写作大纲节点。
 
@@ -66,7 +62,6 @@ def run_writing_outline_node():
             outline = _fallback_outline(topic=topic, analysis_report=analysis_report)
 
         report = {
-            "outline_version": WRITING_OUTLINE_VERSION,
             "topic": topic,
             # 中文说明：writing_outline 是后续正文写作最应该直接读取的核心对象。
             "writing_outline": outline,
@@ -275,7 +270,7 @@ async def _persist_outline_if_possible(runtime: Runtime[WorkflowRuntimeContext] 
             "writing_outline.json",
             json.dumps(report, ensure_ascii=False, indent=2),
             relative_path=f"artifacts/writing_outline/{turn_id}/writing_outline.json",
-            metadata={"turn_id": turn_id, "format": "json", "outline_version": WRITING_OUTLINE_VERSION},
+            metadata={"turn_id": turn_id, "format": "json"},
         )
     except Exception:
         return None

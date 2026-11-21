@@ -506,6 +506,77 @@ class GraphTest(unittest.TestCase):
             artifact_names = [artifact["name"] for artifact in repo.get(session.key).thread()["artifacts"]]
             self.assertEqual(artifact_names.count("search_manifest.json"), 1)
 
+    def test_run_graph_resumes_after_writing_failure(self):
+        """写作节点失败后官方续跑重跑 writing：已完成小节不重写。"""
+
+        class _FlakyWritingAgent:
+            def __init__(self):
+                self.calls: list[str] = []
+                self.fail_second = True
+
+            async def async_write_section(self, *, section_id, **kwargs):
+                self.calls.append(section_id)
+                if self.fail_second and len(self.calls) == 2:
+                    raise RuntimeError("stub writing model unavailable")
+                return {
+                    "section_id": section_id,
+                    "content": f"{section_id} 的正文",
+                    "cited_paper_ids": [],
+                    "completed": True,
+                    "warnings": [],
+                }
+
+            async def async_write_abstract(self, **kwargs):
+                return "摘要", "ok"
+
+        stub = _StubService()
+        agent = _FlakyWritingAgent()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = SQLiteSessionRepository(storage_root=temp_dir)
+            session = repo.create("Resume after writing failure")
+            saver = InMemorySaver()
+            thread_id = f"{session.key}:turn-1"
+
+            with _fake_backends(
+                stub,
+                search_snapshot=_fake_snapshot(),
+                read_snapshot=_read_snapshot(),
+            ), mock.patch("src.graph.writing_node.build_writing_agent", lambda *args, **kwargs: agent):
+                with self.assertRaises(RuntimeError):
+                    asyncio.run(
+                        run_graph(
+                            ReviewRequest(
+                                topic="multi-agent literature review",
+                                constraints={"sources": ["openalex"], "max_results": 3},
+                            ),
+                            session_repo=repo,
+                            session_key=session.key,
+                            turn_id="turn-1",
+                            checkpointer=saver,
+                            thread_id=thread_id,
+                        )
+                    )
+                first_section = agent.calls[0]
+                agent.fail_second = False
+                result = asyncio.run(
+                    run_graph(
+                        None,
+                        resume=True,
+                        session_repo=repo,
+                        session_key=session.key,
+                        turn_id="turn-1",
+                        checkpointer=saver,
+                        thread_id=thread_id,
+                    )
+                )
+
+            self.assertEqual(result.state["current_step"], "reply")
+            # 中文注释：崩溃前已完成的小节续跑时从稳定点复用，全程只写一次。
+            self.assertEqual(agent.calls.count(first_section), 1)
+            self.assertEqual(len(stub.calls), 1)
+            artifact_names = [artifact["name"] for artifact in repo.get(session.key).thread()["artifacts"]]
+            self.assertEqual(artifact_names.count("writing.json"), 1)
+
     def test_run_graph_persists_checkpoints_when_saver_is_provided(self):
         """带 saver 时状态会落到指定线程，返回值回显 thread_id。"""
 
