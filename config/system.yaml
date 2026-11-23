@@ -54,3 +54,17 @@ checkpoint:
     enabled: true
     completed_days: 7
     failed_days: 30
+
+# 并发上限（5a-4）：统一控制一次 run 里各类任务"同时干几个"。
+# 只影响速度与资源占用，不影响结果；缺省、写错或非正数会回退到代码默认值。
+# search_source：同时查询的论文数据源数量；
+# paper_task：同时处理的论文数量（同一数值会写入图运行参数 max_concurrency，为并行拓扑预留）；
+# download：同时进行的 PDF 下载数量；
+# read_model：阅读模型同时请求数（摘要、全文提取、证据验证共用这一层）；
+# embedding：向量化调用同时请求数（预留，当前向量索引实现已接线）。
+concurrency:
+  search_source: 4
+  paper_task: 3
+  download: 3
+  read_model: 2
+  embedding: 1

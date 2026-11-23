@@ -124,6 +124,23 @@ class CheckpointSettings:
 
 
 @dataclass(slots=True)
+class ConcurrencySettings:
+    """系统级并发上限（system.yaml 顶层 concurrency 段）。
+
+    中文说明：这些数字只控制"同时干几件事"，不改变业务输入输出。
+    生产路径由组合根（SessionRunService）读出来装进 RuntimeConcurrencyLimits，
+    各资源级信号量再从那里取值；这里保持纯配置，不依赖图模块。
+    默认值与断代前的硬编码默认一致，缺省配置时行为不变。
+    """
+
+    search_source: int = 4
+    paper_task: int = 3
+    download: int = 3
+    read_model: int = 2
+    embedding: int = 1
+
+
+@dataclass(slots=True)
 class SystemConfig:
     """从 config/system.yaml 读取的系统默认值。"""
 
@@ -133,6 +150,7 @@ class SystemConfig:
     search: SearchDefaults = field(default_factory=SearchDefaults)
     read: ReadDefaults = field(default_factory=ReadDefaults)
     checkpoint: CheckpointSettings = field(default_factory=CheckpointSettings)
+    concurrency: ConcurrencySettings = field(default_factory=ConcurrencySettings)
 
     @classmethod
     def load(cls, path: str | Path = "config/system.yaml") -> "SystemConfig":
@@ -150,6 +168,7 @@ class SystemConfig:
         search = dict((data or {}).get("search") or {})
         read = dict((data or {}).get("read") or {})
         checkpoint = dict((data or {}).get("checkpoint") or {})
+        concurrency = dict((data or {}).get("concurrency") or {})
         retention = dict(checkpoint.get("retention") or {})
         semantic_enabled = _optional_bool(search.get("semantic_filter_enabled"))
         return cls(
@@ -210,6 +229,15 @@ class SystemConfig:
                 retention_enabled=_optional_bool(retention.get("enabled")) is not False,
                 retention_completed_days=_read_positive_int(retention.get("completed_days"), 7),
                 retention_failed_days=_read_positive_int(retention.get("failed_days"), 30),
+            ),
+            concurrency=ConcurrencySettings(
+                # 中文说明：并发上限逐键读取，缺省/非法/非正数都回退默认值，
+                # 与 search/read 段的数值配置保持同一套容错风格。
+                search_source=_read_positive_int(concurrency.get("search_source"), 4),
+                paper_task=_read_positive_int(concurrency.get("paper_task"), 3),
+                download=_read_positive_int(concurrency.get("download"), 3),
+                read_model=_read_positive_int(concurrency.get("read_model"), 2),
+                embedding=_read_positive_int(concurrency.get("embedding"), 1),
             ),
         )
 

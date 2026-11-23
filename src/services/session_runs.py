@@ -12,8 +12,8 @@ from typing import Any
 from src.graph.checkpointing import CheckpointBundle, build_checkpoint_bundle
 from src.graph.graph import thread_has_pending_work
 from src.graph.runtime import InlineWorkflowSyncPort, WorkflowCancellation, WorkflowRuntimeContext
-from src.graph.runtime_resources import WorkflowRuntimeResources
-from src.llm.config import CheckpointSettings
+from src.graph.runtime_resources import RuntimeConcurrencyLimits, WorkflowRuntimeResources
+from src.llm.config import CheckpointSettings, SystemConfig
 from src.models.sessions import utc_now
 from src.repositories.sessions.base import SessionRepository
 from src.services.sessions import AssistantMessageBuffer, MessageHandler, SessionError, invoke_message_handler_async
@@ -580,7 +580,9 @@ class SessionRunService:
         saw_turn_end = False
         # 中文注释：每次后台 run 都创建自己独立的一份运行时资源，后面节点可以通过
         # runtime_context 共享这些资源，不会和别的 run 混用。
-        resources = WorkflowRuntimeResources()
+        # 并发上限来自 system.yaml 顶层 concurrency 段；每次 run 读一次配置，
+        # 改完配置下一次 run 即生效，不需要重启进程。
+        resources = WorkflowRuntimeResources(limits=_concurrency_limits_from_system())
         cancellation = self.broker.cancellation_for(run_id)
 
         def emit(event: JsonObject) -> JsonObject:
@@ -914,6 +916,23 @@ def _should_resume_from_last_checkpoint(body: JsonObject) -> bool:
     # 中文注释：正常 JSON 请求会传布尔值 true；这里额外兼容字符串，方便以后调试接口时手写请求。
     flag = body.get("resume_from_last_checkpoint")
     return flag is True or str(flag).lower() in {"1", "true", "yes"}
+
+
+def _concurrency_limits_from_system() -> RuntimeConcurrencyLimits:
+    """把 system.yaml 的 concurrency 配置翻译成运行时并发上限。
+
+    中文注释：映射放在组合根这里，runtime_resources 保持不依赖配置层；
+    配置缺失或非法时 ConcurrencySettings 已回退到与旧硬编码一致的默认值。
+    """
+
+    concurrency = SystemConfig.load().concurrency
+    return RuntimeConcurrencyLimits(
+        search_source_concurrency=concurrency.search_source,
+        paper_task_concurrency=concurrency.paper_task,
+        download_concurrency=concurrency.download,
+        read_model_concurrency=concurrency.read_model,
+        embedding_concurrency=concurrency.embedding,
+    )
 
 
 def encode_sse(event: JsonObject) -> str:

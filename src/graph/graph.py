@@ -11,6 +11,7 @@ from src.graph.analyse_node import run_analyse_node
 from src.graph.reply_node import run_compose_reply_node
 from src.graph.read_node import run_read_node
 from src.graph.runtime import InlineWorkflowSyncPort, WorkflowRuntimeContext
+from src.graph.runtime_resources import RuntimeConcurrencyLimits
 from src.graph.search_node import run_search_agent_node
 from src.graph.state_models import State
 from src.graph.writing_outline_node import run_writing_outline_node
@@ -237,13 +238,24 @@ def _build_run_config(
     *,
     thread_id: str | None = None,
 ) -> dict[str, Any]:
-    """组装本次 run 的追踪元数据与存档线程。
+    """组装本次 run 的追踪元数据、存档线程与任务级并发上限。
 
     中文注释：metadata 只用于追踪；thread_id 才决定 checkpoint 存到哪个线程，
     它属于 RunnableConfig，不进 State，也不进 graph context。
+    max_concurrency 限制同一超步内并行执行的任务数：当前直线图一次只有一个
+    任务，此键不改变现有行为，是为将来 Send 并行拓扑预留的任务级上限，
+    数值与论文级并发（paper_task）保持一致。
     """
 
-    config: dict[str, Any] = {"tags": ["paper_graph"]}
+    limits = (
+        runtime.resources.limits
+        if runtime is not None and runtime.resources is not None
+        else RuntimeConcurrencyLimits()
+    )
+    config: dict[str, Any] = {
+        "tags": ["paper_graph"],
+        "max_concurrency": limits.paper_task_concurrency,
+    }
     if runtime is not None:
         config["metadata"] = {
             "session_key": runtime.session_key,
