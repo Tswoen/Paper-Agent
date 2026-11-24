@@ -10,6 +10,7 @@ from src.models.artifacts import to_artifact_ref
 from src.models.sessions import utc_now
 from src.repositories.sessions.base import SessionRepository
 from src.services.sessions import SessionError
+from src.services.trace_state_history import build_state_history
 
 
 JsonObject = dict[str, Any]
@@ -21,6 +22,7 @@ _BUNDLE_FILES = (
     "diagnostics.json",
     "llm_calls.jsonl",
     "tool_calls.jsonl",
+    "state_history.jsonl",
     "report.md",
 )
 # 中文说明：V2 起全量导出、不再脱敏（用户拍板：防御不完备，反而可能洗掉排错信息）。
@@ -34,8 +36,15 @@ _EXPORT_WARNING = (
 class TraceBundleService:
     """把某次回合已经持久化的数据整理成可查看、可下载的轨迹包。"""
 
-    def __init__(self, repo: SessionRepository):
+    def __init__(self, repo: SessionRepository, checkpoint_bundle: Any = None):
         self._repo = repo
+        # 中文注释：checkpoint bundle 可选——没有它（旧测试/裸脚本）时
+        # state_history 优雅为空，其余导出内容不受影响。
+        self._checkpoint_bundle = checkpoint_bundle
+
+    def _state_history(self, thread_id: str | None) -> list[JsonObject]:
+        saver = getattr(self._checkpoint_bundle, "saver", None)
+        return build_state_history(saver, thread_id)
 
     def list_traces(self, session_key: str) -> JsonObject:
         """列出会话内可下载的回合，最新的排在前面。"""
@@ -65,6 +74,7 @@ class TraceBundleService:
             "events": self._repo.list_events(session_key, turn_id),
             "messages": self._repo.list_messages(session_key, turn_id),
             "artifacts": self._repo.list_artifacts(session_key, turn_id),
+            "state_history": self._state_history(summary.get("thread_id")),
         }
 
     def build_zip(self, session_key: str, turn_id: str) -> bytes:
@@ -89,6 +99,7 @@ class TraceBundleService:
         diagnostics = _extract_diagnostics(events)
         llm_calls = _llm_call_rows(events)
         tool_calls = _tool_call_rows(events)
+        state_history = self._state_history(snapshot.get("thread_id"))
 
         manifest = {
             "session_key": session_key,
@@ -104,9 +115,10 @@ class TraceBundleService:
             "artifact_count": len(artifact_refs),
             "llm_call_count": len(llm_calls),
             "tool_call_count": len(tool_calls),
+            "state_history_count": len(state_history),
             "files": list(_BUNDLE_FILES),
         }
-        report = _build_report(manifest, messages, events, artifact_refs, llm_calls, tool_calls)
+        report = _build_report(manifest, messages, events, artifact_refs, llm_calls, tool_calls, state_history)
         files = {
             "manifest.json": _json_bytes(manifest),
             "events.jsonl": _jsonl_bytes(events),
@@ -115,6 +127,7 @@ class TraceBundleService:
             "diagnostics.json": _json_bytes(diagnostics),
             "llm_calls.jsonl": _jsonl_bytes(llm_calls),
             "tool_calls.jsonl": _jsonl_bytes(tool_calls),
+            "state_history.jsonl": _jsonl_bytes(state_history),
             "report.md": report.encode("utf-8"),
         }
         buffer = io.BytesIO()
@@ -288,6 +301,7 @@ def _build_report(
     artifacts: list[JsonObject],
     llm_calls: list[JsonObject],
     tool_calls: list[JsonObject],
+    state_history: list[JsonObject],
 ) -> str:
     """生成不包含大段模型输出的简短人工可读摘要。"""
 
@@ -323,6 +337,11 @@ def _build_report(
             f"- 共 {len(tool_calls)} 次，失败 {tool_failed} 次",
             "- 逐条明细（参数/结果/耗时）见 `tool_calls.jsonl`。",
             "",
+            "## 状态快照",
+            "",
+            f"- 共 {len(state_history)} 张快照（按 thread 导出；续跑时一个 thread 可能跨多个回合）",
+            "- 每张快照记录与上一张的字段差分（完整新值），见 `state_history.jsonl`。",
+            "",
         ]
     )
 
@@ -352,7 +371,7 @@ def _build_report(
             "## 数据说明",
             "",
             "详细事件、消息和诊断信息请查看同目录下的 JSON/JSONL 文件；",
-            "模型与工具调用账本分别在 llm_calls.jsonl 与 tool_calls.jsonl。",
+            "模型与工具调用账本分别在 llm_calls.jsonl 与 tool_calls.jsonl，状态快照历史在 state_history.jsonl。",
             "",
         ]
     )

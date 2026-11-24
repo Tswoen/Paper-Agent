@@ -37,7 +37,9 @@ def create_sessions_router(
 
     router = APIRouter(prefix="/api/sessions", tags=["sessions"])
     resolved_run_service = run_service or SessionRunService(repo=repo, message_handler=message_handler)
-    trace_service = TraceBundleService(repo)
+    # 中文注释：带上 checkpoint bundle，轨迹导出才能附带状态快照历史；
+    # 服务层默认持有内存 bundle，测试/裸脚本路径也不会缺对象。
+    trace_service = TraceBundleService(repo, checkpoint_bundle=resolved_run_service.checkpoint_bundle)
 
     @router.get("")
     async def get_sessions() -> JsonObject:

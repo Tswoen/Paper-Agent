@@ -85,7 +85,8 @@ class TraceBundleTest(unittest.TestCase):
                 set(archive.namelist()),
                 {
                     "manifest.json", "events.jsonl", "messages.jsonl", "artifacts.json",
-                    "diagnostics.json", "llm_calls.jsonl", "tool_calls.jsonl", "report.md",
+                    "diagnostics.json", "llm_calls.jsonl", "tool_calls.jsonl",
+                    "state_history.jsonl", "report.md",
                 },
             )
             manifest = json.loads(archive.read("manifest.json"))
@@ -313,7 +314,49 @@ class TraceBundleTest(unittest.TestCase):
         payload = detail.json()
         self.assertEqual(payload["turn_id"], "turn-1")
         self.assertEqual(len(payload["events"]), 3)
+        self.assertIn("state_history", payload)
         self.assertEqual(missing.status_code, 404)
+
+    def test_state_history_in_zip_and_turn_detail(self):
+        from typing import TypedDict
+
+        from langgraph.graph import END, START, StateGraph
+
+        from src.graph.checkpointing import build_checkpoint_bundle
+        from src.llm.config import CheckpointSettings
+
+        class _S(TypedDict, total=False):
+            counter: int
+
+        bundle = build_checkpoint_bundle(CheckpointSettings(backend="memory"))
+        self.addCleanup(bundle.close)
+        graph = StateGraph(_S)
+        graph.add_node("bump", lambda state: {"counter": 1})
+        graph.add_edge(START, "bump")
+        graph.add_edge("bump", END)
+        app = graph.compile(checkpointer=bundle.saver)
+        thread_id = f"{self.session_key}:turn-1"
+        app.invoke({"counter": 0}, config={"configurable": {"thread_id": thread_id}})
+
+        service = TraceBundleService(self.repo, checkpoint_bundle=bundle)
+        with zipfile.ZipFile(io.BytesIO(service.build_zip(self.session_key, "turn-1"))) as archive:
+            manifest = json.loads(archive.read("manifest.json"))
+            rows = [json.loads(line) for line in archive.read("state_history.jsonl").decode("utf-8").splitlines()]
+            report = archive.read("report.md").decode("utf-8")
+        detail = service.turn_detail(self.session_key, "turn-1")
+
+        self.assertEqual(manifest["state_history_count"], len(rows))
+        self.assertGreaterEqual(len(rows), 3)
+        self.assertEqual(rows[-1]["changed"], {"counter": 1})
+        self.assertIn("状态快照", report)
+        self.assertEqual(detail["state_history"], rows)
+
+    def test_state_history_empty_without_bundle(self):
+        with self._zip() as archive:
+            self.assertEqual(archive.read("state_history.jsonl"), b"")
+            manifest = json.loads(archive.read("manifest.json"))
+        self.assertEqual(manifest["state_history_count"], 0)
+        self.assertEqual(self.service.turn_detail(self.session_key, "turn-1")["state_history"], [])
 
     def test_turn_ids_with_whitespace_remain_exact_and_isolated(self):
         padded_turn_id = " turn-1 "
