@@ -94,12 +94,25 @@ export interface SessionTraceListPayload {
   traces: SessionTraceSummary[];
 }
 
+/** 单张状态快照的差分记录（V3）。 */
+export interface StateHistoryRow {
+  seq: number;
+  checkpoint_id: string | null;
+  parent_checkpoint_id: string | null;
+  created_at: string | null;
+  source: string | null;
+  step: number | null;
+  changed: Record<string, unknown>;
+  removed_keys: string[];
+}
+
 /** 单个回合的轨迹正文（抽屉按需取数）。 */
 export interface SessionTurnTracePayload {
   turn_id: string;
   events: StoredSessionEvent[];
   messages: SessionMessageRecord[];
   artifacts: SessionArtifact[];
+  state_history: StateHistoryRow[];
 }
 
 /** 用户可以在提交主题时附带的检索和阅读限制。空字段不会写入请求。 */

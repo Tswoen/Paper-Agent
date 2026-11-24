@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { Bot, CalendarDays, Download, FileJson, LoaderCircle, PackageOpen, Wrench, X } from "lucide-vue-next";
+import { Bot, CalendarDays, Download, FileJson, History, LoaderCircle, PackageOpen, Wrench, X } from "lucide-vue-next";
 
 import { downloadSessionTrace, fetchSessionTraces, fetchSessionTurnTrace } from "../../api/sessions";
 import { SessionStreamAggregator } from "../../lib/session-stream-aggregator";
@@ -27,7 +27,7 @@ const loading = ref(true);
 const detailLoading = ref(false);
 const downloading = ref(false);
 const errorMessage = ref("");
-const activeTab = ref<"llm" | "tools" | "events" | "artifacts">("llm");
+const activeTab = ref<"llm" | "tools" | "state" | "events" | "artifacts">("llm");
 // 中文说明：目录（回合清单）预读，正文（含全量 prompt 的事件）按回合按需拉取并缓存，
 // 浏览器一次只承载一个回合的数据。
 const turnCache = new Map<string, SessionTurnTracePayload>();
@@ -60,6 +60,18 @@ const runtimeEvents = computed(() => {
 });
 
 const llmCalls = computed(() => selectedEvents.value.filter((event) => event.event_type === "llm_call"));
+
+const stateHistory = computed(() => turnData.value?.state_history ?? []);
+
+function changedKeysOf(row: { changed: Record<string, unknown> }): string[] {
+  return Object.keys(row.changed ?? {});
+}
+
+function sourceLabel(source: string | null): string {
+  if (source === "input") return "初始输入";
+  if (source === "loop") return "节点执行";
+  return source ?? "未知来源";
+}
 
 interface ToolRow {
   id: string;
@@ -363,6 +375,13 @@ function formatRawEvent(value: unknown) {
               </button>
               <button
                 type="button"
+                :data-active="activeTab === 'state'"
+                @click="activeTab = 'state'"
+              >
+                <History :size="14" />状态历史 {{ stateHistory.length }}
+              </button>
+              <button
+                type="button"
                 :data-active="activeTab === 'events'"
                 @click="activeTab = 'events'"
               >
@@ -430,6 +449,31 @@ function formatRawEvent(value: unknown) {
                 </div>
               </details>
               <div v-if="!toolRows.length" class="trace-panel-empty">该回合没有工具调用记录。</div>
+            </div>
+
+            <div v-else-if="activeTab === 'state'" class="trace-raw-events">
+              <details v-for="row in stateHistory" :key="row.seq" class="trace-raw-event">
+                <summary>
+                  <span>快照 #{{ row.seq }} · {{ sourceLabel(row.source) }}</span>
+                  <span class="trace-ledger-status" data-status="completed">
+                    {{ changedKeysOf(row).length }} 个字段变化 · {{ formatTime(row.created_at) }}
+                  </span>
+                </summary>
+                <div class="trace-ledger-body">
+                  <div class="trace-ledger-meta">
+                    <span>step {{ row.step }}</span>
+                    <span v-if="row.removed_keys.length" class="trace-ledger-retry">移除：{{ row.removed_keys.join("、") }}</span>
+                  </div>
+                  <template v-if="changedKeysOf(row).length">
+                    <div v-for="key in changedKeysOf(row)" :key="key">
+                      <h4>{{ key }}</h4>
+                      <pre>{{ formatRawEvent(row.changed[key]) }}</pre>
+                    </div>
+                  </template>
+                  <div v-else class="trace-ledger-meta">这张快照没有业务字段变化。</div>
+                </div>
+              </details>
+              <div v-if="!stateHistory.length" class="trace-panel-empty">该回合没有状态快照（存档可能已清理）。</div>
             </div>
 
             <div v-else-if="activeTab === 'events'" class="trace-raw-events">
