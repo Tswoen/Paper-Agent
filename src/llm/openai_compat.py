@@ -56,6 +56,7 @@ class OpenAICompatProvider(LLMProvider):
         return await self._run_llm_call(
             "chat",
             lambda: self._chat_once(messages, tools=tools, temperature=temperature, max_tokens=max_tokens, reasoning_effort=reasoning_effort),
+            messages=messages,
         )
 
     async def _chat_once(
@@ -94,6 +95,7 @@ class OpenAICompatProvider(LLMProvider):
         return await self._run_llm_call(
             "chat_stream",
             lambda: self._chat_stream_once(messages, callbacks, tools=tools, temperature=temperature, max_tokens=max_tokens, reasoning_effort=reasoning_effort),
+            messages=messages,
         )
 
     async def _chat_stream_once(
