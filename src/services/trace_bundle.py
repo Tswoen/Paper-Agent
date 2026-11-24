@@ -49,6 +49,24 @@ class TraceBundleService:
             traces.append(trace)
         return {"traces": traces}
 
+    def turn_detail(self, session_key: str, turn_id: str) -> JsonObject:
+        """读取单个回合的事件/消息/产物正文，供轨迹抽屉按需取数。
+
+        中文注释：与 webui-thread 的记录形状保持一致（产物带 id），
+        前端抽屉无需为按回合取数做结构适配。
+        """
+
+        summaries = self._repo.list_trace_turns(session_key)
+        summary = next((item for item in summaries if item.get("turn_id") == turn_id), None)
+        if summary is None:
+            raise SessionError(f"trace not found: {turn_id}", 404)
+        return {
+            "turn_id": turn_id,
+            "events": self._repo.list_events(session_key, turn_id),
+            "messages": self._repo.list_messages(session_key, turn_id),
+            "artifacts": self._repo.list_artifacts(session_key, turn_id),
+        }
+
     def build_zip(self, session_key: str, turn_id: str) -> bytes:
         """在内存中生成一个 turn 的 zip，不写入会话目录或长期临时文件。
 

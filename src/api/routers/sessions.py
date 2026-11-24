@@ -65,7 +65,7 @@ def create_sessions_router(
 
     @router.get("/{session_key}/traces/{turn_id}")
     async def download_trace(session_key: str, turn_id: str) -> StreamingResponse:
-        """下载一个回合的脱敏轨迹 zip，不在服务器上保留导出副本。"""
+        """下载一个回合的全量轨迹 zip，不在服务器上保留导出副本。"""
 
         payload = await asyncio.to_thread(trace_service.build_zip, session_key, turn_id)
         return StreamingResponse(
@@ -76,6 +76,12 @@ def create_sessions_router(
                 "Content-Disposition": f'attachment; filename="{_trace_filename(turn_id)}"',
             },
         )
+
+    @router.get("/{session_key}/traces/{turn_id}/events")
+    async def get_trace_turn_detail(session_key: str, turn_id: str) -> JsonObject:
+        """按回合返回事件/消息/产物正文，供轨迹抽屉按需加载。"""
+
+        return await asyncio.to_thread(trace_service.turn_detail, session_key, turn_id)
 
     @router.get("/{session_key}/artifacts/{artifact_id}")
     async def get_artifact(session_key: str, artifact_id: str) -> FileResponse:

@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { CalendarDays, Download, FileJson, LoaderCircle, PackageOpen, X } from "lucide-vue-next";
+import { Bot, CalendarDays, Download, FileJson, LoaderCircle, PackageOpen, Wrench, X } from "lucide-vue-next";
 
-import { downloadSessionTrace, fetchSessionThread, fetchSessionTraces } from "../../api/sessions";
+import { downloadSessionTrace, fetchSessionTraces, fetchSessionTurnTrace } from "../../api/sessions";
 import { SessionStreamAggregator } from "../../lib/session-stream-aggregator";
 import type {
-  SessionThread,
   SessionTraceSummary,
+  SessionTurnTracePayload,
+  StoredSessionEvent,
   UIRuntimeTimelineEvent,
 } from "../../types/sessions";
 import RuntimeEventTree from "./RuntimeEventTree.vue";
@@ -20,36 +21,34 @@ const emit = defineEmits<{
 }>();
 
 const traces = ref<SessionTraceSummary[]>([]);
-const thread = ref<SessionThread | null>(null);
+const turnData = ref<SessionTurnTracePayload | null>(null);
 const selectedTurnId = ref("");
 const loading = ref(true);
+const detailLoading = ref(false);
 const downloading = ref(false);
 const errorMessage = ref("");
-const activeTab = ref<"events" | "artifacts">("events");
+const activeTab = ref<"llm" | "tools" | "events" | "artifacts">("llm");
+// 中文说明：目录（回合清单）预读，正文（含全量 prompt 的事件）按回合按需拉取并缓存，
+// 浏览器一次只承载一个回合的数据。
+const turnCache = new Map<string, SessionTurnTracePayload>();
 let loadGeneration = 0;
+let detailGeneration = 0;
 
 const selectedTrace = computed(() => {
   return traces.value.find((trace) => trace.turn_id === selectedTurnId.value) ?? null;
 });
 
-const selectedEvents = computed(() => {
-  return (thread.value?.events ?? []).filter((event) => event.metadata.turn_id === selectedTurnId.value);
-});
-
-const selectedMessages = computed(() => {
-  return (thread.value?.messages ?? []).filter((message) => message.turn_id === selectedTurnId.value);
-});
-
-const selectedArtifacts = computed(() => {
-  return (thread.value?.artifacts ?? []).filter((artifact) => artifact.metadata.turn_id === selectedTurnId.value);
-});
+const selectedEvents = computed(() => turnData.value?.events ?? []);
+const selectedMessages = computed(() => turnData.value?.messages ?? []);
+const selectedArtifacts = computed(() => turnData.value?.artifacts ?? []);
 
 const runtimeEvents = computed(() => {
-  if (!thread.value || !selectedTrace.value) return [];
+  if (!turnData.value || !selectedTrace.value) return [];
   // 中文说明：抽屉使用独立聚合器，只重建选中的历史 turn，不影响外部实时时间线。
   const aggregator = new SessionStreamAggregator();
   aggregator.hydrate({
-    ...thread.value,
+    key: props.sessionKey,
+    title: "",
     status: selectedTrace.value.status,
     events: selectedEvents.value,
     messages: selectedMessages.value,
@@ -60,11 +59,103 @@ const runtimeEvents = computed(() => {
   return withoutResumeActions(aggregator.snapshot().runtimeEvents);
 });
 
+const llmCalls = computed(() => selectedEvents.value.filter((event) => event.event_type === "llm_call"));
+
+interface ToolRow {
+  id: string;
+  name: string;
+  stage: string;
+  status: string;
+  durationMs: number | null;
+  error: unknown;
+  args: unknown;
+  result: unknown;
+}
+
+const toolRows = computed<ToolRow[]>(() => {
+  // 中文说明：与 zip 导出同样的配对逻辑——开工单/完工单按 call_id 合并成一行。
+  const rows = new Map<string, ToolRow>();
+  const order: string[] = [];
+  for (const event of selectedEvents.value) {
+    if (event.event_type !== "tool_call") continue;
+    const meta = metaOf(event);
+    const payload = payloadOf(event);
+    const id = String(meta.id ?? event.id);
+    rows.set(id, {
+      id,
+      name: String(payload.name ?? "unknown"),
+      stage: String(meta.stage ?? ""),
+      status: "running",
+      durationMs: null,
+      error: null,
+      args: payload.args ?? null,
+      result: null,
+    });
+    order.push(id);
+  }
+  for (const event of selectedEvents.value) {
+    if (event.event_type !== "tool_result") continue;
+    const meta = metaOf(event);
+    const payload = payloadOf(event);
+    const id = String(meta.parent_id ?? "");
+    const row = rows.get(id);
+    if (row) {
+      row.status = String(meta.status ?? row.status);
+      row.durationMs = typeof meta.duration_ms === "number" ? meta.duration_ms : null;
+      row.error = meta.error ?? null;
+      row.result = payload.result ?? null;
+    } else {
+      const orphanId = id || String(meta.id ?? event.id);
+      rows.set(orphanId, {
+        id: orphanId,
+        name: String(payload.name ?? "unknown"),
+        stage: String(meta.stage ?? ""),
+        status: String(meta.status ?? "unknown"),
+        durationMs: typeof meta.duration_ms === "number" ? meta.duration_ms : null,
+        error: meta.error ?? null,
+        args: null,
+        result: payload.result ?? null,
+      });
+      order.push(orphanId);
+    }
+  }
+  return order.map((id) => rows.get(id)!).filter(Boolean);
+});
+
+function metaOf(event: StoredSessionEvent): Record<string, any> {
+  return (event.metadata ?? {}) as Record<string, any>;
+}
+
+function payloadOf(event: StoredSessionEvent): Record<string, any> {
+  return (metaOf(event).payload ?? {}) as Record<string, any>;
+}
+
+function promptOf(event: StoredSessionEvent): Array<{ role: string; content: string }> {
+  const prompt = payloadOf(event).prompt;
+  if (!Array.isArray(prompt)) return [];
+  return prompt.map((message: any) => ({
+    role: String(message?.role ?? ""),
+    content: typeof message?.content === "string" ? message.content : formatRawEvent(message?.content ?? null),
+  }));
+}
+
+function tokensOf(event: StoredSessionEvent): { input: number; output: number } {
+  const tokens = metaOf(event).tokens ?? {};
+  return {
+    input: Number(tokens.input_tokens ?? 0),
+    output: Number(tokens.output_tokens ?? 0),
+  };
+}
+
 watch(
   () => props.sessionKey,
   () => void loadTraceData(),
   { immediate: true },
 );
+
+watch(selectedTurnId, (turnId) => {
+  if (turnId) void loadTurnDetail(turnId);
+});
 
 onMounted(() => window.addEventListener("keydown", handleKeydown));
 onBeforeUnmount(() => window.removeEventListener("keydown", handleKeydown));
@@ -73,24 +164,49 @@ async function loadTraceData() {
   const generation = ++loadGeneration;
   loading.value = true;
   errorMessage.value = "";
-  thread.value = null;
+  turnData.value = null;
   traces.value = [];
+  turnCache.clear();
   try {
-    const [tracePayload, threadPayload] = await Promise.all([
-      fetchSessionTraces(props.sessionKey),
-      fetchSessionThread(props.sessionKey),
-    ]);
+    const tracePayload = await fetchSessionTraces(props.sessionKey);
     if (generation !== loadGeneration) return;
     traces.value = tracePayload.traces;
-    thread.value = threadPayload;
-    selectedTurnId.value = tracePayload.traces.some((trace) => trace.turn_id === selectedTurnId.value)
+    const nextTurn = tracePayload.traces.some((trace) => trace.turn_id === selectedTurnId.value)
       ? selectedTurnId.value
       : tracePayload.traces[0]?.turn_id ?? "";
+    if (nextTurn && nextTurn === selectedTurnId.value) {
+      // 回合未变化时 watch 不会触发，这里显式刷新正文。
+      await loadTurnDetail(nextTurn);
+    } else {
+      selectedTurnId.value = nextTurn;
+    }
   } catch (error) {
     if (generation !== loadGeneration) return;
     errorMessage.value = error instanceof Error ? error.message : "轨迹加载失败";
   } finally {
     if (generation === loadGeneration) loading.value = false;
+  }
+}
+
+async function loadTurnDetail(turnId: string) {
+  const generation = ++detailGeneration;
+  const cached = turnCache.get(turnId);
+  if (cached) {
+    turnData.value = cached;
+    return;
+  }
+  detailLoading.value = true;
+  try {
+    const payload = await fetchSessionTurnTrace(props.sessionKey, turnId);
+    if (generation !== detailGeneration) return;
+    turnCache.set(turnId, payload);
+    turnData.value = payload;
+  } catch (error) {
+    if (generation !== detailGeneration) return;
+    turnData.value = null;
+    errorMessage.value = error instanceof Error ? error.message : "回合数据加载失败";
+  } finally {
+    if (generation === detailGeneration) detailLoading.value = false;
   }
 }
 
@@ -233,6 +349,20 @@ function formatRawEvent(value: unknown) {
             <div class="trace-detail-tabs" role="tablist">
               <button
                 type="button"
+                :data-active="activeTab === 'llm'"
+                @click="activeTab = 'llm'"
+              >
+                <Bot :size="14" />LLM调用 {{ llmCalls.length }}
+              </button>
+              <button
+                type="button"
+                :data-active="activeTab === 'tools'"
+                @click="activeTab = 'tools'"
+              >
+                <Wrench :size="14" />工具调用 {{ toolRows.length }}
+              </button>
+              <button
+                type="button"
                 :data-active="activeTab === 'events'"
                 @click="activeTab = 'events'"
               >
@@ -247,7 +377,62 @@ function formatRawEvent(value: unknown) {
               </button>
             </div>
 
-            <div v-if="activeTab === 'events'" class="trace-raw-events">
+            <div v-if="detailLoading" class="trace-panel-empty">
+              <LoaderCircle class="spinning" :size="18" />
+            </div>
+
+            <div v-else-if="activeTab === 'llm'" class="trace-raw-events">
+              <details v-for="event in llmCalls" :key="event.id" class="trace-raw-event">
+                <summary>
+                  <span>{{ payloadOf(event).model }} · {{ payloadOf(event).operation }}</span>
+                  <span class="trace-ledger-status" :data-status="String(metaOf(event).status ?? '')">
+                    {{ statusLabel(String(metaOf(event).status ?? "")) }} · {{ metaOf(event).duration_ms }}ms
+                  </span>
+                </summary>
+                <div class="trace-ledger-body">
+                  <div class="trace-ledger-meta">
+                    <span>tokens ↑{{ tokensOf(event).input }} ↓{{ tokensOf(event).output }}</span>
+                    <span>尝试 {{ payloadOf(event).attempts }} 次</span>
+                    <span>节点 {{ metaOf(event).node_key }}</span>
+                    <span v-if="Number(payloadOf(event).attempts) > 1" class="trace-ledger-retry">含重试</span>
+                  </div>
+                  <div v-if="metaOf(event).error" class="trace-ledger-error">{{ formatRawEvent(metaOf(event).error) }}</div>
+                  <h4>Prompt</h4>
+                  <div v-for="(message, index) in promptOf(event)" :key="index" class="trace-prompt-message">
+                    <strong>[{{ message.role }}]</strong>
+                    <pre>{{ message.content }}</pre>
+                  </div>
+                  <h4>Response</h4>
+                  <pre>{{ payloadOf(event).response }}</pre>
+                  <template v-if="payloadOf(event).reasoning_content">
+                    <h4>Reasoning</h4>
+                    <pre>{{ payloadOf(event).reasoning_content }}</pre>
+                  </template>
+                </div>
+              </details>
+              <div v-if="!llmCalls.length" class="trace-panel-empty">该回合没有 LLM 调用记录。</div>
+            </div>
+
+            <div v-else-if="activeTab === 'tools'" class="trace-raw-events">
+              <details v-for="row in toolRows" :key="row.id" class="trace-raw-event">
+                <summary>
+                  <span>{{ row.name }}<template v-if="row.stage"> · {{ row.stage }}</template></span>
+                  <span class="trace-ledger-status" :data-status="row.status">
+                    {{ statusLabel(row.status) }}<template v-if="row.durationMs != null"> · {{ row.durationMs }}ms</template>
+                  </span>
+                </summary>
+                <div class="trace-ledger-body">
+                  <div v-if="row.error" class="trace-ledger-error">{{ formatRawEvent(row.error) }}</div>
+                  <h4>参数</h4>
+                  <pre>{{ formatRawEvent(row.args) }}</pre>
+                  <h4>结果</h4>
+                  <pre>{{ formatRawEvent(row.result) }}</pre>
+                </div>
+              </details>
+              <div v-if="!toolRows.length" class="trace-panel-empty">该回合没有工具调用记录。</div>
+            </div>
+
+            <div v-else-if="activeTab === 'events'" class="trace-raw-events">
               <details v-for="event in selectedEvents" :key="event.id" class="trace-raw-event">
                 <summary>
                   <span>#{{ event.seq_no }} {{ event.event_type }}</span>
@@ -277,7 +462,7 @@ function formatRawEvent(value: unknown) {
         </div>
         <footer class="trace-drawer-footer">
           <CalendarDays :size="13" />
-          <span>数据来自现有会话事件、消息与产物；zip 导出会移除密钥和本地路径。</span>
+          <span>数据来自会话事件、消息与产物；zip 为全量导出、未经脱敏，分享前请自行检查敏感信息，必要时更换 API key。</span>
         </footer>
       </template>
     </aside>
@@ -532,6 +717,75 @@ function formatRawEvent(value: unknown) {
   line-height: 1.55;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.trace-ledger-body {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.trace-ledger-body h4 {
+  margin: 4px 0 0;
+  color: var(--text-soft);
+  font-size: 0.66rem;
+}
+
+.trace-ledger-body pre {
+  max-height: 300px;
+  margin: 0;
+  overflow: auto;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.trace-ledger-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 0.64rem;
+}
+
+.trace-ledger-retry {
+  color: var(--danger);
+}
+
+.trace-ledger-error {
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-family: var(--font-mono);
+  font-size: 0.64rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.trace-ledger-status[data-status="failed"] {
+  color: var(--danger);
+}
+
+.trace-ledger-status[data-status="completed"] {
+  color: var(--accent);
+}
+
+.trace-prompt-message strong {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--text-soft);
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
 }
 
 .trace-artifact-item {

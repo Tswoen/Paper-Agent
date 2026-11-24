@@ -276,6 +276,45 @@ class TraceBundleTest(unittest.TestCase):
         self.assertEqual(manifest["llm_call_count"], 0)
         self.assertEqual(manifest["tool_call_count"], 0)
 
+    def test_turn_detail_returns_only_requested_turn(self):
+        detail = self.service.turn_detail(self.session_key, "turn-1")
+
+        self.assertEqual(detail["turn_id"], "turn-1")
+        self.assertEqual([event["seq_no"] for event in detail["events"]], [1, 2, 3])
+        self.assertTrue(all(event["metadata"]["turn_id"] == "turn-1" for event in detail["events"]))
+        self.assertEqual(len(detail["messages"]), 2)
+        self.assertEqual(len(detail["artifacts"]), 1)
+        self.assertIn("id", detail["artifacts"][0])
+
+    def test_turn_detail_missing_turn_is_a_404(self):
+        with self.assertRaises(SessionError) as missing:
+            self.service.turn_detail(self.session_key, "missing")
+        self.assertEqual(missing.exception.status, 404)
+
+    def test_http_turn_detail_endpoint(self):
+        settings = SettingsRepository(
+            initial={
+                "providers": {"openai": {"api_key": "sk-test", "api_base": "https://api.openai.com/v1"}},
+                "agents": {"default_agent": {"model_name": "gpt-5-mini", "provider": "openai"}},
+                "embedding_profiles": {},
+            }
+        )
+        app = create_app(
+            settings_repo=settings,
+            sessions_repo=self.repo,
+            config=GatewayConfig(),
+            checkpoint_bundle=build_checkpoint_bundle(CheckpointSettings(backend="memory")),
+        )
+        with TestClient(app) as client:
+            detail = client.get(f"/api/sessions/{self.session_key}/traces/turn-1/events")
+            missing = client.get(f"/api/sessions/{self.session_key}/traces/missing/events")
+
+        self.assertEqual(detail.status_code, 200)
+        payload = detail.json()
+        self.assertEqual(payload["turn_id"], "turn-1")
+        self.assertEqual(len(payload["events"]), 3)
+        self.assertEqual(missing.status_code, 404)
+
     def test_turn_ids_with_whitespace_remain_exact_and_isolated(self):
         padded_turn_id = " turn-1 "
         self.repo.append_message(self.session_key, "user", "带空格的独立回合", turn_id=padded_turn_id)

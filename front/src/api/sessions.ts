@@ -6,6 +6,7 @@ import type {
   SessionRuntimeEvent,
   SessionThreadPayload,
   SessionTraceListPayload,
+  SessionTurnTracePayload,
 } from "../types/sessions";
 
 type JsonObject = Record<string, unknown>;
@@ -74,6 +75,12 @@ export function fetchSessionThread(sessionKey: string): Promise<SessionThreadPay
 
 export function fetchSessionTraces(sessionKey: string): Promise<SessionTraceListPayload> {
   return request<SessionTraceListPayload>(`/api/sessions/${encodeURIComponent(sessionKey)}/traces`);
+}
+
+export function fetchSessionTurnTrace(sessionKey: string, turnId: string): Promise<SessionTurnTracePayload> {
+  return request<SessionTurnTracePayload>(
+    `/api/sessions/${encodeURIComponent(sessionKey)}/traces/${encodeURIComponent(turnId)}/events`,
+  );
 }
 
 export async function downloadSessionTrace(sessionKey: string, turnId: string): Promise<void> {

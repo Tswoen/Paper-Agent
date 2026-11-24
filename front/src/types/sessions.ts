@@ -94,6 +94,14 @@ export interface SessionTraceListPayload {
   traces: SessionTraceSummary[];
 }
 
+/** 单个回合的轨迹正文（抽屉按需取数）。 */
+export interface SessionTurnTracePayload {
+  turn_id: string;
+  events: StoredSessionEvent[];
+  messages: SessionMessageRecord[];
+  artifacts: SessionArtifact[];
+}
+
 /** 用户可以在提交主题时附带的检索和阅读限制。空字段不会写入请求。 */
 export interface SessionConstraints {
   year_from?: number;
