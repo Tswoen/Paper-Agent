@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -16,11 +18,17 @@ from src.graph.search_node import run_search_agent_node
 from src.graph.state_models import State
 from src.graph.writing_outline_node import run_writing_outline_node
 from src.graph.writing_node import run_writing_node
+from src.models.sessions import utc_now
 from src.repositories.sessions.base import SessionRepository
+from src.trace.context import bind_trace_context, emit_trace_event
+from src.utils import get_logger
 
 
 if TYPE_CHECKING:
     from langgraph.runtime import Runtime
+
+
+logger = get_logger(__name__)
 
 
 @dataclass(slots=True)
@@ -85,7 +93,11 @@ def build_graph(*, checkpointer: Any = None):
 
 
 def _with_cancellation_boundary(node_name: str, node):
-    """给所有图节点加上统一的停止检查与状态字段校验，避免节点里重复写样板代码。"""
+    """给所有图节点加上统一的停止检查与状态字段校验，避免节点里重复写样板代码。
+
+    中文注释：Trace V2 在这里追加节点工序牌（node_start/node_end）与 trace
+    上下文绑定。原有停止检查与字段门禁的时机、顺序完全不变；记账失败绝不影响节点。
+    """
 
     async def _guarded(state: State, runtime: Runtime[WorkflowRuntimeContext] | None) -> State:
         """开始和结束节点时各检查一次，已完成的当前节点不会再启动下一个节点。"""
@@ -96,17 +108,83 @@ def _with_cancellation_boundary(node_name: str, node):
         if cancellation is not None:
             cancellation.raise_if_requested()
 
-        result = await node(state, runtime)
-        _check_declared_state_keys(node_name, result)
+        sync_port = getattr(context, "sync_port", None)
+        if sync_port is None:
+            # 中文注释：没有会话管道的裸调用保持原路径，零事件零开销。
+            result = await node(state, runtime)
+            _check_declared_state_keys(node_name, result)
+            if cancellation is not None:
+                cancellation.raise_if_requested()
+            return result
 
-        # 中文注释：如果用户在节点执行期间点了停止，丢弃这个节点尚未提交的结果，
-        # 让恢复时从上一个稳定状态重新执行，避免把半成品误认为已经完成。
-        if cancellation is not None:
-            cancellation.raise_if_requested()
-        return result
+        # 中文注释：node_event_id 与前端节点进度卡片同 id，节点内的 llm_call
+        # 等 trace 事件以它为父级，构成"节点 → 调用"的归属链。
+        turn_id = str(getattr(sync_port, "turn_id", "") or "session")
+        node_event_id = f"{turn_id}:{node_name}"
+        started_perf = time.perf_counter()
+        started_wall = utc_now()
+        with bind_trace_context(sync_port.emit, node_key=node_name, parent_id=node_event_id):
+            _emit_node_trace(node_name, "node_start", status="running", started_wall=started_wall, started_perf=started_perf)
+            try:
+                result = await node(state, runtime)
+                _check_declared_state_keys(node_name, result)
+
+                # 中文注释：如果用户在节点执行期间点了停止，丢弃这个节点尚未提交的结果，
+                # 让恢复时从上一个稳定状态重新执行，避免把半成品误认为已经完成。
+                if cancellation is not None:
+                    cancellation.raise_if_requested()
+            except asyncio.CancelledError:
+                # 中文注释：临死留张字条，然后原样冒泡——不吞、不包装、不改取消语义。
+                _emit_node_trace(node_name, "node_end", status="cancelled", started_wall=started_wall, started_perf=started_perf)
+                raise
+            except Exception as exc:
+                _emit_node_trace(
+                    node_name,
+                    "node_end",
+                    status="failed",
+                    started_wall=started_wall,
+                    started_perf=started_perf,
+                    error={"kind": type(exc).__name__, "message": str(exc)},
+                )
+                raise
+            # 中文注释：completed 牌在停止检查之后才发，如实反映"结果已被提交"。
+            _emit_node_trace(node_name, "node_end", status="completed", started_wall=started_wall, started_perf=started_perf, result=result)
+            return result
 
     _guarded.__name__ = f"{node_name}_with_cancellation"
     return _guarded
+
+
+def _emit_node_trace(
+    node_name: str,
+    event_type: str,
+    *,
+    status: str,
+    started_wall: str,
+    started_perf: float,
+    result: Any = None,
+    error: dict[str, Any] | None = None,
+) -> None:
+    """发一张节点工序牌；构造/发送任何异常只记警告，绝不影响节点本身。"""
+
+    try:
+        payload: dict[str, Any] = {}
+        if isinstance(result, dict):
+            # 中文注释：节点只返回变化的键，键列表天然就是本节点的状态改动清单；
+            # 体积只量返回值这份差分，不 dump 全量 state（里面塞着论文全文）。
+            payload["changed_keys"] = sorted(result.keys())
+            payload["result_bytes"] = len(json.dumps(result, ensure_ascii=False, default=str).encode("utf-8"))
+        emit_trace_event(
+            event_type,
+            status=status,
+            started_at=started_wall,
+            duration_ms=int((time.perf_counter() - started_perf) * 1000),
+            error=error,
+            payload=payload,
+            content=f"{node_name} {status}",
+        )
+    except Exception:
+        logger.warning("node trace 事件构造失败（不影响运行）", exc_info=True)
 
 
 async def run_graph(
