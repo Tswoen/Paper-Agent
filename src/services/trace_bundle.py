@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import io
 import json
-import re
 import zipfile
 from typing import Any
 from urllib.parse import quote
@@ -14,47 +13,22 @@ from src.services.sessions import SessionError
 
 
 JsonObject = dict[str, Any]
-TRACE_VERSION = 1
-MAX_STRING_LENGTH = 20_000
 _BUNDLE_FILES = (
     "manifest.json",
     "events.jsonl",
     "messages.jsonl",
     "artifacts.json",
     "diagnostics.json",
+    "llm_calls.jsonl",
+    "tool_calls.jsonl",
     "report.md",
 )
-_SENSITIVE_KEYS = {
-    "api_key",
-    "apikey",
-    "authorization",
-    "password",
-    "passwd",
-    "secret",
-    "client_secret",
-    "access_token",
-    "refresh_token",
-}
-_PATH_KEYS = {
-    "path",
-    "local_path",
-    "absolute_path",
-    "source_path",
-    "markdown_path",
-    "storage_root",
-    "vector_store_path",
-    "checkpoint_path",
-}
-_SECRET_PATTERNS = (
-    (re.compile(r"\bsk-[A-Za-z0-9_-]{4,}\b"), "[REDACTED]"),
-    (re.compile(r"\blsv2_[A-Za-z0-9_-]{4,}\b"), "[REDACTED]"),
-    (re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+"), "Bearer [REDACTED]"),
+# 中文说明：V2 起全量导出、不再脱敏（用户拍板：防御不完备，反而可能洗掉排错信息）。
+# 出口只留醒目提示，敏感信息的处置责任交给分享者；漏 key 的 remedy 是更换 key。
+_EXPORT_WARNING = (
+    "> **安全提示**：本包为全量导出，未经脱敏，可能包含 API key 与本机路径等敏感信息。\n"
+    "> 分享前请自行检查内容；若已外发，建议更换相关 API key。\n"
 )
-_WINDOWS_PATH_PATTERN = re.compile(r"(?i)(?<![A-Za-z0-9_])[A-Z]:[\\/](?:[^\s\"'<>|]+)")
-_UNC_PATH_PATTERN = re.compile(r"(?<![:/\w])(?:\\\\[^\\\s]+\\|//[^/\s]+/)[^\s\"'<>|]+")
-# 中文说明：POSIX 根目录不应靠白名单枚举；排除 URL 的 :// 前缀后，覆盖所有绝对路径。
-_POSIX_PATH_PATTERN = re.compile(r"(?<![:/\w])/(?:[^\s/\"'<>|]+/)*[^\s/\"'<>|]+")
-_FILE_URL_PATTERN = re.compile(r"(?i)\bfile://[^\s\"'<>|]+")
 
 
 class TraceBundleService:
@@ -76,7 +50,12 @@ class TraceBundleService:
         return {"traces": traces}
 
     def build_zip(self, session_key: str, turn_id: str) -> bytes:
-        """在内存中生成一个 turn 的 zip，不写入会话目录或长期临时文件。"""
+        """在内存中生成一个 turn 的 zip，不写入会话目录或长期临时文件。
+
+        中文注释：全量保真导出——事件、消息、产物原文打包，不脱敏、不截断。
+        llm_calls/tool_calls 是从事件整理出的账本视图，原始事件仍全量保留在
+        events.jsonl 里。
+        """
 
         summaries = self._repo.list_trace_turns(session_key)
         summary = next((item for item in summaries if item.get("turn_id") == turn_id), None)
@@ -88,14 +67,12 @@ class TraceBundleService:
         artifacts = self._repo.list_artifacts(session_key, turn_id)
         # 运行中下载时列表和正文可能读到不同时间点；manifest 以实际打包内容为基准重算。
         snapshot = _snapshot_summary(summary, events, messages, artifacts)
-        sanitizer = _TraceSanitizer()
-        safe_events = [sanitizer.sanitize(event) for event in events]
-        safe_messages = [sanitizer.sanitize(message) for message in messages]
-        safe_artifacts = [sanitizer.sanitize(to_artifact_ref(artifact)) for artifact in artifacts]
-        diagnostics = _extract_diagnostics(safe_events)
+        artifact_refs = [to_artifact_ref(artifact) for artifact in artifacts]
+        diagnostics = _extract_diagnostics(events)
+        llm_calls = _llm_call_rows(events)
+        tool_calls = _tool_call_rows(events)
 
         manifest = {
-            "trace_version": TRACE_VERSION,
             "session_key": session_key,
             "turn_id": turn_id,
             "run_id": snapshot.get("run_id"),
@@ -104,19 +81,22 @@ class TraceBundleService:
             "started_at": snapshot.get("started_at"),
             "finished_at": snapshot.get("finished_at"),
             "generated_at": utc_now(),
-            "event_count": len(safe_events),
-            "message_count": len(safe_messages),
-            "artifact_count": len(safe_artifacts),
-            "truncated": sanitizer.truncated,
+            "event_count": len(events),
+            "message_count": len(messages),
+            "artifact_count": len(artifact_refs),
+            "llm_call_count": len(llm_calls),
+            "tool_call_count": len(tool_calls),
             "files": list(_BUNDLE_FILES),
         }
-        report = _build_report(manifest, safe_messages, safe_events, safe_artifacts)
+        report = _build_report(manifest, messages, events, artifact_refs, llm_calls, tool_calls)
         files = {
             "manifest.json": _json_bytes(manifest),
-            "events.jsonl": _jsonl_bytes(safe_events),
-            "messages.jsonl": _jsonl_bytes(safe_messages),
-            "artifacts.json": _json_bytes(safe_artifacts),
+            "events.jsonl": _jsonl_bytes(events),
+            "messages.jsonl": _jsonl_bytes(messages),
+            "artifacts.json": _json_bytes(artifact_refs),
             "diagnostics.json": _json_bytes(diagnostics),
+            "llm_calls.jsonl": _jsonl_bytes(llm_calls),
+            "tool_calls.jsonl": _jsonl_bytes(tool_calls),
             "report.md": report.encode("utf-8"),
         }
         buffer = io.BytesIO()
@@ -126,44 +106,92 @@ class TraceBundleService:
         return buffer.getvalue()
 
 
-class _TraceSanitizer:
-    """递归清理导出数据中的密钥、本地路径和超长文本。"""
+def _llm_call_rows(events: list[JsonObject]) -> list[JsonObject]:
+    """把 llm_call 事件整理成账本行：信封原文 + 持久化序号/时间。"""
 
-    def __init__(self):
-        self.truncated = False
+    rows: list[JsonObject] = []
+    for event in events:
+        if str(event.get("event_type") or "") != "llm_call":
+            continue
+        metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+        rows.append(
+            {
+                "seq_no": event.get("seq_no"),
+                "created_at": event.get("created_at"),
+                **metadata,
+            }
+        )
+    return rows
 
-    def sanitize(self, value: Any, *, key: str = "") -> Any:
-        normalized_key = key.lower().replace("-", "_")
-        if normalized_key in _SENSITIVE_KEYS:
-            return "[REDACTED]"
-        if isinstance(value, dict):
-            sanitized: JsonObject = {}
-            for item_key, item_value in value.items():
-                normalized_item_key = str(item_key)
-                if normalized_item_key.lower().replace("-", "_") in _PATH_KEYS:
-                    continue
-                sanitized[normalized_item_key] = self.sanitize(item_value, key=normalized_item_key)
-            return sanitized
-        if isinstance(value, (list, tuple)):
-            return [self.sanitize(item) for item in value]
-        if isinstance(value, str):
-            return self._sanitize_text(value)
-        if value is None or isinstance(value, (bool, int, float)):
-            return value
-        return self._sanitize_text(str(value))
 
-    def _sanitize_text(self, value: str) -> str:
-        sanitized = value
-        for pattern, replacement in _SECRET_PATTERNS:
-            sanitized = pattern.sub(replacement, sanitized)
-        sanitized = _FILE_URL_PATTERN.sub("[REMOVED_PATH]", sanitized)
-        sanitized = _WINDOWS_PATH_PATTERN.sub("[REMOVED_PATH]", sanitized)
-        sanitized = _UNC_PATH_PATTERN.sub("[REMOVED_PATH]", sanitized)
-        sanitized = _POSIX_PATH_PATTERN.sub("[REMOVED_PATH]", sanitized)
-        if len(sanitized) > MAX_STRING_LENGTH:
-            self.truncated = True
-            sanitized = sanitized[:MAX_STRING_LENGTH] + "\n…[truncated]"
-        return sanitized
+def _tool_call_rows(events: list[JsonObject]) -> list[JsonObject]:
+    """把 tool_call/tool_result 按 call_id 合并成一行，方便直接回看。
+
+    中文注释：只有开工单没有完工单（如运行中崩溃）时保留 running 状态；
+    孤儿完工单也原样导出，全量保真不丢信息。
+    """
+
+    calls: dict[str, JsonObject] = {}
+    results: dict[str, JsonObject] = {}
+    order: list[str] = []
+    for event in events:
+        metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+        event_type = str(event.get("event_type") or "")
+        if event_type == "tool_call":
+            call_id = str(metadata.get("id") or "")
+            if not call_id:
+                continue
+            payload = metadata.get("payload") if isinstance(metadata.get("payload"), dict) else {}
+            calls[call_id] = {
+                "call_id": call_id,
+                "name": payload.get("name"),
+                "node_key": metadata.get("node_key"),
+                "stage": metadata.get("stage"),
+                "status": "running",
+                "started_at": metadata.get("started_at"),
+                "created_at": event.get("created_at"),
+                "seq_no": event.get("seq_no"),
+                "args": payload.get("args") if payload.get("args") is not None else {},
+                "result": None,
+                "duration_ms": None,
+                "error": None,
+            }
+            order.append(call_id)
+        elif event_type == "tool_result":
+            parent_id = str(metadata.get("parent_id") or "")
+            if parent_id:
+                results[parent_id] = metadata
+
+    rows: list[JsonObject] = []
+    for call_id in order:
+        row = calls[call_id]
+        result = results.pop(call_id, None)
+        if result is not None:
+            payload = result.get("payload") if isinstance(result.get("payload"), dict) else {}
+            row["status"] = result.get("status") or row["status"]
+            row["duration_ms"] = result.get("duration_ms")
+            row["error"] = result.get("error")
+            row["result"] = payload.get("result")
+        rows.append(row)
+    for call_id, result in results.items():
+        payload = result.get("payload") if isinstance(result.get("payload"), dict) else {}
+        rows.append(
+            {
+                "call_id": call_id,
+                "name": payload.get("name"),
+                "node_key": result.get("node_key"),
+                "stage": result.get("stage"),
+                "status": result.get("status"),
+                "started_at": result.get("started_at"),
+                "created_at": None,
+                "seq_no": None,
+                "args": None,
+                "result": payload.get("result"),
+                "duration_ms": result.get("duration_ms"),
+                "error": result.get("error"),
+            }
+        )
+    return rows
 
 
 def _snapshot_summary(
@@ -240,13 +268,15 @@ def _build_report(
     messages: list[JsonObject],
     events: list[JsonObject],
     artifacts: list[JsonObject],
+    llm_calls: list[JsonObject],
+    tool_calls: list[JsonObject],
 ) -> str:
     """生成不包含大段模型输出的简短人工可读摘要。"""
 
     lines = [
         "# Paper Agent 运行轨迹",
         "",
-        f"- Trace 版本：{manifest['trace_version']}",
+        _EXPORT_WARNING,
         f"- 会话：`{manifest['session_key']}`",
         f"- 回合：`{manifest['turn_id']}`",
         f"- 状态：{manifest['status']}",
@@ -258,6 +288,25 @@ def _build_report(
     user_message = next((item for item in messages if item.get("role") == "user"), None)
     if user_message:
         lines.extend(["## 用户输入", "", _preview(str(user_message.get("content") or "")), ""])
+
+    llm_failed = sum(1 for row in llm_calls if row.get("status") == "failed")
+    input_tokens = sum(int((row.get("tokens") or {}).get("input_tokens") or 0) for row in llm_calls)
+    output_tokens = sum(int((row.get("tokens") or {}).get("output_tokens") or 0) for row in llm_calls)
+    tool_failed = sum(1 for row in tool_calls if row.get("status") == "failed")
+    lines.extend(
+        [
+            "## 模型调用",
+            "",
+            f"- 共 {len(llm_calls)} 次，失败 {llm_failed} 次；token 输入 / 输出：{input_tokens} / {output_tokens}",
+            "- 逐条明细（含完整 prompt/response）见 `llm_calls.jsonl`。",
+            "",
+            "## 工具调用",
+            "",
+            f"- 共 {len(tool_calls)} 次，失败 {tool_failed} 次",
+            "- 逐条明细（参数/结果/耗时）见 `tool_calls.jsonl`。",
+            "",
+        ]
+    )
 
     errors = []
     for event in events:
@@ -279,7 +328,16 @@ def _build_report(
             lines.append(f"- `{name}`（{artifact_type}，{size} bytes）")
     else:
         lines.append("本次回合没有登记产物。")
-    lines.extend(["", "## 数据说明", "", "详细事件、消息和诊断信息请查看同目录下的 JSON/JSONL 文件。", ""])
+    lines.extend(
+        [
+            "",
+            "## 数据说明",
+            "",
+            "详细事件、消息和诊断信息请查看同目录下的 JSON/JSONL 文件；",
+            "模型与工具调用账本分别在 llm_calls.jsonl 与 tool_calls.jsonl。",
+            "",
+        ]
+    )
     return "\n".join(lines)
 
 

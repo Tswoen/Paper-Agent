@@ -14,11 +14,11 @@ from src.llm.config import CheckpointSettings
 from src.repositories.sessions.sqlite import SQLiteSessionRepository
 from src.services.sessions import SessionError
 from src.repositories.settings.json import SettingsRepository
-from src.services.trace_bundle import MAX_STRING_LENGTH, TraceBundleService
+from src.services.trace_bundle import TraceBundleService
 
 
 class TraceBundleTest(unittest.TestCase):
-    """验证轨迹按回合隔离、zip 结构、脱敏和 HTTP 下载契约。"""
+    """验证轨迹按回合隔离、zip 结构、全量导出和 HTTP 下载契约。"""
 
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -83,7 +83,10 @@ class TraceBundleTest(unittest.TestCase):
         with self._zip() as archive:
             self.assertEqual(
                 set(archive.namelist()),
-                {"manifest.json", "events.jsonl", "messages.jsonl", "artifacts.json", "diagnostics.json", "report.md"},
+                {
+                    "manifest.json", "events.jsonl", "messages.jsonl", "artifacts.json",
+                    "diagnostics.json", "llm_calls.jsonl", "tool_calls.jsonl", "report.md",
+                },
             )
             manifest = json.loads(archive.read("manifest.json"))
             events = [json.loads(line) for line in archive.read("events.jsonl").decode("utf-8").splitlines()]
@@ -92,9 +95,11 @@ class TraceBundleTest(unittest.TestCase):
             diagnostics = json.loads(archive.read("diagnostics.json"))
             report = archive.read("report.md").decode("utf-8")
 
-        self.assertEqual(manifest["trace_version"], 1)
+        self.assertNotIn("trace_version", manifest)
         self.assertEqual(manifest["turn_id"], "turn-1")
         self.assertEqual(manifest["event_count"], 3)
+        self.assertEqual(manifest["llm_call_count"], 0)
+        self.assertEqual(manifest["tool_call_count"], 0)
         self.assertEqual([event["seq_no"] for event in events], [1, 2, 3])
         self.assertTrue(all(event["metadata"]["turn_id"] == "turn-1" for event in events))
         self.assertTrue(all(message["turn_id"] == "turn-1" for message in messages))
@@ -104,19 +109,18 @@ class TraceBundleTest(unittest.TestCase):
         self.assertIn("研究主题 turn-1", report)
         self.assertNotIn("turn-2", report)
 
-    def test_bundle_redacts_secrets_paths_and_truncates_long_payloads(self):
+    def test_bundle_exports_full_fidelity_without_redaction(self):
+        # 中文注释：V2 契约反转——全量导出，密钥/路径/超长内容原样保留，
+        # 出口只在 report 里提示分享者自行检查、必要时更换 API key。
         secret = "sk-live-secret-value"
         windows_path = r"C:\Users\someone\data\sessions\private\note.json"
         posix_path = "/data/sessions/private/note.json"
-        usr_path = "/usr/local/private/note.json"
-        unc_path = r"\\server\share\note.json"
-        file_url = "file:///data/sessions/private/note.json"
-        web_url = "https://example.com/data/sessions/private"
-        self.repo.append_message(self.session_key, "user", "x" * (MAX_STRING_LENGTH + 50), turn_id="turn-1")
+        long_content = "x" * 25_000
+        self.repo.append_message(self.session_key, "user", long_content, turn_id="turn-1")
         self.repo.append_event(
             self.session_key,
             "error",
-            content=f"无法读取 {windows_path}、{posix_path}、{usr_path}、{unc_path}、{file_url}；文档见 {web_url}",
+            content=f"无法读取 {windows_path}、{posix_path}",
             metadata={
                 "turn_id": "turn-1",
                 "api_key": secret,
@@ -129,26 +133,148 @@ class TraceBundleTest(unittest.TestCase):
             manifest = json.loads(archive.read("manifest.json"))
             events = [json.loads(line) for line in archive.read("events.jsonl").decode("utf-8").splitlines()]
             messages = [json.loads(line) for line in archive.read("messages.jsonl").decode("utf-8").splitlines()]
+            report = archive.read("report.md").decode("utf-8")
 
-        self.assertNotIn(secret.encode(), raw)
-        self.assertNotIn(b"private-token", raw)
-        self.assertNotIn(windows_path.encode(), raw)
-        self.assertNotIn(posix_path.encode(), raw)
-        self.assertNotIn(usr_path.encode(), raw)
-        self.assertNotIn(unc_path.encode(), raw)
-        self.assertNotIn(file_url.encode(), raw)
-        self.assertNotIn(b"C:\\Users", raw)
-        self.assertIn(web_url.encode(), raw)
-        self.assertTrue(manifest["truncated"])
-        self.assertEqual(events[-1]["metadata"]["api_key"], "[REDACTED]")
-        self.assertEqual(events[-1]["metadata"]["nested"]["authorization"], "[REDACTED]")
-        self.assertNotIn("source_path", events[-1]["metadata"]["nested"])
-        sanitized_content = events[-1]["content"]
-        for path in (windows_path, posix_path, usr_path, unc_path, file_url):
-            self.assertNotIn(path, sanitized_content)
-        self.assertIn("[REMOVED_PATH]", sanitized_content)
-        self.assertIn(web_url, sanitized_content)
-        self.assertTrue(messages[-1]["content"].endswith("…[truncated]"))
+        self.assertIn(secret.encode(), raw)
+        self.assertIn(b"private-token", raw)
+        self.assertIn(windows_path.encode(), raw)
+        self.assertIn(posix_path.encode(), raw)
+        self.assertNotIn("truncated", manifest)
+        self.assertEqual(events[-1]["metadata"]["api_key"], secret)
+        self.assertEqual(events[-1]["metadata"]["nested"]["authorization"], "Bearer private-token")
+        self.assertEqual(events[-1]["metadata"]["nested"]["source_path"], windows_path)
+        self.assertIn(windows_path, events[-1]["content"])
+        self.assertEqual(messages[-1]["content"], long_content)
+        self.assertIn("未经脱敏", report)
+        self.assertIn("建议更换相关 API key", report)
+
+    def _append_trace_event(self, turn_id: str, event_type: str, metadata: dict):
+        self.repo.append_event(
+            self.session_key,
+            event_type,
+            content=str(metadata.get("content") or ""),
+            metadata={"turn_id": turn_id, **metadata},
+        )
+
+    def test_llm_calls_ledger_exports_full_envelope(self):
+        long_prompt = "论文全文" * 6000
+        self._append_trace_event(
+            "turn-1",
+            "llm_call",
+            {
+                "event": "llm_call",
+                "id": "llm-1",
+                "parent_id": "turn-1:read",
+                "type": "llm_call",
+                "node_key": "read",
+                "status": "completed",
+                "started_at": "2026-11-18T10:00:01+00:00",
+                "duration_ms": 8340,
+                "tokens": {"input_tokens": 5200, "output_tokens": 610},
+                "error": None,
+                "payload": {
+                    "operation": "chat",
+                    "model": "deepseek-chat",
+                    "attempts": 2,
+                    "prompt": [{"role": "user", "content": long_prompt}],
+                    "response": "阅读完成",
+                },
+            },
+        )
+
+        with self._zip() as archive:
+            manifest = json.loads(archive.read("manifest.json"))
+            rows = [json.loads(line) for line in archive.read("llm_calls.jsonl").decode("utf-8").splitlines()]
+            report = archive.read("report.md").decode("utf-8")
+
+        self.assertEqual(manifest["llm_call_count"], 1)
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["id"], "llm-1")
+        self.assertEqual(row["parent_id"], "turn-1:read")
+        self.assertEqual(row["node_key"], "read")
+        self.assertEqual(row["tokens"], {"input_tokens": 5200, "output_tokens": 610})
+        self.assertEqual(row["payload"]["attempts"], 2)
+        self.assertEqual(row["payload"]["prompt"][0]["content"], long_prompt)
+        self.assertEqual(row["payload"]["response"], "阅读完成")
+        self.assertIn("共 1 次", report)
+        self.assertIn("5200 / 610", report)
+
+    def test_tool_calls_ledger_merges_pairs_and_keeps_unfinished(self):
+        self._append_trace_event(
+            "turn-1",
+            "tool_call",
+            {
+                "event": "tool_call",
+                "id": "call-1",
+                "parent_id": "turn-1:read",
+                "node_key": "read",
+                "stage": "downloading_full_text",
+                "status": "running",
+                "started_at": "2026-11-18T10:00:01+00:00",
+                "payload": {"name": "download_fulltext", "args": {"paper_id": "P3"}},
+            },
+        )
+        self._append_trace_event(
+            "turn-1",
+            "tool_result",
+            {
+                "event": "tool_result",
+                "id": "result-1",
+                "parent_id": "call-1",
+                "node_key": "read",
+                "status": "failed",
+                "duration_ms": 60013,
+                "error": {"message": "连接超时"},
+                "payload": {"name": "download_fulltext", "result": {"status": "download_failed"}},
+            },
+        )
+        # 只有开工单没有完工单（运行中崩溃）：保留 running，不丢信息。
+        self._append_trace_event(
+            "turn-1",
+            "tool_call",
+            {
+                "event": "tool_call",
+                "id": "call-2",
+                "node_key": "read",
+                "status": "running",
+                "payload": {"name": "extract_fulltext", "args": {"paper_id": "P5"}},
+            },
+        )
+
+        with self._zip() as archive:
+            manifest = json.loads(archive.read("manifest.json"))
+            rows = [json.loads(line) for line in archive.read("tool_calls.jsonl").decode("utf-8").splitlines()]
+            report = archive.read("report.md").decode("utf-8")
+
+        self.assertEqual(manifest["tool_call_count"], 2)
+        self.assertEqual(len(rows), 2)
+        merged = rows[0]
+        self.assertEqual(merged["call_id"], "call-1")
+        self.assertEqual(merged["name"], "download_fulltext")
+        self.assertEqual(merged["args"], {"paper_id": "P3"})
+        self.assertEqual(merged["status"], "failed")
+        self.assertEqual(merged["duration_ms"], 60013)
+        self.assertEqual(merged["error"], {"message": "连接超时"})
+        self.assertEqual(merged["result"], {"status": "download_failed"})
+        self.assertEqual(rows[1]["call_id"], "call-2")
+        self.assertEqual(rows[1]["status"], "running")
+        self.assertIsNone(rows[1]["result"])
+        self.assertIn("失败 1 次", report)
+
+    def test_ledgers_are_isolated_per_turn(self):
+        self._append_trace_event(
+            "turn-2",
+            "llm_call",
+            {"event": "llm_call", "id": "llm-other", "status": "completed", "payload": {"model": "other"}},
+        )
+
+        with self._zip("turn-1") as archive:
+            self.assertEqual(archive.read("llm_calls.jsonl"), b"")
+            self.assertEqual(archive.read("tool_calls.jsonl"), b"")
+            manifest = json.loads(archive.read("manifest.json"))
+        self.assertEqual(manifest["llm_call_count"], 0)
+        self.assertEqual(manifest["tool_call_count"], 0)
 
     def test_turn_ids_with_whitespace_remain_exact_and_isolated(self):
         padded_turn_id = " turn-1 "
