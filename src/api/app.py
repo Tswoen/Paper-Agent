@@ -178,7 +178,6 @@ def create_app(
             "runtime_capabilities": {
                 "fastapi_rest": True,
                 "rest_management": True,
-                "http_message_submit": True,
                 "session_runs": True,
                 "sse_streaming": True,
                 "multi_chat_socket": False,

@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 
@@ -86,6 +87,27 @@ class FrontToBackFastApiTest(unittest.TestCase):
 
         return FrontendApiClient(transport)
 
+    def _run_to_events(self, client: TestClient, session_key: str, content: str, turn_id: str | None = None) -> list[dict]:
+        """T2：消息提交统一走 run/SSE——POST /runs 后消费 SSE 流，收集本次运行的全部事件。
+
+        中文注释：替代旧同步 /messages 接口。SSE 订阅会回放已有历史，因此先启动
+        run 再读流不会丢事件；流在 run 收尾后关闭，迭代自然结束。
+        """
+
+        body: dict = {"content": content}
+        if turn_id is not None:
+            body["turn_id"] = turn_id
+        accepted = client.post(f"/api/sessions/{session_key}/runs", json=body)
+        self.assertEqual(accepted.status_code, 202)
+        stream_url = accepted.json()["stream_url"]
+        events: list[dict] = []
+        with client.stream("GET", stream_url) as response:
+            self.assertEqual(response.status_code, 200)
+            for line in response.iter_lines():
+                if line.startswith("data: "):
+                    events.append(json.loads(line[len("data: "):]))
+        return events
+
     def test_bootstrap_exposes_local_runtime_capabilities(self):
         """验证 bootstrap 暴露的本地运行能力和 session 基础能力。"""
 
@@ -116,23 +138,23 @@ class FrontToBackFastApiTest(unittest.TestCase):
         self.assertEqual(created["session"]["title"], "No Auth")
         self.assertEqual(sessions["sessions"][0]["key"], created["session"]["key"])
 
-    def test_http_message_submit_updates_thread(self):
-        """验证消息提交完成后线程快照会同步更新。"""
+    def test_http_run_updates_thread(self):
+        """验证 run/SSE 提交完成后线程快照会同步更新。"""
 
         client, _ = self._client()
         api = self._api(client)
         created = api.create_session("Thread")["session"]
 
-        result = api.send_message(created["key"], "总结这篇论文")
+        events = self._run_to_events(client, created["key"], "总结这篇论文")
         thread = api.fetch_thread(created["key"])
 
-        self.assertEqual(result["events"][-1]["event"], "turn_end")
+        self.assertEqual(events[-1]["event"], "turn_end")
         self.assertEqual(thread["messages"][0]["role"], "user")
         self.assertEqual(thread["messages"][0]["content"], "总结这篇论文")
         self.assertEqual(thread["messages"][-1]["role"], "assistant")
 
-    def test_http_events_can_be_aggregated_into_ui_timeline(self):
-        """验证 HTTP 返回的事件流能够被聚合成前端时间线。"""
+    def test_http_run_events_can_be_aggregated_into_ui_timeline(self):
+        """验证 run/SSE 返回的事件流能够被聚合成前端时间线。"""
 
         client, _ = self._client()
         api = self._api(client)
@@ -140,8 +162,8 @@ class FrontToBackFastApiTest(unittest.TestCase):
         aggregator = ChatStreamAggregator()
 
         aggregator.add_optimistic_user_message("hello", turn_id="turn-1")
-        result = api.send_message(created["key"], "hello", turn_id="turn-1")
-        for event in result["events"]:
+        events = self._run_to_events(client, created["key"], "hello", turn_id="turn-1")
+        for event in events:
             aggregator.apply(event)
         snapshot = aggregator.snapshot()
         assistant = snapshot["messages"][-1]
@@ -151,14 +173,14 @@ class FrontToBackFastApiTest(unittest.TestCase):
         self.assertIn("已完成论文检索", assistant["content"])
         self.assertIn("已完成论文检索", assistant["reasoning"])
 
-    def test_http_message_submit_persists_search_artifacts(self):
-        """验证通过 HTTP 提交消息后，会话线程中能看到检索产物。"""
+    def test_http_run_persists_search_artifacts(self):
+        """验证通过 run/SSE 提交消息后，会话线程中能看到检索产物。"""
 
         client, sessions = self._client()
         api = self._api(client)
         created = api.create_session("Artifacts")["session"]
 
-        api.send_message(created["key"], "multi-agent literature review")
+        self._run_to_events(client, created["key"], "multi-agent literature review")
         thread = sessions.get(created["key"]).thread()
 
         self.assertGreaterEqual(len(thread["artifacts"]), 1)

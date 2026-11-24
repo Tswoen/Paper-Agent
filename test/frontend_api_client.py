@@ -45,9 +45,6 @@ class FrontendApiClient:
     def fetch_thread(self, session_key: str) -> JsonObject:
         return self.request("GET", f"/api/sessions/{session_key}/webui-thread")
 
-    def send_message(self, session_key: str, content: str, **extra: Any) -> JsonObject:
-        return self.request("POST", f"/api/sessions/{session_key}/messages", {"content": content, **extra})
-
     def delete_session(self, session_key: str) -> JsonObject:
         return self.request("DELETE", f"/api/sessions/{session_key}")
 
