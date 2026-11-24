@@ -20,6 +20,7 @@ def build_trace_event(
     payload: JsonObject | None = None,
     parent_id: str | None = None,
     content: str = "",
+    event_id: str | None = None,
 ) -> JsonObject:
     """组装统一的 trace 事件信封。
 
@@ -34,7 +35,7 @@ def build_trace_event(
     return {
         # event 是现有管道的事件名路由键；type 是信封规范里的类型字段，两者同值。
         "event": event_type,
-        "id": uuid4().hex,
+        "id": event_id or uuid4().hex,
         "parent_id": parent_id,
         "type": event_type,
         "node_key": node_key,

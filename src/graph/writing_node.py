@@ -20,6 +20,7 @@ from src.paper_retrieval.models import PaperDocument
 from src.repositories.node_persistence.read_persistence import read_request_fingerprint
 from src.repositories.node_persistence.writing_persistence import WritingPersistenceSink
 from src.repositories.sessions.base import SessionRepository
+from src.trace import trace_tool
 from src.utils.read_utils.cache import safe_cache_name
 
 
@@ -142,18 +143,37 @@ def run_writing_node():
                 evidence_fields=list(section_task.get("evidence_map") or []),
                 overall_analysis=overall_analysis,
             )
-            section_result = await agent.async_write_section(
-                section_id=str(section_task["section_id"]),
-                task=str(section_task.get("task") or ""),
-                evidence_map=section_evidence,
-                previous_sections=previous_sections,
-                word_count=int(section_task.get("word_count") or 800),
-                read_results=read_results,
-                cache_dir=cache_dir,
-                session_read_results=session_read_results,
-                available_paper_ids=available_paper_ids,
-                progress_callback=report_section_phase,
-            )
+            # 中文注释：trace 只包外围——小节写作调用与后续落盘/上报语义一字不动。
+            with trace_tool(
+                "write_section",
+                args={
+                    "section_id": str(section_task["section_id"]),
+                    "task": str(section_task.get("task") or ""),
+                    "word_count": int(section_task.get("word_count") or 800),
+                },
+                stage="writing_section",
+            ) as call:
+                section_result = await agent.async_write_section(
+                    section_id=str(section_task["section_id"]),
+                    task=str(section_task.get("task") or ""),
+                    evidence_map=section_evidence,
+                    previous_sections=previous_sections,
+                    word_count=int(section_task.get("word_count") or 800),
+                    read_results=read_results,
+                    cache_dir=cache_dir,
+                    session_read_results=session_read_results,
+                    available_paper_ids=available_paper_ids,
+                    progress_callback=report_section_phase,
+                )
+                call.set_result(
+                    {
+                        "completed": bool(section_result.get("completed")),
+                        "revision_count": int(section_result.get("revision_count") or 0),
+                        "cited_paper_ids": list(section_result.get("cited_paper_ids") or []),
+                        "warnings": list(section_result.get("warnings") or []),
+                        "content_chars": len(str(section_result.get("content") or "")),
+                    }
+                )
             section_result.update(
                 chapter_key=section_task["chapter_key"],
                 section_key=section_task["section_key"],
@@ -198,12 +218,18 @@ def run_writing_node():
             if reporter is not None:
                 reporter.progress("摘要模型调用完成", stage="writing_abstract", **usage)
 
-        abstract, abstract_status = await agent.async_write_abstract(
-            topic=topic,
-            sections=written_sections,
-            word_count=300,
-            usage_callback=report_abstract_usage,
-        )
+        with trace_tool(
+            "write_abstract",
+            args={"topic": topic, "word_count": 300},
+            stage="writing_abstract",
+        ) as call:
+            abstract, abstract_status = await agent.async_write_abstract(
+                topic=topic,
+                sections=written_sections,
+                word_count=300,
+                usage_callback=report_abstract_usage,
+            )
+            call.set_result({"status": abstract_status, "abstract_chars": len(abstract or "")})
 
         # 中文说明：引用顺序以正文里 paperId 第一次出现的位置为准，
         # 这样最后的参考文献编号和正文阅读顺序一致。

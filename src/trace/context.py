@@ -70,7 +70,9 @@ def emit_trace_event(
     error: JsonObject | None = None,
     payload: JsonObject | None = None,
     parent_id: str | None = None,
+    stage: str | None = None,
     content: str = "",
+    event_id: str | None = None,
 ) -> JsonObject | None:
     """发送一条 trace 事件。
 
@@ -89,13 +91,14 @@ def emit_trace_event(
             status=status,
             started_at=started_at,
             node_key=context.node_key,
-            stage=context.stage,
+            stage=stage if stage is not None else context.stage,
             duration_ms=duration_ms,
             tokens=tokens,
             error=error,
             payload=payload,
             parent_id=parent_id if parent_id is not None else context.parent_id,
             content=content,
+            event_id=event_id,
         )
         return context.emit(event)
     except Exception:

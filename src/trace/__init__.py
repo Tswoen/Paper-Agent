@@ -12,13 +12,16 @@ from src.trace.context import (
     emit_trace_event,
 )
 from src.trace.envelope import build_trace_event
+from src.trace.tools import ToolCallHandle, trace_tool
 
 
 __all__ = [
     "TraceContext",
     "TraceEmitter",
+    "ToolCallHandle",
     "bind_trace_context",
     "build_trace_event",
     "current_trace_context",
     "emit_trace_event",
+    "trace_tool",
 ]

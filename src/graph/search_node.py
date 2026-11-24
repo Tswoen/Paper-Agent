@@ -16,6 +16,7 @@ from src.repositories.node_persistence.search_persistence import SearchPersisten
 from src.graph.state_models import JsonObject, State
 from src.llm import ProviderSnapshot, SystemConfig
 from src.paper_retrieval import PaperSearchService
+from src.trace import trace_tool
 from src.paper_retrieval.models import PaperDocument, SearchResponse
 
 
@@ -361,20 +362,42 @@ async def _search_one_subtopic(
 
     source = intent.sources[0] if len(intent.sources) == 1 else None
     sources = list(intent.sources) if len(intent.sources) > 1 else None
-    response = await service.async_search(
-        query="",
-        topic=subtopic.subtopic,
-        keywords=[subtopic.keyword],
-        keyword_expression=subtopic.keyword,
-        source=source,
-        sources=sources,
-        limit=max(1, candidate_limit),
-        year_from=intent.year_from,
-        year_to=intent.year_to,
-        excluded_terms=intent.excluded_terms,
-        truncate=False,
-        runtime_resources=runtime_resources,
-    )
+    # 中文注释：trace 只包外围——检索调用本身与异常传播语义一字不动。
+    with trace_tool(
+        "paper_search",
+        args={
+            "subtopic": subtopic.subtopic,
+            "keyword": subtopic.keyword,
+            "source": source,
+            "sources": sources,
+            "limit": max(1, candidate_limit),
+            "year_from": intent.year_from,
+            "year_to": intent.year_to,
+        },
+        stage="fetch_results",
+    ) as call:
+        response = await service.async_search(
+            query="",
+            topic=subtopic.subtopic,
+            keywords=[subtopic.keyword],
+            keyword_expression=subtopic.keyword,
+            source=source,
+            sources=sources,
+            limit=max(1, candidate_limit),
+            year_from=intent.year_from,
+            year_to=intent.year_to,
+            excluded_terms=intent.excluded_terms,
+            truncate=False,
+            runtime_resources=runtime_resources,
+        )
+        call.set_result(
+            {
+                "paper_count": len(response.papers),
+                "sources_used": list(response.sources_used),
+                "source_results": dict(response.source_results),
+                "source_errors": dict(response.errors),
+            }
+        )
     return subtopic, response
 
 

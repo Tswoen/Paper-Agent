@@ -19,6 +19,7 @@ from src.utils.read_utils.read_fulltext import async_convert_fulltext_to_markdow
 from src.models.read_models import FullTextStatus, PaperReadResult, ReadNote, ReadRelevance, READ_RELEVANCE_STATUSES
 from src.repositories.node_persistence.read_persistence import ReadPersistenceSink, read_request_fingerprint
 from src.repositories.chroma.read_vector_store import EmbeddingConnection, async_index_chunk_file
+from src.trace import trace_tool
 from src.graph.runtime import WorkflowRuntimeContext
 from src.graph.runtime_resources import WorkflowRuntimeResources
 from src.graph.state_models import JsonObject, State
@@ -1439,14 +1440,30 @@ async def _read_one_paper(
             total_paper_count,
             paper_position=item.position,
         )
-        downloaded = await async_download_paper_fulltext(
-            paper,
-            cache_dir=config.paper_cache_dir,
-            connect_timeout_seconds=config.connect_timeout_seconds,
-            download_timeout_seconds=config.download_timeout_seconds,
-            max_file_size_mb=config.max_file_size_mb,
-            runtime_resources=runtime_resources,
-        )
+        # 中文注释：trace 只包外围——下载调用与后续失败分支语义一字不动。
+        with trace_tool(
+            "download_fulltext",
+            args={"paper_id": paper.paperId},
+            stage="downloading_full_text",
+        ) as call:
+            downloaded = await async_download_paper_fulltext(
+                paper,
+                cache_dir=config.paper_cache_dir,
+                connect_timeout_seconds=config.connect_timeout_seconds,
+                download_timeout_seconds=config.download_timeout_seconds,
+                max_file_size_mb=config.max_file_size_mb,
+                runtime_resources=runtime_resources,
+            )
+            call.set_result(
+                {
+                    "status": downloaded.status,
+                    "reason": downloaded.reason,
+                    "source_url": downloaded.source_url,
+                    "file_path": str(downloaded.file_path) if downloaded.file_path else None,
+                },
+                status="completed" if downloaded.file_path is not None else "failed",
+                error=None if downloaded.file_path is not None else {"message": downloaded.reason or "全文下载失败"},
+            )
         full_text = FullTextStatus(status=downloaded.status, reason=downloaded.reason, source_url=downloaded.source_url)
         if downloaded.file_path is None:
             result.full_text = full_text
@@ -1486,11 +1503,27 @@ async def _read_one_paper(
             total_paper_count,
             paper_position=item.position,
         )
-        converted = await async_convert_fulltext_to_markdown(
-            paper,
-            source_path=source_path,
-            source_url=full_text.source_url,
-        )
+        with trace_tool(
+            "convert_markdown",
+            args={"paper_id": paper.paperId},
+            stage="converting_markdown",
+        ) as call:
+            converted = await async_convert_fulltext_to_markdown(
+                paper,
+                source_path=source_path,
+                source_url=full_text.source_url,
+            )
+            call.set_result(
+                {
+                    "markdown_path": str(converted.markdown_path) if converted.markdown_path else None,
+                    "page_count": converted.page_count,
+                    "warnings": list(converted.warnings),
+                },
+                status="completed" if converted.markdown_path is not None else "failed",
+                error=None
+                if converted.markdown_path is not None
+                else {"message": "；".join(converted.warnings) or "无法将全文转换为 Markdown"},
+            )
         if converted.markdown_path is None:
             result.full_text = FullTextStatus(
                 status="parse_failed",
@@ -1538,7 +1571,18 @@ async def _read_one_paper(
         total_paper_count,
         paper_position=item.position,
     )
-    chunk_build = await async_build_chunks_file(paper, markdown_path=markdown_path)
+    with trace_tool(
+        "build_chunks",
+        args={"paper_id": paper.paperId},
+        stage="chunking_full_text",
+    ) as call:
+        chunk_build = await async_build_chunks_file(paper, markdown_path=markdown_path)
+        call.set_result(
+            {
+                "chunk_count": len(chunk_build.chunks),
+                "chunks_path": str(chunk_build.chunks_path),
+            }
+        )
     full_text.chunk_count = len(chunk_build.chunks)
     result.full_text = full_text
 
@@ -1565,15 +1609,33 @@ async def _read_one_paper(
         # 字段会反馈给模型重提，最多按配置重试几次。模型不可用仍会抛错，按普通失败中断节点。
         # 提取提示词里同时要求模型判断全文是否真的与主题相关，明显无关时返回
         # irrelevant 标记，这里就地止损，跳过后续提取核查（只中断本篇）。
-        extraction_record, verification = await _extract_and_verify(
-            paper,
-            topic=topic,
-            chunks_path=chunk_build.chunks_path,
-            markdown_path=markdown_path,
-            llm=llm,
-            runtime_resources=runtime_resources,
-            config=config,
-        )
+        # 中文注释：trace 壳套在现有 try 内部——异常先留 failed 牌，再落进
+        # 下方原有 except 分支，转换/降级语义一字不动。
+        with trace_tool(
+            "extract_fulltext",
+            args={"paper_id": paper.paperId},
+            stage="extracting_full_text",
+        ) as call:
+            extraction_record, verification = await _extract_and_verify(
+                paper,
+                topic=topic,
+                chunks_path=chunk_build.chunks_path,
+                markdown_path=markdown_path,
+                llm=llm,
+                runtime_resources=runtime_resources,
+                config=config,
+            )
+            call.set_result(
+                {
+                    "status": extraction_record.get("status") if isinstance(extraction_record, dict) else None,
+                    "reason": extraction_record.get("reason") if isinstance(extraction_record, dict) else None,
+                    "verification": {
+                        "status": (verification or {}).get("status"),
+                        "passed": (verification or {}).get("passed"),
+                        "checked_fields": len((verification or {}).get("items") or []),
+                    },
+                }
+            )
     except RuntimeError as exc:
         # 中文注释：这里的运行错误来自全文摘要模型调用。暂停后保留已下载、转换和
         # 切分的文件，用户修好模型配置后可直接从 chunk.json 继续处理。
