@@ -111,6 +111,9 @@ class FullTextStatus:
     markdown_path: str | None = None
     page_count: int | None = None
     chunk_count: int = 0
+    # 5d：全文下载尝试次数（跨崩溃续跑累计，随 note 落盘）。只用于限制扫尾重跑
+    # 预算，不影响业务结果；旧 note 缺省按 0，无需迁移。
+    attempts: int = 0
 
     def to_dict(self) -> JsonObject:
         """把全文处理状态转换为普通字典。"""

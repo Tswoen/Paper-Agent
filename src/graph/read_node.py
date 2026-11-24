@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import json
 import re
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -66,6 +67,96 @@ class ReadModelUnavailableError(ReadResourceUnavailableError):
     """
 
 
+# 5d：扫尾重跑预算——每篇论文最多补考 1 次（正常 1 次 + 重试 1 次 = 共 2 次机会）。
+# 尝试次数跨崩溃续跑累计（记在 note 里），防止崩溃循环反复刷重试。
+# TODO(5d-budget): 暂不设全 run 总量预算；将来如需限制总重试量，在这里加 MAX_TOTAL_RETRY。
+MAX_RETRY_ATTEMPTS = 1
+
+# 中文注释：可重试的异常类型白名单——都是"暂时性"错误（网络/超时/连接）。
+# 刻意保守：笼统的 RuntimeError/ValueError 不在内，未知错误默认不重试，
+# 避免把永久性错误（配置缺失、鉴权失败、内容损坏）误判成可重试。
+_RETRYABLE_ERROR_KINDS = frozenset({
+    "ProviderConnectionError",
+    "TimeoutError",
+    "ConnectionError",
+    "ConnectionResetError",
+    "ConnectionAbortedError",
+    "ConnectError",
+    "ConnectTimeout",
+    "ReadError",
+    "ReadTimeout",
+    "RemoteProtocolError",
+    "PoolTimeout",
+})
+
+# 中文注释：错误消息里出现这些明确签名才判为暂时性。只匹配具体短语，不匹配
+# 笼统的 "temporary"/"failure" 等词，避免误伤永久性错误。
+_TRANSIENT_MESSAGE_SIGNATURES = (
+    "timeout", "timed out", "超时",
+    "connection reset", "connection aborted", "connection refused",
+    "getaddrinfo", "name or service not known", "nodename nor servname",
+    "temporary failure in name resolution", "resource temporarily unavailable",
+    "too many requests", "429", "500", "502", "503", "504",
+)
+
+
+def _is_retryable_http_code(code: int) -> bool:
+    """429（限流）与 5xx（服务端临时故障）可重试；其余 HTTP 错误不可重试。"""
+
+    return code == 429 or 500 <= code < 600
+
+
+def _should_retry_failure(failure: Any) -> bool:
+    """判断一条硬失败记录（failure dict）是否值得补考一次。
+
+    中文注释：只看明确信号——HTTP 状态码、异常类型白名单、消息里的暂时性签名。
+    三者都不命中就保守地不重试。validation（缺标题）等永久性失败自然被排除。
+    """
+
+    if not isinstance(failure, dict):
+        return False
+    status_code = failure.get("status_code")
+    if isinstance(status_code, int):
+        return _is_retryable_http_code(status_code)
+    error_kind = str(failure.get("error_kind") or "")
+    if error_kind in _RETRYABLE_ERROR_KINDS:
+        return True
+    message = str(failure.get("message") or "").lower()
+    return any(signature in message for signature in _TRANSIENT_MESSAGE_SIGNATURES)
+
+
+def _should_retry_fulltext(full_text: FullTextStatus) -> bool:
+    """判断部分失败（全文下载失败但摘要可用）是否值得补考一次。
+
+    中文注释：只救 download_failed 里的暂时性原因（超时/429/5xx/传输错误）；
+    parse_failed、no_url 是永久性结果，永不重试。reason 文案与 download.py 对齐。
+    """
+
+    if full_text.status != "download_failed":
+        return False
+    reason = full_text.reason or ""
+    http_match = re.search(r"HTTP (\d{3})", reason)
+    if http_match is not None:
+        return _is_retryable_http_code(int(http_match.group(1)))
+    if "超时" in reason or "timeout" in reason.lower():
+        return True
+    # 中文注释："下载全文失败：{exc}" 来自 httpx 传输层异常（连接/协议），属暂时性。
+    if reason.startswith("下载全文失败："):
+        return True
+    return False
+
+
+def _attempts_from_last_error(last_error: Any) -> int:
+    """从失败 note 的 last_error 里带回累计尝试次数；缺失或损坏按 0。"""
+
+    if not isinstance(last_error, dict):
+        return 0
+    try:
+        return max(0, int(last_error.get("attempts") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 @dataclass(slots=True)
 class PaperTaskInput:
     """保存一篇论文并发处理时需要的固定输入。"""
@@ -73,6 +164,10 @@ class PaperTaskInput:
     paper: PaperDocument
     position: int
     restored_result: PaperReadResult | None = None
+    # 5d：本论文此前已累计的尝试次数（从失败 note 带回），用于跨崩溃限制重试预算。
+    prior_attempts: int = 0
+    # 5d：标记本次是扫尾重跑（补考），供 trace 记账与进度上报区分。
+    is_retry: bool = False
 
 
 class CompletedPaperCounter:
@@ -141,11 +236,14 @@ async def _run_read_node_async(state: State, runtime: Runtime[WorkflowRuntimeCon
     # 节点完成时写回供下游消费，不作为恢复来源；全文中间产物按 paper_cache 文件复用。
     results_by_paper_id: dict[str, PaperReadResult] = {}
     artifact_refs: list[JsonObject] = list(state.get("read_artifact_refs") or [])
+    # 5d：失败 note 带回的累计尝试次数，供扫尾重跑判断预算（跨崩溃续跑累计）。
+    prior_attempts_by_paper_id: dict[str, int] = {}
     note_stages, note_relevance = await _restore_paper_notes(
         sink,
         papers,
         results_by_paper_id=results_by_paper_id,
         artifact_refs=artifact_refs,
+        prior_attempts_by_paper_id=prior_attempts_by_paper_id,
     )
     paper_runtime_statuses = _initial_paper_runtime_statuses(papers, results_by_paper_id)
     deep_read_limit = _deep_read_limit(request_constraints, len(papers))
@@ -181,6 +279,7 @@ async def _run_read_node_async(state: State, runtime: Runtime[WorkflowRuntimeCon
         paper_runtime_statuses=paper_runtime_statuses,
         completed_counter=completed_counter,
         deep_read_limit=deep_read_limit,
+        prior_attempts_by_paper_id=prior_attempts_by_paper_id,
     )
 
     results = _ordered_results(papers, results_by_paper_id)
@@ -230,11 +329,15 @@ async def _restore_paper_notes(
     *,
     results_by_paper_id: dict[str, PaperReadResult],
     artifact_refs: list[JsonObject],
+    prior_attempts_by_paper_id: dict[str, int] | None = None,
 ) -> tuple[dict[str, str], dict[str, JsonObject]]:
     """逐篇加载当前格式 note——论文级恢复的唯一来源。
 
     有效 note 直接进结果池；返回各篇的 stage 与 relevance，供全局选择后判断
     是否需要把新的选择结果写回磁盘。
+
+    5d：失败 note（stage=None）不恢复失败结果本身，但把 last_error 里的累计
+    尝试次数带回 prior_attempts_by_paper_id，让扫尾重跑预算跨崩溃续跑仍然生效。
     """
 
     restored_stages: dict[str, str] = {}
@@ -243,7 +346,12 @@ async def _restore_paper_notes(
         return restored_stages, restored_relevance
     for paper in papers:
         loaded = await asyncio.to_thread(sink.load_paper_note, paper.id)
-        if loaded is None or loaded.stage not in {"abstract_complete", "fulltext_complete", "discarded"}:
+        if loaded is None:
+            continue
+        if loaded.stage not in {"abstract_complete", "fulltext_complete", "discarded"}:
+            prior = _attempts_from_last_error(loaded.last_error)
+            if prior > 0 and prior_attempts_by_paper_id is not None:
+                prior_attempts_by_paper_id[paper.id] = prior
             continue
         result = _read_result_from_payload(loaded.result, papers)
         if result is None or result.failure is not None:
@@ -391,6 +499,7 @@ def _full_text_from_payload(value: Any) -> FullTextStatus:
         markdown_path=_optional_text(payload.get("markdown_path")),
         page_count=_optional_int(payload.get("page_count")),
         chunk_count=_score_value(payload.get("chunk_count")),
+        attempts=max(0, _optional_int(payload.get("attempts")) or 0),
     )
 
 
@@ -783,34 +892,62 @@ async def _process_papers_concurrently(
     paper_runtime_statuses: dict[str, JsonObject],
     completed_counter: CompletedPaperCounter,
     deep_read_limit: int,
+    prior_attempts_by_paper_id: dict[str, int] | None = None,
 ) -> int:
-    """先并发阅读全部摘要，再统一选择全文精读论文。"""
+    """先并发阅读全部摘要，再统一选择全文精读论文；失败后各补考一次（5d）。"""
+
+    prior_attempts = prior_attempts_by_paper_id or {}
+
+    async def run_batch(work_items, *, process_full_text: bool, is_retry_wave: bool = False) -> None:
+        await _run_paper_task_batch(
+            work_items,
+            topic=topic,
+            constraints=constraints,
+            config=config,
+            llm=llm,
+            embedding_connection=embedding_connection,
+            embedding_error=embedding_error,
+            reporter=reporter,
+            sink=sink,
+            runtime_resources=runtime_resources,
+            results_by_paper_id=results_by_paper_id,
+            artifact_refs=artifact_refs,
+            paper_runtime_statuses=paper_runtime_statuses,
+            completed_counter=completed_counter,
+            total_paper_count=len(papers),
+            process_full_text=process_full_text,
+            is_retry_wave=is_retry_wave,
+        )
 
     # 中文说明：第一阶段只调用一次摘要模型，不会下载任何全文。这样模型较早返回的论文
     # 也不能提前占用全文名额，所有论文都拿到固定分数后才会一起排序。
     abstract_items = [
-        PaperTaskInput(paper=paper, position=position)
+        PaperTaskInput(
+            paper=paper,
+            position=position,
+            prior_attempts=prior_attempts.get(paper.id, 0),
+        )
         for position, paper in enumerate(papers, start=1)
         if paper.id not in results_by_paper_id or results_by_paper_id[paper.id].failure is not None
     ]
-    await _run_paper_task_batch(
-        abstract_items,
-        topic=topic,
-        constraints=constraints,
-        config=config,
-        llm=llm,
-        embedding_connection=embedding_connection,
-        embedding_error=embedding_error,
-        reporter=reporter,
-        sink=sink,
-        runtime_resources=runtime_resources,
-        results_by_paper_id=results_by_paper_id,
-        artifact_refs=artifact_refs,
-        paper_runtime_statuses=paper_runtime_statuses,
-        completed_counter=completed_counter,
-        total_paper_count=len(papers),
-        process_full_text=False,
-    )
+    await run_batch(abstract_items, process_full_text=False)
+
+    # 5d 补考波次 A：摘要硬失败里"可重试且预算未用完"的论文再跑一次，成功的正常参与选择。
+    retry_abstract_items = [
+        PaperTaskInput(
+            paper=paper,
+            position=position,
+            prior_attempts=int(results_by_paper_id[paper.id].failure.get("attempts") or 0),
+            is_retry=True,
+        )
+        for position, paper in enumerate(papers, start=1)
+        if paper.id in results_by_paper_id
+        and results_by_paper_id[paper.id].failure is not None
+        and int(results_by_paper_id[paper.id].failure.get("attempts") or 0) < MAX_RETRY_ATTEMPTS + 1
+        and _should_retry_failure(results_by_paper_id[paper.id].failure)
+    ]
+    if retry_abstract_items:
+        await run_batch(retry_abstract_items, process_full_text=False, is_retry_wave=True)
 
     needs_selection = bool(abstract_items) or any(
         result.failure is None and result.relevance.status == "pending"
@@ -874,24 +1011,29 @@ async def _process_papers_concurrently(
         for position, paper in enumerate(papers, start=1)
         if paper.id in selected_paper_ids and _deep_read_needs_processing(results_by_paper_id[paper.id])
     ]
-    await _run_paper_task_batch(
-        deep_read_items,
-        topic=topic,
-        constraints=constraints,
-        config=config,
-        llm=llm,
-        embedding_connection=embedding_connection,
-        embedding_error=embedding_error,
-        reporter=reporter,
-        sink=sink,
-        runtime_resources=runtime_resources,
-        results_by_paper_id=results_by_paper_id,
-        artifact_refs=artifact_refs,
-        paper_runtime_statuses=paper_runtime_statuses,
-        completed_counter=completed_counter,
-        total_paper_count=len(papers),
-        process_full_text=True,
-    )
+    await run_batch(deep_read_items, process_full_text=True)
+
+    # 5d 补考波次 B：全文下载失败（摘要仍可用）里"可重试且预算未用完"的论文再下一次。
+    # 既包括本轮新失败，也包括续跑恢复回来的同类论文——否则"补考到一半崩溃"无法续跑。
+    # parse_failed / no_url 是永久结果，_should_retry_fulltext 已排除。
+    retry_fulltext_items = [
+        PaperTaskInput(
+            paper=paper,
+            position=position,
+            restored_result=results_by_paper_id[paper.id],
+            is_retry=True,
+        )
+        for position, paper in enumerate(papers, start=1)
+        if paper.id in selected_paper_ids
+        and paper.id in results_by_paper_id
+        and results_by_paper_id[paper.id].failure is None
+        and results_by_paper_id[paper.id].full_text.status == "download_failed"
+        and results_by_paper_id[paper.id].full_text.attempts < MAX_RETRY_ATTEMPTS + 1
+        and _should_retry_fulltext(results_by_paper_id[paper.id].full_text)
+    ]
+    if retry_fulltext_items:
+        await run_batch(retry_fulltext_items, process_full_text=True, is_retry_wave=True)
+
     return len(selected_paper_ids)
 
 
@@ -913,6 +1055,7 @@ async def _run_paper_task_batch(
     completed_counter: CompletedPaperCounter,
     total_paper_count: int,
     process_full_text: bool,
+    is_retry_wave: bool = False,
 ) -> None:
     """执行一个阶段的论文任务；资源不可用时取消同批任务并冒泡原始异常。"""
 
@@ -979,6 +1122,8 @@ async def _run_paper_task_batch(
                 reporter=reporter,
                 sink=sink,
                 artifact_refs=artifact_refs,
+                # 5d：补考波次不重复计数——这篇论文在首轮（或恢复初始化）已计过完成数。
+                increment_counter=not is_retry_wave,
             )
         if resource_error is not None:
             # 中文注释：资源不可用时取消同批其余任务，避免继续浪费模型调用，
@@ -1000,6 +1145,7 @@ async def _finalize_paper_result(
     reporter: Any,
     sink: ReadPersistenceSink | None,
     artifact_refs: list[JsonObject],
+    increment_counter: bool = True,
 ) -> None:
     """保存一篇最终结果，并更新前端看到的完成进度。"""
 
@@ -1015,7 +1161,8 @@ async def _finalize_paper_result(
         result=result,
         error_message=completion_error,
     )
-    completed = completed_counter.increment()
+    # 5d：补考重跑不新增完成计数，沿用当前值，避免 completed 超过 total。
+    completed = completed_counter.increment() if increment_counter else completed_counter.current()
     _report_progress(
         reporter,
         result.paper,
@@ -1239,21 +1386,47 @@ async def _run_one_paper_task(
 
     async with semaphore:
         try:
-            return await _read_one_paper(
-                item,
-                topic=topic,
-                constraints=constraints,
-                llm=llm,
-                config=config,
-                embedding_connection=embedding_connection,
-                embedding_error=embedding_error,
-                reporter=reporter,
-                runtime_resources=runtime_resources,
-                paper_runtime_statuses=paper_runtime_statuses,
-                completed_counter=completed_counter,
-                total_paper_count=total_paper_count,
-                process_full_text=process_full_text,
+            # 5d：补考套一层 trace_tool("read_retry")，让重试在轨迹账本里可见，
+            # 并把本次 attempt 序号记进 args；非补考走 nullcontext，零额外事件。
+            retry_cm = (
+                trace_tool(
+                    "read_retry",
+                    args={
+                        "paper_id": item.paper.id,
+                        "stage": "fulltext" if process_full_text else "abstract",
+                        "attempt": item.prior_attempts + 1,
+                    },
+                    stage="read_retry",
+                )
+                if item.is_retry
+                else nullcontext()
             )
+            with retry_cm as retry_call:
+                result = await _read_one_paper(
+                    item,
+                    topic=topic,
+                    constraints=constraints,
+                    llm=llm,
+                    config=config,
+                    embedding_connection=embedding_connection,
+                    embedding_error=embedding_error,
+                    reporter=reporter,
+                    runtime_resources=runtime_resources,
+                    paper_runtime_statuses=paper_runtime_statuses,
+                    completed_counter=completed_counter,
+                    total_paper_count=total_paper_count,
+                    process_full_text=process_full_text,
+                )
+                if retry_call is not None:
+                    still_failed = result.failure is not None or (
+                        process_full_text
+                        and result.full_text.status in {"download_failed", "parse_failed", "no_url"}
+                    )
+                    retry_call.set_result(
+                        {"paper_id": item.paper.id, "still_failed": still_failed},
+                        status="failed" if still_failed else "completed",
+                    )
+                return result
         except ReadResourceUnavailableError as exc:
             _mark_paper_waiting_resource(paper_runtime_statuses, item.paper, exc)
             # 中文注释：资源不可用会让整个阅读节点按普通失败中断。这里先更新当前
@@ -1282,16 +1455,22 @@ async def _run_one_paper_task(
                 result.warnings.append(message)
                 result.failure = None
             else:
+                # 5d：尝试次数跨崩溃累计（prior_attempts 从失败 note 带回）；
+                # HTTP 错误补记状态码，供失败分类器判断 429/5xx 是否可重试。
+                failure: JsonObject = {
+                    "stage": "fulltext" if process_full_text else "abstract",
+                    "error_kind": type(exc).__name__,
+                    "message": str(exc),
+                    "attempts": item.prior_attempts + 1,
+                }
+                status_code = getattr(exc, "status_code", None)
+                if isinstance(status_code, int):
+                    failure["status_code"] = status_code
                 result = PaperReadResult(
                     paper=item.paper,
                     full_text=FullTextStatus(status="not_requested", reason="当前论文处理发生异常"),
                     warnings=[message],
-                    failure={
-                        "stage": "fulltext" if process_full_text else "abstract",
-                        "error_kind": type(exc).__name__,
-                        "message": str(exc),
-                        "attempts": 1,
-                    },
+                    failure=failure,
                 )
             _set_paper_runtime_status(
                 paper_runtime_statuses,
@@ -1346,7 +1525,7 @@ async def _read_one_paper(
                 "stage": "validation",
                 "error_kind": "ValueError",
                 "message": "论文缺少标题，未交给模型判断",
-                "attempts": 1,
+                "attempts": item.prior_attempts + 1,
             },
         )
         _report_progress(
@@ -1464,7 +1643,14 @@ async def _read_one_paper(
                 status="completed" if downloaded.file_path is not None else "failed",
                 error=None if downloaded.file_path is not None else {"message": downloaded.reason or "全文下载失败"},
             )
-        full_text = FullTextStatus(status=downloaded.status, reason=downloaded.reason, source_url=downloaded.source_url)
+        # 5d：下载尝试次数累计（跨崩溃续跑，随 note 落盘），供扫尾重跑预算判断。
+        # RHS 的 full_text 仍是恢复/上一轮的旧状态，取其 attempts 再 +1。
+        full_text = FullTextStatus(
+            status=downloaded.status,
+            reason=downloaded.reason,
+            source_url=downloaded.source_url,
+            attempts=full_text.attempts + 1 if downloaded.status == "download_failed" else full_text.attempts,
+        )
         if downloaded.file_path is None:
             result.full_text = full_text
             _report_progress(
