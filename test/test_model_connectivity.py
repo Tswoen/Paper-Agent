@@ -7,15 +7,15 @@ from src.llm import ModelConfig, StreamCallbacks, SystemConfig, make_provider
 
 
 def _live_connectivity_test_enabled() -> bool:
-    """判断是否显式开启真实模型连通性测试。
+    """只有显式设置环境变量才执行真实模型连通性测试，避免默认套件依赖密钥和网络。
 
     中文说明：
     1. 该测试会真实请求外部模型服务；
     2. 可能消耗额度，并受到账号限流、余额、网络环境影响；
-    3. 因此默认关闭，只有在手动设置环境变量后才执行。
+    3. 因此默认跳过，只有在手动设置 `RUN_MODEL_CONNECTIVITY_TEST=1` 后才执行。
     """
 
-    return True
+    return os.getenv("RUN_MODEL_CONNECTIVITY_TEST") == "1"
 
 
 def _resolve_agent_name(config: ModelConfig) -> str:

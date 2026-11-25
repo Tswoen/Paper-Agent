@@ -4,7 +4,7 @@ import asyncio
 import json
 import re
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from src.agents.writingAgent import (
     WritingAgent,
@@ -17,12 +17,15 @@ from src.graph.state_models import JsonObject, State
 from src.llm import ProviderSnapshot, SystemConfig
 from src.models.sessions import utc_now
 from src.paper_retrieval.models import PaperDocument
+from src.repositories.node_persistence.read_persistence import read_request_fingerprint
+from src.repositories.node_persistence.writing_persistence import WritingPersistenceSink
 from src.repositories.sessions.base import SessionRepository
+from src.trace import trace_tool
 from src.utils.read_utils.cache import safe_cache_name
 
 
-# 中文说明：本版本开始，写作产物同时包含摘要和按正文引用整理的参考文献。
-WRITING_VERSION = "1.1"
+if TYPE_CHECKING:
+    from langgraph.runtime import Runtime
 
 
 def run_writing_node():
@@ -33,25 +36,29 @@ def run_writing_node():
     它会把大纲里的每个小节当成一个独立写作任务，按顺序交给 WritingAgent。
     """
 
-    async def _node(state: State) -> State:
+    async def _node(state: State, runtime: Runtime[WorkflowRuntimeContext] | None) -> State:
         """按大纲顺序逐节写作，并把结果保存进共享状态。"""
 
         request = state.get("request")
         if request is None:
             raise ValueError("写作节点缺少用户综述主题，无法继续生成正文")
+        # 中文注释：State 里的 request 是纯 dict。
+        topic = str(request.get("topic") or "") if isinstance(request, dict) else ""
+        request_fingerprint = read_request_fingerprint(request if isinstance(request, dict) else {})
         outline = dict(state.get("writing_outline") or {})
         if not outline:
             raise ValueError("写作节点缺少写作大纲，无法知道要写哪些小节")
         overall_analysis = dict(dict(state.get("analysis_report") or {}).get("overall_analysis") or {})
 
-        reporter = _resolve_reporter(state)
-        llm = _resolve_llm(state)
+        reporter = _resolve_reporter(runtime)
+        sink = _resolve_sink(runtime, request_fingerprint=request_fingerprint)
+        llm = load_writing_agent_llm()
         agent = build_writing_agent(llm)
         search_results = list(state.get("search_results") or [])
         read_results = list(state.get("read_results") or [])
         # State 可能只带有本轮阅读结果，因此额外读取同一会话历史轮次的论文笔记。
         # 这样从已有会话恢复写作时，也能找到没有进入本轮 State 的论文摘要。
-        session_read_results = await asyncio.to_thread(_load_session_read_results, state)
+        session_read_results = await asyncio.to_thread(_load_session_read_results, runtime)
         cache_dir = SystemConfig.load().read.paper_cache_dir
         available_paper_ids = _collect_available_paper_ids(
             search_results=search_results,
@@ -59,6 +66,31 @@ def run_writing_node():
             session_read_results=session_read_results,
         )
         section_tasks = _flatten_outline(outline)
+        artifact_refs = list(state.get("writing_artifact_refs") or [])
+
+        # 中文注释：小节级恢复只有 section.json 稳定点这一个来源。有效稳定点直接
+        # 复用，跳过整节模型调用；崩溃续跑时只重写缺失小节。
+        restored_sections: dict[str, JsonObject] = {}
+        if sink is not None:
+            for index, section_task in enumerate(section_tasks, start=1):
+                section_id = str(section_task["section_id"])
+                loaded = await asyncio.to_thread(sink.load_section, section_id)
+                if loaded is None:
+                    continue
+                restored_sections[section_id] = dict(loaded.section)
+                _append_artifact_refs(artifact_refs, [loaded.artifact])
+                if reporter is not None:
+                    reporter.progress(
+                        "小节正文已完成，复用已有结果",
+                        stage="writing_section_done",
+                        runtime_status="completed",
+                        completed=index,
+                        total=len(section_tasks),
+                        section_id=section_id,
+                        event_key=f"writing_section:{section_id}",
+                        stage_title=str(section_task.get("section_title") or section_id),
+                    )
+
         written_sections: list[JsonObject] = []
 
         if reporter is not None:
@@ -69,6 +101,9 @@ def run_writing_node():
             )
 
         for index, section_task in enumerate(section_tasks, start=1):
+            if str(section_task["section_id"]) in restored_sections:
+                written_sections.append(restored_sections[str(section_task["section_id"])])
+                continue
             section_usage = {"input_tokens": 0, "output_tokens": 0}
 
             def report_section_phase(message: str, usage: JsonObject | None = None, *, task=section_task) -> None:
@@ -108,18 +143,37 @@ def run_writing_node():
                 evidence_fields=list(section_task.get("evidence_map") or []),
                 overall_analysis=overall_analysis,
             )
-            section_result = await agent.async_write_section(
-                section_id=str(section_task["section_id"]),
-                task=str(section_task.get("task") or ""),
-                evidence_map=section_evidence,
-                previous_sections=previous_sections,
-                word_count=int(section_task.get("word_count") or 800),
-                read_results=read_results,
-                cache_dir=cache_dir,
-                session_read_results=session_read_results,
-                available_paper_ids=available_paper_ids,
-                progress_callback=report_section_phase,
-            )
+            # 中文注释：trace 只包外围——小节写作调用与后续落盘/上报语义一字不动。
+            with trace_tool(
+                "write_section",
+                args={
+                    "section_id": str(section_task["section_id"]),
+                    "task": str(section_task.get("task") or ""),
+                    "word_count": int(section_task.get("word_count") or 800),
+                },
+                stage="writing_section",
+            ) as call:
+                section_result = await agent.async_write_section(
+                    section_id=str(section_task["section_id"]),
+                    task=str(section_task.get("task") or ""),
+                    evidence_map=section_evidence,
+                    previous_sections=previous_sections,
+                    word_count=int(section_task.get("word_count") or 800),
+                    read_results=read_results,
+                    cache_dir=cache_dir,
+                    session_read_results=session_read_results,
+                    available_paper_ids=available_paper_ids,
+                    progress_callback=report_section_phase,
+                )
+                call.set_result(
+                    {
+                        "completed": bool(section_result.get("completed")),
+                        "revision_count": int(section_result.get("revision_count") or 0),
+                        "cited_paper_ids": list(section_result.get("cited_paper_ids") or []),
+                        "warnings": list(section_result.get("warnings") or []),
+                        "content_chars": len(str(section_result.get("content") or "")),
+                    }
+                )
             section_result.update(
                 chapter_key=section_task["chapter_key"],
                 section_key=section_task["section_key"],
@@ -129,6 +183,19 @@ def run_writing_node():
                 ref_sections=list(section_task.get("ref_sections") or []),
             )
             written_sections.append(section_result)
+            # 中文注释：一节完成立即落盘稳定点，不等整节点结束；写盘失败只记
+            # warning，不中断写作（与 read 的单篇落盘语义一致）。
+            if sink is not None:
+                try:
+                    persisted_section = await asyncio.to_thread(sink.persist_section, section_result)
+                    _append_artifact_refs(artifact_refs, persisted_section.artifacts)
+                    if reporter is not None:
+                        for artifact in persisted_section.artifacts:
+                            reporter.artifact(artifact, stage="writing_section_artifact_ready", emit_runtime_event=False)
+                except Exception as exc:
+                    warnings = section_result.setdefault("warnings", [])
+                    if isinstance(warnings, list):
+                        warnings.append(f"写作稳定点无法保存到会话目录：{exc}")
             if reporter is not None:
                 reporter.progress(
                     "小节正文已完成",
@@ -151,12 +218,18 @@ def run_writing_node():
             if reporter is not None:
                 reporter.progress("摘要模型调用完成", stage="writing_abstract", **usage)
 
-        abstract, abstract_status = await agent.async_write_abstract(
-            topic=request.topic,
-            sections=written_sections,
-            word_count=300,
-            usage_callback=report_abstract_usage,
-        )
+        with trace_tool(
+            "write_abstract",
+            args={"topic": topic, "word_count": 300},
+            stage="writing_abstract",
+        ) as call:
+            abstract, abstract_status = await agent.async_write_abstract(
+                topic=topic,
+                sections=written_sections,
+                word_count=300,
+                usage_callback=report_abstract_usage,
+            )
+            call.set_result({"status": abstract_status, "abstract_chars": len(abstract or "")})
 
         # 中文说明：引用顺序以正文里 paperId 第一次出现的位置为准，
         # 这样最后的参考文献编号和正文阅读顺序一致。
@@ -200,7 +273,7 @@ def run_writing_node():
             )
 
         writing_report = _build_writing_report(
-            topic=request.topic,
+            topic=topic,
             outline=outline,
             sections=written_sections,
             abstract=abstract,
@@ -218,10 +291,10 @@ def run_writing_node():
                 cited_paper_count=len(cited_paper_ids),
             )
 
-        artifact_refs = list(state.get("writing_artifact_refs") or [])
-        persisted = await _persist_writing_if_possible(state, writing_report)
+        # 中文注释：最终报告按 thread 稳定路径覆盖更新，续跑不产生重复成品。
+        persisted = await _persist_report_if_possible(sink, writing_report)
         if persisted:
-            artifact_refs.append(persisted)
+            _append_artifact_refs(artifact_refs, [persisted])
             if reporter is not None:
                 reporter.artifact(persisted, stage="writing_artifact_ready")
 
@@ -244,22 +317,23 @@ def run_writing_node():
                 reference_count=len(references),
             )
 
-        updated = dict(state)
-        updated.update(
-            # 中文说明：报告生成后 section 内容已经换成参考文献序号，状态里也保存同一份内容，
-            # 避免前端读取 writing_sections 时又看到旧的 [paperId] 引用。
-            writing_sections=list(writing_report.get("sections") or written_sections),
-            writing_report=writing_report,
-            writing_artifact_refs=artifact_refs,
-            diagnostics=diagnostics,
-            current_step="write",
+        # 中文注释：只返回本节点改动的键。
+        return cast(
+            State,
+            {
+                # 中文说明：正文的唯一权威副本是 writing_report["sections"]（引用已替换成编号），
+                # 不再在 State 里另存一份平铺副本；事件里的 sections 由回复节点从 report 取。
+                "writing_report": writing_report,
+                "writing_artifact_refs": artifact_refs,
+                "diagnostics": diagnostics,
+                "current_step": "write",
+            },
         )
-        return cast(State, updated)
 
     return _node
 
 
-def _load_session_read_results(state: State) -> list[JsonObject]:
+def _load_session_read_results(runtime: Runtime[WorkflowRuntimeContext] | None) -> list[JsonObject]:
     """读取当前会话所有轮次保存的论文阅读笔记。
 
     中文说明：会话产物记录里既有阅读汇总，也有每篇论文自己的 note.json。
@@ -267,8 +341,9 @@ def _load_session_read_results(state: State) -> list[JsonObject]:
     内容完整且不会把同一轮汇总数据重复传给写作 Agent。
     """
 
-    repository = state.get("session_repo")
-    session_key = str(state.get("session_key") or "").strip()
+    context = runtime.context if runtime is not None else None
+    repository = context.session_repo if context is not None else None
+    session_key = str(context.session_key or "").strip() if context is not None else ""
     if repository is None or not session_key:
         return []
 
@@ -290,6 +365,14 @@ def _load_session_read_results(state: State) -> list[JsonObject]:
         except (OSError, UnicodeError, json.JSONDecodeError):
             continue
         if not isinstance(payload, dict):
+            continue
+        # 中文注释：只认当前 note envelope——外层保存归属与恢复信息，写作消费方
+        # 只取 result 内层的 PaperReadResult；其他形状一律跳过。
+        nested_result = payload.get("result")
+        if not isinstance(nested_result, dict):
+            continue
+        payload = nested_result
+        if payload.get("failure") is not None:
             continue
         # 中文注释：被软丢弃的论文笔记照常落盘用于审计，但写作节点不能引用它们，
         # 否则前面丢弃的无关论文会从这里"复活"进入正文和参考文献。
@@ -404,7 +487,6 @@ def _build_writing_report(
     numbered_abstract = _replace_citation_numbers(abstract, citation_index_by_paper_id)
 
     return {
-        "writing_version": WRITING_VERSION,
         "topic": topic,
         "writing_outline": outline,
         "sections": numbered_sections,
@@ -828,59 +910,65 @@ def _collect_cited_paper_ids(sections: list[JsonObject]) -> list[str]:
     return result
 
 
-def _resolve_llm(state: State) -> ProviderSnapshot | None:
-    """优先使用外部注入的正文写作模型，没有注入时读取默认配置。"""
+def _resolve_reporter(runtime: Runtime[WorkflowRuntimeContext] | None):
+    """从 graph context 里取出正文写作节点的进度上报器。"""
 
-    injected = state.get("writing_node_llm")
-    if isinstance(injected, ProviderSnapshot):
-        return injected
-    if injected is None:
-        return load_writing_agent_llm()
-    return None
-
-
-def _resolve_reporter(state: State):
-    """从运行上下文里取出正文写作节点的进度上报器。"""
-
-    runtime = cast(WorkflowRuntimeContext | None, state.get("runtime_context"))
-    if runtime is None or runtime.sync_port is None:
+    context = runtime.context if runtime is not None else None
+    if context is None or context.sync_port is None:
         return None
-    return runtime.sync_port.for_node("write", "正文写作")
+    return context.sync_port.for_node("write", "正文写作")
 
 
-async def _persist_writing_if_possible(state: State, report: JsonObject) -> JsonObject | None:
-    """如果当前有会话仓库，就把正文写作结果保存成 JSON 产物。"""
+def _resolve_sink(
+    runtime: Runtime[WorkflowRuntimeContext] | None,
+    *,
+    request_fingerprint: str,
+) -> WritingPersistenceSink | None:
+    """仅在运行时上下文完整时启用写作产物写盘，普通脚本调用仍可直接运行。"""
 
-    repo = cast(SessionRepository | None, state.get("session_repo"))
-    session_key = _optional_text(state.get("session_key"))
-    turn_id = _optional_text(state.get("turn_id"))
-    if repo is None or not session_key or not turn_id:
+    context = runtime.context if runtime is not None else None
+    if context is None:
+        return None
+    repo = context.session_repo
+    session_key = str(context.session_key or "").strip()
+    turn_id = str(context.turn_id or "").strip()
+    if not isinstance(repo, SessionRepository) or not session_key or not turn_id:
+        return None
+    thread_id = str(context.thread_id or "").strip() or f"{session_key}:{turn_id}"
+    return WritingPersistenceSink(
+        repo,
+        session_key=session_key,
+        turn_id=turn_id,
+        thread_id=thread_id,
+        request_fingerprint=request_fingerprint,
+    )
+
+
+def _append_artifact_refs(artifact_refs: list[JsonObject], new_refs: list[JsonObject]) -> None:
+    """按稳定 artifact_id 合并引用，续跑复用稳定点时不会累积重复项。"""
+
+    positions = {
+        str(item.get("artifact_id") or ""): index
+        for index, item in enumerate(artifact_refs)
+        if item.get("artifact_id")
+    }
+    for ref in new_refs:
+        artifact_id = str(ref.get("artifact_id") or "")
+        if artifact_id and artifact_id in positions:
+            artifact_refs[positions[artifact_id]] = ref
+        else:
+            if artifact_id:
+                positions[artifact_id] = len(artifact_refs)
+            artifact_refs.append(ref)
+
+
+async def _persist_report_if_possible(sink: WritingPersistenceSink | None, report: JsonObject) -> JsonObject | None:
+    """如果当前有会话仓库，就把最终写作报告保存成 JSON 产物。"""
+
+    if sink is None:
         return None
     try:
-        record = await asyncio.to_thread(
-            repo.write_artifact,
-            session_key,
-            "writing",
-            "writing.json",
-            json.dumps(report, ensure_ascii=False, indent=2),
-            relative_path=f"artifacts/writing/{turn_id}/writing.json",
-            metadata={"turn_id": turn_id, "format": "json", "writing_version": WRITING_VERSION},
-        )
+        persisted = await asyncio.to_thread(sink.persist_report, report)
     except Exception:
         return None
-    return {
-        "artifact_id": str(record["id"]),
-        "artifact_type": str(record["artifact_type"]),
-        "name": str(record["name"]),
-        "path": str(record["path"]),
-        "size": int(record["size"]),
-        "created_at": str(record["created_at"]),
-        "metadata": dict(record.get("metadata") or {}),
-    }
-
-
-def _optional_text(value: Any) -> str | None:
-    """把可选值整理成非空字符串。"""
-
-    text = str(value or "").strip()
-    return text or None
+    return persisted.artifacts[0] if persisted.artifacts else None

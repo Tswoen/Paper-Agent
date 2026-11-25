@@ -9,13 +9,13 @@ from fastapi.responses import FileResponse, StreamingResponse
 
 from src.repositories.sessions.base import SessionRepository
 from src.services.session_runs import SessionRunService, encode_sse
+from src.services.trace_bundle import TraceBundleService
 from src.services.sessions import (
     MessageHandler,
     create_session,
     delete_session,
     fetch_thread,
     list_sessions,
-    submit_message,
 )
 
 
@@ -36,6 +36,9 @@ def create_sessions_router(
 
     router = APIRouter(prefix="/api/sessions", tags=["sessions"])
     resolved_run_service = run_service or SessionRunService(repo=repo, message_handler=message_handler)
+    # 中文注释：带上 checkpoint bundle，轨迹导出才能附带状态快照历史；
+    # 服务层默认持有内存 bundle，测试/裸脚本路径也不会缺对象。
+    trace_service = TraceBundleService(repo, checkpoint_bundle=resolved_run_service.checkpoint_bundle)
 
     @router.get("")
     async def get_sessions() -> JsonObject:
@@ -54,6 +57,32 @@ def create_sessions_router(
         """读取指定会话的完整线程快照。"""
 
         return fetch_thread(repo, session_key)
+
+    @router.get("/{session_key}/traces")
+    async def get_traces(session_key: str) -> JsonObject:
+        """列出会话中已有持久化数据、可导出轨迹的回合。"""
+
+        return await asyncio.to_thread(trace_service.list_traces, session_key)
+
+    @router.get("/{session_key}/traces/{turn_id}")
+    async def download_trace(session_key: str, turn_id: str) -> StreamingResponse:
+        """下载一个回合的全量轨迹 zip，不在服务器上保留导出副本。"""
+
+        payload = await asyncio.to_thread(trace_service.build_zip, session_key, turn_id)
+        return StreamingResponse(
+            iter([payload]),
+            media_type="application/zip",
+            headers={
+                "Content-Length": str(len(payload)),
+                "Content-Disposition": f'attachment; filename="{_trace_filename(turn_id)}"',
+            },
+        )
+
+    @router.get("/{session_key}/traces/{turn_id}/events")
+    async def get_trace_turn_detail(session_key: str, turn_id: str) -> JsonObject:
+        """按回合返回事件/消息/产物正文，供轨迹抽屉按需加载。"""
+
+        return await asyncio.to_thread(trace_service.turn_detail, session_key, turn_id)
 
     @router.get("/{session_key}/artifacts/{artifact_id}")
     async def get_artifact(session_key: str, artifact_id: str) -> FileResponse:
@@ -79,14 +108,6 @@ def create_sessions_router(
         """删除指定会话。"""
 
         return delete_session(repo, session_key)
-
-    @router.post("/{session_key}/messages")
-    async def post_message(session_key: str, request: Request) -> JsonObject:
-        """兼容旧版同步消息接口，提交后等待整次运行完成。"""
-
-        body = await _json_body(request)
-        # 旧接口会等待完整工作流结束，放到线程里执行，避免卡住其他异步请求。
-        return await asyncio.to_thread(submit_message, repo, session_key, body, message_handler=message_handler)
 
     @router.post("/{session_key}/runs", status_code=202)
     async def post_run(session_key: str, request: Request) -> JsonObject:
@@ -141,6 +162,16 @@ async def _json_body(request: Request) -> JsonObject:
     if not isinstance(payload, dict):
         raise ValueError("request body must be a JSON object")
     return payload
+
+
+def _trace_filename(turn_id: str) -> str:
+    """把回合编号转换成安全的下载文件名，避免响应头注入。"""
+
+    safe_turn_id = "".join(
+        character if character.isascii() and (character.isalnum() or character in {"-", "_"}) else "_"
+        for character in turn_id
+    )
+    return f"paper-agent-trace-{safe_turn_id[:100] or 'turn'}.zip"
 
 
 def _artifact_media_type(file_path: Path) -> str:

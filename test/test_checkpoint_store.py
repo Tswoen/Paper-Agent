@@ -1,0 +1,304 @@
+import sqlite3
+import tempfile
+import unittest
+from contextlib import closing, contextmanager
+from pathlib import Path
+from unittest import mock
+
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.sqlite import SqliteSaver
+
+from src.graph.checkpointing import (
+    MemoryCheckpointRegistry,
+    build_checkpoint_bundle,
+)
+from src.llm.config import CheckpointSettings, SystemConfig
+
+
+class CheckpointBundleTest(unittest.TestCase):
+    """验证 checkpoint 工厂、SQLite 建表与注册表在两种后端上的行为一致。"""
+
+    @contextmanager
+    def _sqlite_bundle(self):
+        """提供临时目录里的 SQLite bundle；先关连接再删目录，避免 Windows 文件占用。"""
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "checkpoints.db"
+            bundle = build_checkpoint_bundle(
+                CheckpointSettings(backend="sqlite", path=str(database_path))
+            )
+            try:
+                yield bundle, database_path
+            finally:
+                bundle.close()
+
+    def test_memory_backend_uses_in_memory_saver(self):
+        bundle = build_checkpoint_bundle(CheckpointSettings(backend="memory"))
+        self.addCleanup(bundle.close)
+
+        self.assertIsInstance(bundle.saver, InMemorySaver)
+        self.assertIsInstance(bundle.registry, MemoryCheckpointRegistry)
+        self.assertFalse(bundle.is_persistent)
+
+    def test_sqlite_backend_creates_database_and_tables(self):
+        with self._sqlite_bundle() as (bundle, database_path):
+            self.assertIsInstance(bundle.saver, SqliteSaver)
+            self.assertTrue(bundle.is_persistent)
+            self.assertTrue(database_path.exists())
+
+            with closing(sqlite3.connect(database_path)) as connection:
+                tables = {
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table'"
+                    )
+                }
+            # 官方 saver 的两张表 + 我们自己的 run 账本都必须在同一个文件里。
+            self.assertLessEqual({"checkpoints", "writes", "checkpoint_runs"}, tables)
+
+    def test_registry_contract_on_all_backends(self):
+        memory_bundle = build_checkpoint_bundle(CheckpointSettings(backend="memory"))
+        self.addCleanup(memory_bundle.close)
+
+        with self._sqlite_bundle() as (sqlite_bundle, _):
+            for bundle in (memory_bundle, sqlite_bundle):
+                with self.subTest(backend=bundle.backend):
+                    self._exercise_registry_contract(bundle)
+
+    def _exercise_registry_contract(self, bundle) -> None:
+        """同一份断言跑两种实现，任何行为不一致都会在这里暴露。"""
+
+        registry = bundle.registry
+        registry.mark_started(
+            thread_id="session-a:turn-1",
+            session_key="session-a",
+            turn_id="turn-1",
+            run_id="run-1",
+            started_at="2026-11-10T10:00:00+00:00",
+        )
+        row = registry.get("session-a:turn-1")
+        self.assertIsNotNone(row)
+        self.assertEqual(row["status"], "running")
+        # 账本只负责“找最近线程”，不判断能不能续；running 也能被取到。
+        latest = registry.latest_thread("session-a")
+        self.assertIsNotNone(latest)
+        self.assertEqual(latest["thread_id"], "session-a:turn-1")
+        self.assertEqual(latest["status"], "running")
+
+        # 续跑：同一 thread 重新开始，状态回到 running。
+        registry.mark_started(
+            thread_id="session-a:turn-1",
+            session_key="session-a",
+            turn_id="turn-1",
+            run_id="run-2",
+            started_at="2026-11-10T10:01:00+00:00",
+        )
+        row = registry.get("session-a:turn-1")
+        self.assertEqual(row["status"], "running")
+        self.assertEqual(row["run_id"], "run-2")
+        # 中文注释：续跑只更新 run_id/时间，首次登记的会话与轮次不能被覆盖。
+        self.assertEqual(row["session_key"], "session-a")
+        self.assertEqual(row["turn_id"], "turn-1")
+
+        registry.mark_finished(
+            thread_id="session-a:turn-1",
+            status="failed",
+            finished_at="2026-11-10T10:05:00+00:00",
+        )
+        latest = registry.latest_thread("session-a")
+        self.assertIsNotNone(latest)
+        self.assertEqual(latest["thread_id"], "session-a:turn-1")
+        self.assertEqual(latest["status"], "failed")
+
+        # 完成后仍是最新线程；能不能续由 checkpointer 判断，不由账本状态决定。
+        registry.mark_finished(
+            thread_id="session-a:turn-1",
+            status="completed",
+            finished_at="2026-11-10T10:06:00+00:00",
+        )
+        latest = registry.latest_thread("session-a")
+        self.assertEqual(latest["thread_id"], "session-a:turn-1")
+        self.assertEqual(latest["status"], "completed")
+
+        registry.mark_started(
+            thread_id="session-a:turn-2",
+            session_key="session-a",
+            turn_id="turn-2",
+            run_id="run-3",
+            started_at="2026-11-10T11:00:00+00:00",
+        )
+        registry.mark_finished(
+            thread_id="session-a:turn-2",
+            status="cancelled",
+            finished_at="2026-11-10T11:01:00+00:00",
+        )
+
+        listed = [row["thread_id"] for row in registry.list_threads("session-a")]
+        self.assertEqual(listed, ["session-a:turn-2", "session-a:turn-1"])
+        self.assertEqual(registry.latest_thread("session-a")["thread_id"], "session-a:turn-2")
+
+        self.assertTrue(registry.delete_thread("session-a:turn-2"))
+        self.assertFalse(registry.delete_thread("session-a:turn-2"))
+        self.assertEqual(len(registry.list_threads()), 1)
+
+        # 进程重启对账：running → interrupted 后进入可续跑集合，且不会重复计数。
+        registry.mark_started(
+            thread_id="session-a:turn-3",
+            session_key="session-a",
+            turn_id="turn-3",
+            run_id="run-4",
+            started_at="2026-11-10T12:00:00+00:00",
+        )
+        self.assertEqual(
+            registry.mark_running_interrupted(
+                "session-a", finished_at="2026-11-10T12:05:00+00:00"
+            ),
+            1,
+        )
+        row = registry.get("session-a:turn-3")
+        self.assertEqual(row["status"], "interrupted")
+        self.assertEqual(registry.latest_thread("session-a")["thread_id"], "session-a:turn-3")
+        self.assertEqual(registry.mark_running_interrupted("session-a"), 0)
+
+    def test_mark_finished_validates_status_and_existence(self):
+        bundle = build_checkpoint_bundle(CheckpointSettings(backend="memory"))
+        self.addCleanup(bundle.close)
+
+        with self.assertRaises(ValueError):
+            bundle.registry.mark_finished(thread_id="missing", status="running")
+        with self.assertRaises(KeyError):
+            bundle.registry.mark_finished(thread_id="missing", status="failed")
+
+    def test_bundle_delete_thread_removes_checkpoints_and_index(self):
+        """retention 的删除入口必须同时清掉 saver 快照和账本行。"""
+
+        bundle = build_checkpoint_bundle(CheckpointSettings(backend="memory"))
+        self.addCleanup(bundle.close)
+        thread_id = "delete-thread"
+        config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+        bundle.saver.put(
+            config,
+            {
+                "v": 1,
+                "id": "checkpoint-1",
+                "ts": "2026-11-11T00:00:00+00:00",
+                "channel_values": {},
+                "channel_versions": {},
+                "versions_seen": {},
+                "updated_channels": None,
+            },
+            {"source": "input", "step": 0, "parents": {}},
+            {},
+        )
+        bundle.registry.mark_started(
+            thread_id=thread_id,
+            session_key="session-delete",
+            turn_id="turn-1",
+            run_id="run-1",
+        )
+
+        bundle.delete_thread(thread_id)
+
+        self.assertIsNone(bundle.saver.get_tuple({"configurable": {"thread_id": thread_id}}))
+        self.assertIsNone(bundle.registry.get(thread_id))
+
+    def test_registry_initialization_failure_closes_connection(self):
+        """建表失败时不能在 Windows 上留下占用文件的连接。"""
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "checkpoints.db"
+            with mock.patch("src.graph.checkpointing._REGISTRY_SCHEMA", "CREATE TABLE ???;"):
+                with self.assertRaises(sqlite3.OperationalError):
+                    build_checkpoint_bundle(
+                        CheckpointSettings(backend="sqlite", path=str(database_path))
+                    )
+
+    def test_latest_thread_is_scoped_to_session(self):
+        """不同会话的线程不能互相串。"""
+
+        bundle = build_checkpoint_bundle(CheckpointSettings(backend="memory"))
+        self.addCleanup(bundle.close)
+        registry = bundle.registry
+        registry.mark_started(
+            thread_id="session-1:t1",
+            session_key="session-1",
+            turn_id="t1",
+            run_id="run-1",
+        )
+        registry.mark_started(
+            thread_id="session-2:t1",
+            session_key="session-2",
+            turn_id="t1",
+            run_id="run-2",
+        )
+
+        self.assertEqual(registry.latest_thread("session-1")["thread_id"], "session-1:t1")
+        self.assertEqual(registry.latest_thread("session-2")["thread_id"], "session-2:t1")
+
+        registry.mark_finished(thread_id="session-2:t1", status="completed")
+        self.assertEqual(registry.latest_thread("session-1")["thread_id"], "session-1:t1")
+
+    def test_unknown_backend_is_rejected(self):
+        with self.assertRaises(ValueError):
+            SystemConfig.from_dict({"checkpoint": {"backend": "postgres"}})
+        with self.assertRaises(ValueError):
+            build_checkpoint_bundle(CheckpointSettings(backend="postgres"))
+
+    def test_system_config_parses_checkpoint_section(self):
+        config = SystemConfig.from_dict(
+            {
+                "checkpoint": {
+                    "backend": "memory",
+                    "path": "data/test-checkpoints.db",
+                    "durability": "async",
+                    "retention": {
+                        "enabled": False,
+                        "completed_days": 3,
+                        "failed_days": 9,
+                    },
+                }
+            }
+        )
+
+        self.assertEqual(config.checkpoint.backend, "memory")
+        self.assertEqual(config.checkpoint.path, "data/test-checkpoints.db")
+        self.assertEqual(config.checkpoint.durability, "async")
+        self.assertFalse(config.checkpoint.retention_enabled)
+        self.assertEqual(config.checkpoint.retention_completed_days, 3)
+        self.assertEqual(config.checkpoint.retention_failed_days, 9)
+
+    def test_system_config_loads_nested_checkpoint_yaml(self):
+        """手写的二级 YAML 解析要能读到 retention 这一层。"""
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "system.yaml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        "checkpoint:",
+                        "  backend: memory",
+                        "  retention:",
+                        "    completed_days: 2",
+                        "    failed_days: 4",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            config = SystemConfig.load(config_path)
+
+        self.assertEqual(config.checkpoint.backend, "memory")
+        self.assertEqual(config.checkpoint.retention_completed_days, 2)
+        self.assertEqual(config.checkpoint.retention_failed_days, 4)
+
+    def test_repository_system_yaml_has_checkpoint_defaults(self):
+        config = SystemConfig.load("config/system.yaml")
+
+        self.assertEqual(config.checkpoint.backend, "sqlite")
+        self.assertEqual(config.checkpoint.path, "data/checkpoints.db")
+        self.assertEqual(config.checkpoint.durability, "sync")
+        self.assertTrue(config.checkpoint.retention_enabled)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import shutil
 import sqlite3
+import threading
 import uuid
+import weakref
 from contextlib import contextmanager
 from pathlib import Path
 from posixpath import normpath
@@ -19,6 +22,21 @@ from .base import JsonObject, SessionRepository
 
 
 logger = get_logger(__name__)
+_ARTIFACT_WRITE_LOCKS: weakref.WeakValueDictionary[str, threading.Lock] = weakref.WeakValueDictionary()
+_ARTIFACT_WRITE_LOCKS_GUARD = threading.Lock()
+
+
+def _artifact_write_lock(storage_root: Path, session_id: str, relative_path: str) -> threading.Lock:
+    """让同一路径的原子文件替换和数据库登记处于同一进程内临界区。"""
+
+    normalized_path = normpath(relative_path).replace("\\", "/").lstrip("/")
+    lock_key = f"{storage_root.resolve()}:{session_id}:{normalized_path}"
+    with _ARTIFACT_WRITE_LOCKS_GUARD:
+        lock = _ARTIFACT_WRITE_LOCKS.get(lock_key)
+        if lock is None:
+            lock = threading.Lock()
+            _ARTIFACT_WRITE_LOCKS[lock_key] = lock
+        return lock
 
 
 class SessionStoreBackend:
@@ -182,18 +200,23 @@ class SessionStoreBackend:
                 (created_at, created_at, content[:120], session_id),
             )
 
-    def list_messages(self, session_id: str) -> list[JsonObject]:
-        """按时间顺序读取某个会话下的全部消息。"""
+    def list_messages(self, session_id: str, turn_id: str | None = None) -> list[JsonObject]:
+        """按时间顺序读取会话消息，可选择只读取一个回合。"""
 
+        where_clause = "session_id = ?"
+        parameters: list[Any] = [session_id]
+        if turn_id is not None:
+            where_clause += " AND json_extract(metadata, '$.turn_id') = ?"
+            parameters.append(turn_id)
         with self._connection() as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT id, role, content, created_at, parent_id, metadata
                 FROM session_message
-                WHERE session_id = ?
+                WHERE {where_clause}
                 ORDER BY created_at ASC, rowid ASC
                 """,
-                (session_id,),
+                parameters,
             ).fetchall()
         return [self._row_to_message(row) for row in rows]
 
@@ -243,18 +266,23 @@ class SessionStoreBackend:
         self._append_event_jsonl(session_id, event_record)
         return event_record
 
-    def list_events(self, session_id: str) -> list[JsonObject]:
-        """按序号顺序读取指定会话的完整事件流。"""
+    def list_events(self, session_id: str, turn_id: str | None = None) -> list[JsonObject]:
+        """按序号顺序读取事件流，可选择只读取一个回合。"""
 
+        where_clause = "session_id = ?"
+        parameters: list[Any] = [session_id]
+        if turn_id is not None:
+            where_clause += " AND json_extract(metadata, '$.turn_id') = ?"
+            parameters.append(turn_id)
         with self._connection() as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT id, event_type, content, created_at, seq_no, metadata
                 FROM session_event
-                WHERE session_id = ?
+                WHERE {where_clause}
                 ORDER BY seq_no ASC
                 """,
-                (session_id,),
+                parameters,
             ).fetchall()
         return [self._row_to_event(row) for row in rows]
 
@@ -268,12 +296,50 @@ class SessionStoreBackend:
         created_at: str,
         metadata: JsonObject | None = None,
         artifact_id: str | None = None,
+        replace_existing: bool = False,
     ) -> JsonObject:
-        """向产物表追加一条产物登记记录。"""
+        """登记产物；replace_existing 时按会话和路径更新并保留原产物 ID。"""
 
         normalized_artifact_id = artifact_id or uuid.uuid4().hex
         payload = metadata or {}
         with self._connection() as connection:
+            if replace_existing:
+                # 单进程内可能用线程池并发写不同论文；IMMEDIATE 保证同路径查改不竞争。
+                connection.execute("BEGIN IMMEDIATE")
+                existing = connection.execute(
+                    """
+                    SELECT id FROM session_artifact
+                    WHERE session_id = ? AND path = ?
+                    ORDER BY rowid DESC LIMIT 1
+                    """,
+                    (session_id, path),
+                ).fetchone()
+                if existing is not None:
+                    normalized_artifact_id = str(existing["id"])
+                    connection.execute(
+                        """
+                        UPDATE session_artifact
+                        SET artifact_type = ?, name = ?, size = ?, created_at = ?, metadata = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            artifact_type,
+                            name,
+                            size,
+                            created_at,
+                            self._dump_json(payload),
+                            normalized_artifact_id,
+                        ),
+                    )
+                    return {
+                        "id": normalized_artifact_id,
+                        "artifact_type": artifact_type,
+                        "name": name,
+                        "path": path,
+                        "size": size,
+                        "created_at": created_at,
+                        "metadata": payload,
+                    }
             connection.execute(
                 """
                 INSERT INTO session_artifact (id, session_id, artifact_type, name, path, size, created_at, metadata)
@@ -300,20 +366,124 @@ class SessionStoreBackend:
             "metadata": payload,
         }
 
-    def list_artifacts(self, session_id: str) -> list[JsonObject]:
-        """读取会话关联的全部产物记录。"""
+    def list_artifacts(self, session_id: str, turn_id: str | None = None) -> list[JsonObject]:
+        """读取会话产物记录，可选择只读取一个回合。"""
 
+        where_clause = "session_id = ?"
+        parameters: list[Any] = [session_id]
+        if turn_id is not None:
+            where_clause += " AND json_extract(metadata, '$.turn_id') = ?"
+            parameters.append(turn_id)
         with self._connection() as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT id, artifact_type, name, path, size, created_at, metadata
+                FROM session_artifact
+                WHERE {where_clause}
+                ORDER BY created_at ASC, rowid ASC
+                """,
+                parameters,
+            ).fetchall()
+        return [self._row_to_artifact(row) for row in rows]
+
+    def list_trace_turns(self, session_id: str) -> list[JsonObject]:
+        """用轻量字段汇总可导出的回合，避免读取完整事件和消息正文。"""
+
+        with self._connection() as connection:
+            event_rows = connection.execute(
+                """
+                SELECT
+                    event_type,
+                    created_at,
+                    json_extract(metadata, '$.turn_id') AS turn_id,
+                    json_extract(metadata, '$.run_id') AS run_id,
+                    json_extract(metadata, '$.thread_id') AS thread_id,
+                    json_extract(metadata, '$.status') AS status
+                FROM session_event
+                WHERE session_id = ?
+                ORDER BY seq_no ASC
+                """,
+                (session_id,),
+            ).fetchall()
+            message_rows = connection.execute(
+                """
+                SELECT created_at, json_extract(metadata, '$.turn_id') AS turn_id
+                FROM session_message
+                WHERE session_id = ?
+                ORDER BY created_at ASC, rowid ASC
+                """,
+                (session_id,),
+            ).fetchall()
+            artifact_rows = connection.execute(
+                """
+                SELECT created_at, json_extract(metadata, '$.turn_id') AS turn_id
                 FROM session_artifact
                 WHERE session_id = ?
                 ORDER BY created_at ASC, rowid ASC
                 """,
                 (session_id,),
             ).fetchall()
-        return [self._row_to_artifact(row) for row in rows]
+
+        turns: dict[str, JsonObject] = {}
+
+        def _turn(turn_id: Any, created_at: Any) -> JsonObject | None:
+            # turn_id 是调用方提供的精确标识；不能在这里 trim，否则会与 SQL 精确过滤不一致。
+            normalized_turn_id = str(turn_id or "")
+            if not normalized_turn_id:
+                return None
+            timestamp = str(created_at or "")
+            if normalized_turn_id not in turns:
+                turns[normalized_turn_id] = {
+                    "turn_id": normalized_turn_id,
+                    "run_id": None,
+                    "thread_id": None,
+                    "status": "unknown",
+                    "started_at": timestamp or None,
+                    "updated_at": timestamp or None,
+                    "finished_at": None,
+                    "event_count": 0,
+                    "message_count": 0,
+                    "artifact_count": 0,
+                }
+            summary = turns[normalized_turn_id]
+            if timestamp:
+                if not summary["started_at"] or timestamp < str(summary["started_at"]):
+                    summary["started_at"] = timestamp
+                if not summary["updated_at"] or timestamp > str(summary["updated_at"]):
+                    summary["updated_at"] = timestamp
+            return summary
+
+        for row in event_rows:
+            summary = _turn(row["turn_id"], row["created_at"])
+            if summary is None:
+                continue
+            summary["event_count"] += 1
+            summary["run_id"] = str(row["run_id"] or "") or summary["run_id"]
+            summary["thread_id"] = str(row["thread_id"] or "") or summary["thread_id"]
+            event_type = str(row["event_type"] or "")
+            event_status = str(row["status"] or "").strip()
+            if event_type == "status" and event_status:
+                summary["status"] = event_status
+            elif event_type in {"error", "run_interrupted"}:
+                summary["status"] = event_status or "failed"
+                summary["finished_at"] = str(row["created_at"] or "") or None
+            elif event_type == "turn_end":
+                summary["status"] = event_status or "completed"
+                summary["finished_at"] = str(row["created_at"] or "") or None
+
+        for row in message_rows:
+            summary = _turn(row["turn_id"], row["created_at"])
+            if summary is not None:
+                summary["message_count"] += 1
+        for row in artifact_rows:
+            summary = _turn(row["turn_id"], row["created_at"])
+            if summary is not None:
+                summary["artifact_count"] += 1
+
+        # 中文注释：run_interrupted 等终态事件由生产者在发出时就带上 turn_id
+        # （见 SessionRunService.recover_interrupted_runs），这里只按字段分组，
+        # 不为缺 turn_id 的事件推断归属。
+        return sorted(turns.values(), key=lambda item: str(item.get("updated_at") or ""), reverse=True)
 
     def ensure_session_layout(self, session_id: str) -> Path:
         """确保会话目录及其子目录存在，并返回会话根目录。"""
@@ -343,16 +513,28 @@ class SessionStoreBackend:
             raise ValueError(f"invalid artifact path: {relative_path}")
         target_path = session_dir / Path(normalized_relative_path)
         target_path.parent.mkdir(parents=True, exist_ok=True)
-        if isinstance(content, bytes):
-            target_path.write_bytes(content)
-        else:
-            target_path.write_text(content, encoding=encoding)
+        temporary_path = target_path.with_name(f".{target_path.name}.tmp")
+        try:
+            if isinstance(content, bytes):
+                temporary_path.write_bytes(content)
+            else:
+                temporary_path.write_text(content, encoding=encoding)
+            os.replace(temporary_path, target_path)
+        finally:
+            # 正常替换后临时文件已不存在；异常时也不能留下半成品冒充完成结果。
+            try:
+                temporary_path.unlink()
+            except FileNotFoundError:
+                pass
         return target_path
 
     def _initialize_schema(self) -> None:
         """初始化 SQLite 表结构与必要索引。"""
 
         with self._connection() as connection:
+            # 中文注释：会话库走 WAL，读历史/产物列表时不会被正在写入的事件阻塞。
+            # 这个设置持久写在数据库文件头里，初始化时执行一次即可。
+            connection.execute("PRAGMA journal_mode=WAL")
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS session (
@@ -559,6 +741,36 @@ class SQLiteSessionRepository(SessionRepository):
 
         return [self._hydrate_record(item).summary() for item in self.backend.list_sessions()]
 
+    def list_trace_turns(self, key: str) -> list[JsonObject]:
+        """列出可导出的回合，不组装完整会话聚合。"""
+
+        self._ensure_session_exists(key)
+        return self.backend.list_trace_turns(key)
+
+    def list_events(self, key: str, turn_id: str) -> list[JsonObject]:
+        """只读取指定回合的事件。"""
+
+        self._ensure_session_exists(key)
+        return self.backend.list_events(key, turn_id)
+
+    def list_messages(self, key: str, turn_id: str) -> list[JsonObject]:
+        """只读取指定回合的消息。"""
+
+        self._ensure_session_exists(key)
+        return self.backend.list_messages(key, turn_id)
+
+    def list_artifacts(self, key: str, turn_id: str) -> list[JsonObject]:
+        """只读取指定回合的产物。"""
+
+        self._ensure_session_exists(key)
+        return self.backend.list_artifacts(key, turn_id)
+
+    def _ensure_session_exists(self, key: str) -> None:
+        """用主表轻量校验会话是否存在，避免为校验加载全部事件。"""
+
+        if self.backend.get_session(key) is None:
+            raise SessionError(f"session not found: {key}", 404)
+
     def delete(self, key: str) -> None:
         """删除指定会话。"""
 
@@ -631,26 +843,30 @@ class SQLiteSessionRepository(SessionRepository):
         metadata: JsonObject | None = None,
         created_at: str | None = None,
         encoding: str = "utf-8",
+        replace_existing: bool = False,
     ) -> JsonObject:
         """向指定会话写入产物文件，并在仓储中登记元数据。"""
 
         self.get(key)
         resolved_created_at = created_at or utc_now()
-        target_path = self.backend.write_artifact_file(
-            session_id=key,
-            relative_path=relative_path,
-            content=content,
-            encoding=encoding,
-        )
-        artifact_record = self.backend.append_artifact_record(
-            session_id=key,
-            artifact_type=artifact_type,
-            name=name,
-            path=str(target_path),
-            size=target_path.stat().st_size,
-            created_at=resolved_created_at,
-            metadata=copy.deepcopy(metadata or {}),
-        )
+        # 当前仅支持单进程；同路径 writer 共用确定性 tmp，因此必须一起串行化。
+        with _artifact_write_lock(self.backend.storage_root, key, relative_path):
+            target_path = self.backend.write_artifact_file(
+                session_id=key,
+                relative_path=relative_path,
+                content=content,
+                encoding=encoding,
+            )
+            artifact_record = self.backend.append_artifact_record(
+                session_id=key,
+                artifact_type=artifact_type,
+                name=name,
+                path=str(target_path),
+                size=target_path.stat().st_size,
+                created_at=resolved_created_at,
+                metadata=copy.deepcopy(metadata or {}),
+                replace_existing=replace_existing,
+            )
         logger.info(
             "写入会话产物",
             extra={

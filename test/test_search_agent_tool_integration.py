@@ -1,6 +1,5 @@
 import unittest
 
-from src.agents import ReviewRequest
 from src.agents.base import AgentContext
 from src.agents.searchAgent import SearchAgent, build_search_agent
 from src.llm.base import LLMResponse
@@ -39,16 +38,21 @@ class SearchAgentToolIntegrationTest(unittest.TestCase):
 
         provider = _FakeProvider('{"keywords":["multi-agent systems","literature review automation","academic retrieval"]}')
         agent = SearchAgent(AgentContext(spec=SearchAgent.spec, llm=_FakeSnapshot(provider)))
+        # 中文注释：State 里的 request 是纯 dict（领域对象在入口已转换）。
         state = {
-            "request": ReviewRequest(
-                topic="多智能体文献综述自动化",
-                constraints={"sources": ["openalex"], "max_results": 5, "year_from": 2022},
-            )
+            "request": {
+                "topic": "多智能体文献综述自动化",
+                "constraints": {"sources": ["openalex"], "max_results": 5, "year_from": 2022},
+                "language": "zh",
+            }
         }
 
         output = agent.run(state)
 
         self.assertEqual(len(provider.calls), 1)
+        # 中文注释：主题必须真的进了提示词——`getattr(request, "topic")` 在 dict 上会
+        # 静默返回空串，这条断言专门堵那个坑。
+        self.assertIn("多智能体文献综述自动化", provider.calls[0]["messages"][-1]["content"])
         self.assertTrue(output["diagnostics"]["used_llm"])
         self.assertIn("multi-agent systems", output["search_intent"].keywords)
         self.assertFalse(output["search_halted"])
@@ -60,10 +64,11 @@ class SearchAgentToolIntegrationTest(unittest.TestCase):
 
         agent = build_search_agent(llm=None)
         state = {
-            "request": ReviewRequest(
-                topic="literature review automation",
-                constraints={"sources": ["openalex"], "max_results": 5, "year_from": 2022},
-            )
+            "request": {
+                "topic": "literature review automation",
+                "constraints": {"sources": ["openalex"], "max_results": 5, "year_from": 2022},
+                "language": "zh",
+            }
         }
 
         output = agent.run(state)

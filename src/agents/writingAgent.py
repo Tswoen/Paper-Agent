@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Literal, TypedDict
 
@@ -17,6 +18,11 @@ from .Prompts import WRITING_ABSTRACT_SYSTEM_PROMPT, WRITING_AGENT_SYSTEM_PROMPT
 
 
 WritingAction = Literal["tool", "draft"]
+
+# 中文说明：小节进度回调是"本次调用的环境"，不是业务数据。它不能放进图状态——
+# 一旦外层接了 Checkpointer，内层小节循环会继承同一个 saver，函数无法被序列化。
+# 放在 ContextVar 里既不会进 checkpoint，也天然按 asyncio 任务隔离。
+_SECTION_PROGRESS_CALLBACK: ContextVar[Any] = ContextVar("paper_agent_section_progress_callback", default=None)
 
 
 class SectionLoopState(TypedDict, total=False):
@@ -50,9 +56,6 @@ class SectionLoopState(TypedDict, total=False):
     review: JsonObject
     completed: bool
     warnings: list[str]
-    # 中文说明：这是一个可选的界面通知函数，只把当前小节正在做什么告诉外层，
-    # 不参与正文生成，也不会改变循环里的数据。
-    progress_callback: Any
 
 
 class WritingAgent(BaseAgent):
@@ -136,9 +139,14 @@ class WritingAgent(BaseAgent):
             "review": {},
             "completed": False,
             "warnings": [],
-            "progress_callback": progress_callback,
         }
-        final_state = await graph.ainvoke(initial_state)
+        # 中文注释：回调通过 ContextVar 传递，不进入小节循环的 State；
+        # 这样内层图即使被外层 Checkpointer 一并持久化，也不会遇到不可序列化的函数。
+        token = _SECTION_PROGRESS_CALLBACK.set(progress_callback)
+        try:
+            final_state = await graph.ainvoke(initial_state)
+        finally:
+            _SECTION_PROGRESS_CALLBACK.reset(token)
         section_result = {
             "section_id": section_id,
             "task": task,
@@ -391,7 +399,7 @@ def _route_after_review_step(state: SectionLoopState) -> str:
 def _notify_section_progress(state: SectionLoopState, message: str) -> None:
     """把小节当前阶段交给外层；没有回调时保持原来的静默行为。"""
 
-    callback = state.get("progress_callback")
+    callback = _SECTION_PROGRESS_CALLBACK.get()
     if callable(callback):
         callback(message)
 
@@ -399,7 +407,7 @@ def _notify_section_progress(state: SectionLoopState, message: str) -> None:
 def _notify_section_usage(state: SectionLoopState, response: object) -> None:
     """把小节内部每一次模型调用的真实用量交给外层小节卡片。"""
 
-    callback = state.get("progress_callback")
+    callback = _SECTION_PROGRESS_CALLBACK.get()
     if callable(callback):
         from src.llm.base import normalize_token_usage
 

@@ -3,14 +3,18 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from src.agents.analyseAgent import AnalyseAgent, build_analyse_agent, load_analyse_agent_llm
 from src.graph.runtime import WorkflowRuntimeContext
 from src.graph.state_models import JsonObject, State
 from src.llm import ProviderSnapshot
+from src.models.artifacts import to_artifact_ref
 from src.models.sessions import utc_now
-from src.repositories.sessions.base import SessionRepository
+
+
+if TYPE_CHECKING:
+    from langgraph.runtime import Runtime
 
 
 # 综合分析采用独立的全域八部分结构，因此提升报告版本号。
@@ -34,7 +38,7 @@ def run_analyse_node():
     3. 把最终报告放回 state，后面的回复节点和前端就能直接使用。
     """
 
-    async def _node(state: State) -> State:
+    async def _node(state: State, runtime: Runtime[WorkflowRuntimeContext] | None) -> State:
         """执行分析节点。
 
         子主题分析失败时仍可保留保守结果，但全局综合分析是后续写作的核心依据；
@@ -44,12 +48,14 @@ def run_analyse_node():
         request = state.get("request")
         if request is None:
             raise ValueError("分析节点缺少用户综述主题，无法继续分析")
+        # 中文注释：State 里的 request 是纯 dict，这里取出主题后就只用字符串。
+        topic = str(request.get("topic") or "") if isinstance(request, dict) else ""
 
-        reporter = _resolve_reporter(state)
+        reporter = _resolve_reporter(runtime)
         read_results = list(state.get("read_results") or [])
         read_summary = dict(state.get("read_summary") or {})
         search_summary = dict(state.get("search_summary") or {})
-        llm = _resolve_llm(state)
+        llm = load_analyse_agent_llm()
         agent = build_analyse_agent(llm)
 
         if reporter is not None:
@@ -59,7 +65,7 @@ def run_analyse_node():
         model_used = llm.model if isinstance(llm, ProviderSnapshot) else "unavailable"
 
         if not groups:
-            report = _empty_report(topic=request.topic, model_used=model_used)
+            report = _empty_report(topic=topic, model_used=model_used)
         else:
             completed_subtopic_count = 0
 
@@ -96,7 +102,7 @@ def run_analyse_node():
 
                 analysis = await _analyse_one_subtopic(
                     group,
-                    topic=request.topic,
+                    topic=topic,
                     agent=agent,
                     usage_callback=report_subtopic_usage,
                 )
@@ -134,7 +140,7 @@ def run_analyse_node():
 
             try:
                 overall_analysis = await _analyse_overall(
-                    topic=request.topic,
+                    topic=topic,
                     subtopic_analyses=subtopic_analyses,
                     agent=agent,
                     usage_callback=report_overall_usage,
@@ -146,14 +152,14 @@ def run_analyse_node():
                     reporter.failed(str(exc), stage="analyse_overall")
                 raise
             report = _build_final_report(
-                topic=request.topic,
+                topic=topic,
                 subtopic_analyses=subtopic_analyses,
                 overall_analysis=overall_analysis,
                 model_used=model_used,
             )
 
         artifact_refs = list(state.get("analysis_artifact_refs") or [])
-        persisted = await _persist_report_if_possible(state, report)
+        persisted = await _persist_report_if_possible(runtime, report)
         if persisted:
             artifact_refs.append(persisted)
             if reporter is not None:
@@ -167,13 +173,15 @@ def run_analyse_node():
                 total_papers_analyzed=report["execution_metadata"]["total_papers_analyzed"],
             )
 
-        updated = dict(state)
-        updated.update(
-            analysis_report=report,
-            analysis_artifact_refs=artifact_refs,
-            current_step="analyse",
+        # 中文注释：只返回本节点改动的键；未返回的 channel 由 LangGraph 原样保留。
+        return cast(
+            State,
+            {
+                "analysis_report": report,
+                "analysis_artifact_refs": artifact_refs,
+                "current_step": "analyse",
+            },
         )
-        return cast(State, updated)
 
     return _node
 
@@ -438,32 +446,22 @@ def _empty_report(*, topic: str, model_used: str) -> JsonObject:
     }
 
 
-def _resolve_llm(state: State) -> ProviderSnapshot | None:
-    """优先使用外部注入的分析模型，没有注入时读取 AnalyseAgent 自己的模型配置。"""
+def _resolve_reporter(runtime: Runtime[WorkflowRuntimeContext] | None):
+    """从 graph context 里取出分析节点的上报器。"""
 
-    injected = state.get("analysis_node_llm")
-    if isinstance(injected, ProviderSnapshot):
-        return injected
-    if injected is None:
-        return load_analyse_agent_llm()
-    return None
-
-
-def _resolve_reporter(state: State):
-    """从运行上下文里取出分析节点的上报器。"""
-
-    runtime = cast(WorkflowRuntimeContext | None, state.get("runtime_context"))
-    if runtime is None or runtime.sync_port is None:
+    context = runtime.context if runtime is not None else None
+    if context is None or context.sync_port is None:
         return None
-    return runtime.sync_port.for_node("analyse", "论文分析")
+    return context.sync_port.for_node("analyse", "论文分析")
 
 
-async def _persist_report_if_possible(state: State, report: JsonObject) -> JsonObject | None:
+async def _persist_report_if_possible(runtime: Runtime[WorkflowRuntimeContext] | None, report: JsonObject) -> JsonObject | None:
     """有会话仓库时保存分析报告。"""
 
-    repo = cast(SessionRepository | None, state.get("session_repo"))
-    session_key = _optional_text(state.get("session_key"))
-    turn_id = _optional_text(state.get("turn_id"))
+    context = runtime.context if runtime is not None else None
+    repo = context.session_repo if context is not None else None
+    session_key = _optional_text(context.session_key) if context is not None else None
+    turn_id = _optional_text(context.turn_id) if context is not None else None
     if repo is None or not session_key or not turn_id:
         return None
     try:
@@ -478,15 +476,7 @@ async def _persist_report_if_possible(state: State, report: JsonObject) -> JsonO
         )
     except Exception:
         return None
-    return {
-        "artifact_id": str(record["id"]),
-        "artifact_type": str(record["artifact_type"]),
-        "name": str(record["name"]),
-        "path": str(record["path"]),
-        "size": int(record["size"]),
-        "created_at": str(record["created_at"]),
-        "metadata": dict(record.get("metadata") or {}),
-    }
+    return to_artifact_ref(record)
 
 
 def _subtopic_keywords(read_summary: JsonObject, search_summary: JsonObject) -> dict[str, str]:

@@ -17,8 +17,10 @@ if TYPE_CHECKING:
 class RuntimeConcurrencyLimits:
     """保存单次 run 里统一使用的并发上限。"""
 
-    # 中文注释：这一轮先把并发上限统一收口到这里，后面阅读节点、下载模块、
-    # 模型调用、embedding 调用都从这里拿值，避免每个模块再各自写死一个数字。
+    # 中文注释：并发上限统一收口在这里，阅读节点、下载模块、模型调用、
+    # embedding 调用都从这里拿值，避免每个模块再各自写死一个数字。
+    # 默认值与 system.yaml 顶层 concurrency 段一致；生产路径由组合根
+    # （SessionRunService）读配置后注入，这里保持不依赖配置层。
     search_source_concurrency: int = 4
     paper_task_concurrency: int = 3
     download_concurrency: int = 3
@@ -34,13 +36,14 @@ class WorkflowRuntimeResources:
     # 中文注释：搜索节点查询多个来源时，也统一走这里的信号量控制。
     # 这样后面如果想调搜索并发，只需要改一处，不用再去搜索模块里找写死的数字。
     search_source_semaphore: asyncio.Semaphore = field(init=False)
-    # 中文注释：论文级并发这一轮先不真正启用，但先把信号量放到统一资源对象里，
-    # 后面做“多篇论文并发处理”时可以直接复用，不需要再重新设计入口。
+    # 中文注释：论文级并发信号量。read 节点用它限制同时处理的论文数；
+    # 同一数值还会由图入口写进 RunnableConfig 的 max_concurrency，
+    # 为将来 Send 并行拓扑预留任务级上限。
     paper_task_semaphore: asyncio.Semaphore = field(init=False)
     # 中文注释：下载并发这一轮会真正接入异步下载入口，避免下载模块继续自己偷偷限流。
     download_semaphore: asyncio.Semaphore = field(init=False)
-    # 中文注释：阅读模型并发和 embedding 并发这轮先统一归口，暂时不往 provider
-    # 内部和索引实现里强行下沉，避免一下改太多模块。
+    # 中文注释：阅读模型并发由摘要、全文提取、证据验证共用；embedding 并发
+    # 已接入向量索引实现。provider 内部另有一层自身并发限制，两层互不替代。
     read_model_semaphore: asyncio.Semaphore = field(init=False)
     embedding_semaphore: asyncio.Semaphore = field(init=False)
     # 中文注释：同一个 run 内共用一个 AsyncClient，后续多个异步下载可以复用连接，

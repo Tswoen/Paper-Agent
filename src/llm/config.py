@@ -12,6 +12,10 @@ from .registry import match_provider_backend
 
 JsonObject = dict[str, Any]
 
+# 运行状态存档的可选实现与持久化档位（见 CheckpointSettings）。
+_CHECKPOINT_BACKENDS = frozenset({"sqlite", "memory"})
+_DURABILITY_MODES = frozenset({"sync", "async", "exit"})
+
 
 @dataclass(slots=True)
 class ProviderConfig:
@@ -103,6 +107,40 @@ class SearchDefaults:
 
 
 @dataclass(slots=True)
+class CheckpointSettings:
+    """运行状态存档（LangGraph Checkpointer）的配置。
+
+    中文说明：节点永远看不到 saver，它只在 build_graph 的 compile 阶段出现。
+    这里只决定用哪种实现、存到哪、以及过渡期保留多久。
+    """
+
+    backend: str = "sqlite"
+    path: str = "data/checkpoints.db"
+    # sync：每个 superstep 前落盘；async：异步落盘；exit：只在图结束时落盘。
+    durability: str = "sync"
+    retention_enabled: bool = True
+    retention_completed_days: int = 7
+    retention_failed_days: int = 30
+
+
+@dataclass(slots=True)
+class ConcurrencySettings:
+    """系统级并发上限（system.yaml 顶层 concurrency 段）。
+
+    中文说明：这些数字只控制"同时干几件事"，不改变业务输入输出。
+    生产路径由组合根（SessionRunService）读出来装进 RuntimeConcurrencyLimits，
+    各资源级信号量再从那里取值；这里保持纯配置，不依赖图模块。
+    默认值与断代前的硬编码默认一致，缺省配置时行为不变。
+    """
+
+    search_source: int = 4
+    paper_task: int = 3
+    download: int = 3
+    read_model: int = 2
+    embedding: int = 1
+
+
+@dataclass(slots=True)
 class SystemConfig:
     """从 config/system.yaml 读取的系统默认值。"""
 
@@ -111,6 +149,8 @@ class SystemConfig:
     paper_retrieval: PaperRetrievalConfig = field(default_factory=PaperRetrievalConfig)
     search: SearchDefaults = field(default_factory=SearchDefaults)
     read: ReadDefaults = field(default_factory=ReadDefaults)
+    checkpoint: CheckpointSettings = field(default_factory=CheckpointSettings)
+    concurrency: ConcurrencySettings = field(default_factory=ConcurrencySettings)
 
     @classmethod
     def load(cls, path: str | Path = "config/system.yaml") -> "SystemConfig":
@@ -127,6 +167,9 @@ class SystemConfig:
         paper_retrieval = dict((data or {}).get("paper_retrieval") or {})
         search = dict((data or {}).get("search") or {})
         read = dict((data or {}).get("read") or {})
+        checkpoint = dict((data or {}).get("checkpoint") or {})
+        concurrency = dict((data or {}).get("concurrency") or {})
+        retention = dict(checkpoint.get("retention") or {})
         semantic_enabled = _optional_bool(search.get("semantic_filter_enabled"))
         return cls(
             llm=LLMDefaults(
@@ -167,6 +210,34 @@ class SystemConfig:
                 verify_max_retries=_read_non_negative_int(read.get("verify_max_retries"), 1),
                 verify_max_chars=_read_positive_int(read.get("verify_max_chars"), 120000),
                 verify_optional_fields=_string_tuple(read.get("verify_optional_fields"), default=("limitations",)),
+            ),
+            checkpoint=CheckpointSettings(
+                # 中文说明：backend/durability 写错时直接报错，避免悄悄退回另一个存储实现。
+                backend=_read_choice(
+                    checkpoint.get("backend"),
+                    _CHECKPOINT_BACKENDS,
+                    "sqlite",
+                    field="checkpoint.backend",
+                ),
+                path=str(checkpoint.get("path") or "data/checkpoints.db"),
+                durability=_read_choice(
+                    checkpoint.get("durability"),
+                    _DURABILITY_MODES,
+                    "sync",
+                    field="checkpoint.durability",
+                ),
+                retention_enabled=_optional_bool(retention.get("enabled")) is not False,
+                retention_completed_days=_read_positive_int(retention.get("completed_days"), 7),
+                retention_failed_days=_read_positive_int(retention.get("failed_days"), 30),
+            ),
+            concurrency=ConcurrencySettings(
+                # 中文说明：并发上限逐键读取，缺省/非法/非正数都回退默认值，
+                # 与 search/read 段的数值配置保持同一套容错风格。
+                search_source=_read_positive_int(concurrency.get("search_source"), 4),
+                paper_task=_read_positive_int(concurrency.get("paper_task"), 3),
+                download=_read_positive_int(concurrency.get("download"), 3),
+                read_model=_read_positive_int(concurrency.get("read_model"), 2),
+                embedding=_read_positive_int(concurrency.get("embedding"), 1),
             ),
         )
 
@@ -459,6 +530,21 @@ def _optional_text(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _read_choice(value: Any, allowed: frozenset[str], default: str, *, field: str) -> str:
+    """读取枚举型配置，未配置用默认值，写错则直接报错。
+
+    中文说明：backend/durability 这类字段写错时不能静默退回默认值，
+    否则用户以为开了 SQLite 存档，实际可能跑在另一种实现上。
+    """
+
+    if value is None or str(value).strip() == "":
+        return default
+    text = str(value).strip().lower()
+    if text not in allowed:
+        raise ValueError(f"{field} 不支持 {value!r}；可选值：{', '.join(sorted(allowed))}")
+    return text
 
 
 def _string_tuple(value: Any, *, default: tuple[str, ...]) -> tuple[str, ...]:

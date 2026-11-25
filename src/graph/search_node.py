@@ -5,7 +5,7 @@ import inspect
 import json
 import re
 from dataclasses import dataclass
-from typing import Any, Protocol, cast
+from typing import TYPE_CHECKING, Any
 
 from src.agents.base import AgentContext
 from src.agents.Prompts import SEARCH_RELEVANCE_FILTER_PROMPT
@@ -16,30 +16,12 @@ from src.repositories.node_persistence.search_persistence import SearchPersisten
 from src.graph.state_models import JsonObject, State
 from src.llm import ProviderSnapshot, SystemConfig
 from src.paper_retrieval import PaperSearchService
+from src.trace import trace_tool
 from src.paper_retrieval.models import PaperDocument, SearchResponse
-from src.repositories.sessions.base import SessionRepository
 
 
-class SearchNodeSink(Protocol):
-    """描述检索节点可选的写盘能力。"""
-
-    def persist(
-        self,
-        *,
-        topic: str,
-        intent: SearchIntent,
-        raw_papers: list[PaperDocument],
-        # DEPRECATED: 2026-08-22
-        # 原因：关键词打分逻辑已下线，不再产出打分明细，写盘参数随之停用。
-        # 替代方案：无（打分明细只有调试用途，没有下游业务读取）。
-        # 计划移除：语义过滤稳定运行一段时间后清理。
-        # scored_papers: list[JsonObject],
-        selected_papers: list[PaperDocument],
-        search_summary: JsonObject,
-        search_output: JsonObject,
-        agent_diagnostics: JsonObject,
-        search_halted: bool,
-    ): ...
+if TYPE_CHECKING:
+    from langgraph.runtime import Runtime
 
 
 # DEPRECATED: 2026-08-22
@@ -86,14 +68,18 @@ class SearchExecutionResult:
 def run_search_agent_node():
     """生成执行图里的检索节点。"""
 
-    async def _node(state: State) -> State:
+    async def _node(state: State, runtime: Runtime[WorkflowRuntimeContext] | None) -> State:
         """异步执行检索节点，让图层可以自然接入 ainvoke。"""
 
-        resolved_service = cast(PaperSearchService, state.get("search_node_service") or PaperSearchService())
-        resolved_llm = cast(ProviderSnapshot | None | str, state.get("search_node_llm") or load_search_agent_llm())
-        resolved_sink = _resolve_search_sink(state)
-        reporter = _resolve_reporter(state)
-        runtime_resources = _resolve_runtime_resources(state)
+        resolved_service = PaperSearchService()
+        resolved_llm: ProviderSnapshot | None = load_search_agent_llm()
+        resolved_sink = _resolve_search_sink(runtime)
+        reporter = _resolve_reporter(runtime)
+        runtime_resources = _resolve_runtime_resources(runtime)
+        # 中文注释：State 里的 request 是纯 dict，统一在节点入口取一次。
+        request = state.get("request") or {}
+        request_topic = str(request.get("topic") or "")
+        request_constraints = dict(request.get("constraints") or {})
 
         if reporter is not None:
             reporter.started("正在生成检索条件", stage="plan_search")
@@ -195,7 +181,7 @@ def run_search_agent_node():
                 )
             semantic_kept, semantic_discarded = await _filter_semantically_relevant(
                 pool,
-                topic=state["request"].topic,
+                topic=request_topic,
                 llm=resolved_llm if isinstance(resolved_llm, ProviderSnapshot) else None,
                 batch_size=search_config.filter_batch_size,
             )
@@ -215,9 +201,9 @@ def run_search_agent_node():
                 "semantic_discarded_count": len(semantic_discarded),
             }
         )
-        search_output = _build_search_output(state["request"].topic, state["request"].constraints, intent, search_results)
+        search_output = _build_search_output(request_topic, request_constraints, intent, search_results)
         search_summary = {
-            "topic": state["request"].topic,
+            "topic": request_topic,
             "search_halted": search_halted,
             "raw_candidate_count": search_execution.raw_candidate_count,
             "raw_paper_count": len(raw_papers),
@@ -256,7 +242,7 @@ def run_search_agent_node():
         if resolved_sink is not None:
             persistence_result = await asyncio.to_thread(
                 resolved_sink.persist,
-                topic=state["request"].topic,
+                topic=request_topic,
                 intent=intent,
                 raw_papers=raw_papers,
                 # DEPRECATED: 2026-08-22 随关键词打分下线，写盘不再带打分明细。
@@ -287,60 +273,50 @@ def run_search_agent_node():
                 artifact_count=len(search_artifact_refs),
             )
 
+        # 中文注释：只返回本节点改动的键；request / session_key / turn_id 由初始状态提供。
         return State(
-            request=state["request"],
-            search_results=search_results,
+            # 中文注释：持久化用 PaperDocument，写回 State 前转成纯 dict。
+            search_results=[paper.to_dict() for paper in search_results],
             # DEPRECATED: 2026-08-22 随关键词打分下线，状态里不再携带打分明细。
             # search_scores=search_scores,
             search_summary=search_summary,
-            search_output=search_output,
             search_artifact_refs=search_artifact_refs,
-            read_resume_checkpoint=state.get("read_resume_checkpoint", {}),
             diagnostics={"agent": agent_diagnostics},
             current_step="search",
-            session_repo=state.get("session_repo"),
-            session_key=state.get("session_key"),
-            turn_id=state.get("turn_id"),
-            search_node_service=state.get("search_node_service"),
-            search_node_llm=state.get("search_node_llm"),
-            read_node_llm=state.get("read_node_llm"),
-            analysis_node_llm=state.get("analysis_node_llm"),
-            search_node_sink=state.get("search_node_sink"),
-            runtime_context=state.get("runtime_context"),
-            assistant_message=state.get("assistant_message", ""),
-            assistant_message_metadata=dict(state.get("assistant_message_metadata") or {}),
         )
 
     return _node
 
 
-def _resolve_reporter(state: State):
-    """从共享状态里取出检索节点专用的上报器。"""
+def _resolve_reporter(runtime: Runtime[WorkflowRuntimeContext] | None):
+    """从 graph context 里取出检索节点专用的上报器。"""
 
-    runtime = cast(WorkflowRuntimeContext | None, state.get("runtime_context"))
-    if runtime is None or runtime.sync_port is None:
+    context = runtime.context if runtime is not None else None
+    if context is None or context.sync_port is None:
         return None
-    return runtime.sync_port.for_node("search", "论文检索")
+    return context.sync_port.for_node("search", "论文检索")
 
 
-def _resolve_search_sink(state: State) -> SearchNodeSink | None:
-    """根据会话上下文决定是否启用检索产物写盘。"""
+def _resolve_search_sink(runtime: Runtime[WorkflowRuntimeContext] | None) -> SearchPersistenceSink | None:
+    """根据运行时上下文决定是否启用检索产物写盘。"""
 
-    session_repo = cast(SessionRepository | None, state.get("session_repo"))
-    session_key = _normalize_optional_str(state.get("session_key"))
-    turn_id = _normalize_optional_str(state.get("turn_id"))
-    if session_repo is None or session_key is None or turn_id is None:
+    context = runtime.context if runtime is not None else None
+    if context is None or context.session_repo is None:
         return None
-    return SearchPersistenceSink(session_repo, session_key=session_key, turn_id=turn_id)
+    session_key = _normalize_optional_str(context.session_key)
+    turn_id = _normalize_optional_str(context.turn_id)
+    if session_key is None or turn_id is None:
+        return None
+    return SearchPersistenceSink(context.session_repo, session_key=session_key, turn_id=turn_id)
 
 
-def _resolve_runtime_resources(state: State) -> WorkflowRuntimeResources | None:
+def _resolve_runtime_resources(runtime: Runtime[WorkflowRuntimeContext] | None) -> WorkflowRuntimeResources | None:
     """从运行时上下文中取出搜索节点可复用的并发资源。"""
 
-    runtime = cast(WorkflowRuntimeContext | None, state.get("runtime_context"))
-    if runtime is None:
+    context = runtime.context if runtime is not None else None
+    if context is None:
         return None
-    return runtime.resources if isinstance(runtime.resources, WorkflowRuntimeResources) else None
+    return context.resources if isinstance(context.resources, WorkflowRuntimeResources) else None
 
 
 def _normalize_optional_str(value: Any) -> str | None:
@@ -386,20 +362,42 @@ async def _search_one_subtopic(
 
     source = intent.sources[0] if len(intent.sources) == 1 else None
     sources = list(intent.sources) if len(intent.sources) > 1 else None
-    response = await service.async_search(
-        query="",
-        topic=subtopic.subtopic,
-        keywords=[subtopic.keyword],
-        keyword_expression=subtopic.keyword,
-        source=source,
-        sources=sources,
-        limit=max(1, candidate_limit),
-        year_from=intent.year_from,
-        year_to=intent.year_to,
-        excluded_terms=intent.excluded_terms,
-        truncate=False,
-        runtime_resources=runtime_resources,
-    )
+    # 中文注释：trace 只包外围——检索调用本身与异常传播语义一字不动。
+    with trace_tool(
+        "paper_search",
+        args={
+            "subtopic": subtopic.subtopic,
+            "keyword": subtopic.keyword,
+            "source": source,
+            "sources": sources,
+            "limit": max(1, candidate_limit),
+            "year_from": intent.year_from,
+            "year_to": intent.year_to,
+        },
+        stage="fetch_results",
+    ) as call:
+        response = await service.async_search(
+            query="",
+            topic=subtopic.subtopic,
+            keywords=[subtopic.keyword],
+            keyword_expression=subtopic.keyword,
+            source=source,
+            sources=sources,
+            limit=max(1, candidate_limit),
+            year_from=intent.year_from,
+            year_to=intent.year_to,
+            excluded_terms=intent.excluded_terms,
+            truncate=False,
+            runtime_resources=runtime_resources,
+        )
+        call.set_result(
+            {
+                "paper_count": len(response.papers),
+                "sources_used": list(response.sources_used),
+                "source_results": dict(response.source_results),
+                "source_errors": dict(response.errors),
+            }
+        )
     return subtopic, response
 
 

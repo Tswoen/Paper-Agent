@@ -36,23 +36,42 @@ def build_paper_workflow_message_handler(repo: SessionRepository):
                     workflow_name="paper_graph",
                 ),
                 cancellation=frame.get("cancellation") if isinstance(frame.get("cancellation"), WorkflowCancellation) else None,
+                session_repo=repo,
             )
 
-        checkpoint = frame.get("read_resume_checkpoint")
-        # 中文注释：新请求的约束由前端放在请求体的 constraints 字段中，
-        # 这里把它装进 ReviewRequest，后续图状态就会通过 state["request"].constraints 使用。
-        request = _request_from_checkpoint(checkpoint) or ReviewRequest(
-            topic=content,
-            constraints=_constraints_from_frame(frame),
+        # 中文注释：存档能力来自运行时上下文；直接调用 handler（没有 run service）
+        # 时 bundle 为空，图就退回“不落盘”的行为。
+        checkpointer = runtime.checkpoint_bundle.saver if runtime.checkpoint_bundle is not None else None
+        thread_id = runtime.thread_id
+        # 中文注释：写入时机跟随 bundle 的配置；没有 bundle 时传 None，表示不配置持久化。
+        durability = (
+            runtime.checkpoint_bundle.settings.durability
+            if runtime.checkpoint_bundle is not None
+            else None
         )
-        state_overrides = {"read_resume_checkpoint": checkpoint} if isinstance(checkpoint, dict) else None
+        # 中文注释：只有同时具备 saver 和线程时才认续跑标记；旧入口即使收到
+        # 客户端塞进来的 resume 标记，也退回普通运行，避免在没有存档时误触发。
+        resume = bool(frame.get("resume_from_checkpoint")) and checkpointer is not None and thread_id is not None
+        # 中文注释：续跑时输入必须来自官方 checkpoint，不能再塞新请求；
+        # request=None 由 run_graph 的续跑分支接受。
+        request = (
+            None
+            if resume
+            else ReviewRequest(
+                topic=content,
+                constraints=_constraints_from_frame(frame),
+            )
+        )
         await run_graph(
             request,
             runtime=runtime,
             session_repo=repo,
             session_key=chat_id,
             turn_id=turn_id,
-            state_overrides=state_overrides,
+            checkpointer=checkpointer,
+            thread_id=thread_id,
+            resume=resume,
+            durability=durability,
         )
 
     return _handler
@@ -63,21 +82,3 @@ def _constraints_from_frame(frame: JsonObject) -> JsonObject:
 
     value = frame.get("constraints")
     return dict(value) if isinstance(value, dict) else {}
-
-
-def _request_from_checkpoint(checkpoint: Any) -> ReviewRequest | None:
-    """恢复执行时优先沿用 checkpoint 里的原始请求。"""
-
-    if not isinstance(checkpoint, dict):
-        return None
-    payload = checkpoint.get("request")
-    if not isinstance(payload, dict):
-        return None
-    topic = str(payload.get("topic") or "").strip()
-    if not topic:
-        return None
-    return ReviewRequest(
-        topic=topic,
-        constraints=dict(payload.get("constraints") or {}),
-        language=str(payload.get("language") or "zh"),
-    )
