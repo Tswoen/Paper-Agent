@@ -38,3 +38,33 @@ read:
   verify_max_retries: 1
   verify_max_chars: 120000
   verify_optional_fields: [limitations]
+
+# 运行状态存档（阶段 4）。backend 只支持 sqlite / memory：
+# - sqlite：生产默认，独立文件保存每个节点的 State 快照，进程重启后可续跑；
+# - memory：不落盘，仅用于测试或临时运行。
+checkpoint:
+  backend: sqlite
+  path: data/checkpoints.db
+  # sync：每个节点结束前同步落盘，崩溃后可从最后成功节点续跑（推荐）。
+  # async：后台异步落盘，崩溃时可能丢最后一个快照。
+  # exit：只在整张图结束时落盘，中途崩溃没有可续的断点。
+  durability: sync
+  # 过渡期保留策略：完成的 run 保留 7 天，失败/取消/中断的保留 30 天。
+  retention:
+    enabled: true
+    completed_days: 7
+    failed_days: 30
+
+# 并发上限（5a-4）：统一控制一次 run 里各类任务"同时干几个"。
+# 只影响速度与资源占用，不影响结果；缺省、写错或非正数会回退到代码默认值。
+# search_source：同时查询的论文数据源数量；
+# paper_task：同时处理的论文数量（同一数值会写入图运行参数 max_concurrency，为并行拓扑预留）；
+# download：同时进行的 PDF 下载数量；
+# read_model：阅读模型同时请求数（摘要、全文提取、证据验证共用这一层）；
+# embedding：向量化调用同时请求数（预留，当前向量索引实现已接线）。
+concurrency:
+  search_source: 4
+  paper_task: 3
+  download: 3
+  read_model: 2
+  embedding: 1

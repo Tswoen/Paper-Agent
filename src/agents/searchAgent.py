@@ -213,12 +213,12 @@ class SearchAgent(BaseAgent):
         只让它专注把主题拆成几个适合检索的研究方向，并给每个方向生成关键词表达式。
         """
 
-        request = state["request"]
+        request = state.get("request") or {}
         # 中文说明：系统规则统一放在 Prompts.py，当前函数只负责填充用户主题。
         system_prompt = SEARCH_AGENT_SYSTEM_PROMPT
         user_prompt = json.dumps(
             {
-                "topic": getattr(request, "topic", ""),
+                "topic": str(request.get("topic") or ""),
                 "task": "请根据 topic 拆分研究方向，并为每个方向生成英文检索关键词表达式。",
             },
             ensure_ascii=False,
@@ -259,9 +259,9 @@ class SearchAgent(BaseAgent):
         这样检索方向完全来自模型明确给出的计划，排查问题时也更容易看懂。
         """
 
-        request = state["request"]
-        constraints = dict(getattr(request, "constraints", {}) or {})
-        topic = str(getattr(request, "topic", "")).strip()
+        request = state.get("request") or {}
+        constraints = dict(request.get("constraints") or {})
+        topic = str(request.get("topic") or "").strip()
         return SearchIntent(
             topic=topic,
             keywords=list(plan.keywords),

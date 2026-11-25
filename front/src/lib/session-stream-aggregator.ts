@@ -43,8 +43,6 @@ function createRuntimeEvent(partial: Partial<UIRuntimeTimelineEvent> & { id: str
     children: partial.children ?? [],
     isCollapsed: partial.isCollapsed ?? false,
     resumeAvailable: partial.resumeAvailable ?? false,
-    recoveryStatus: partial.recoveryStatus ?? null,
-    nextPosition: partial.nextPosition ?? null,
     completed: partial.completed ?? null,
     total: partial.total ?? null,
     inputTokens: partial.inputTokens ?? 0,
@@ -66,6 +64,8 @@ export class SessionStreamAggregator {
   private status = "created";
   private activeAssistantId: string | null = null;
   private activeNodeKey: string | null = null;
+  // 中文注释：记录最近一个失败的运行树节点，run 结束时由官方 checkpoint 决定是否挂"继续执行"。
+  private latestFailedEvent: UIRuntimeTimelineEvent | null = null;
 
   /** 用线程快照重建时间线状态，保证历史回放和实时展示走同一条路。 */
   hydrate(thread: SessionThread) {
@@ -80,35 +80,19 @@ export class SessionStreamAggregator {
     this.status = thread.status;
     this.activeAssistantId = null;
     this.activeNodeKey = null;
+    this.latestFailedEvent = null;
 
-    if (thread.events.length > 0) {
-      for (const storedEvent of thread.events) {
-        this.apply(this.normalizeStoredEvent(storedEvent));
-      }
-    }
-
-    // 中文注释：兼容没有事件流的老数据，如果历史里没有消息事件，就从消息表重建基础聊天内容。
-    if (this.messages.length === 0) {
-      for (const message of thread.messages) {
-        this.messages.push(
-          createMessage({
-            id: message.id,
-            role: message.role,
-            kind: message.kind ?? "message",
-            content: message.content,
-            reasoning: message.reasoning ?? "",
-            media: message.media ?? [],
-            turnId: message.turn_id ?? null,
-            createdAt: message.created_at,
-          }),
-        );
-      }
+    // 中文注释：当前版本的用户/助手消息都会作为事件持久化，回放事件即可重建聊天，
+    // 不再需要"无事件流老数据从消息表重建"的兜底。
+    for (const storedEvent of thread.events) {
+      this.apply(this.normalizeStoredEvent(storedEvent));
     }
   }
 
   /** 乐观插入一条用户消息，减少提交时的等待感。 */
   addOptimisticUserMessage(content: string, turnId: string) {
     this.clearResumeMarkers();
+    this.latestFailedEvent = null;
     this.messages.push(
       createMessage({
         role: "user",
@@ -180,6 +164,18 @@ export class SessionStreamAggregator {
           // 用户主动停止后，后端不会再为每个正在运行的子节点单独发送结束事件。
           // 这里统一补上取消状态，避免整体已经停止但节点卡片仍显示“处理中”。
           this.markUnfinishedRuntimeEventsCancelled(event);
+        }
+        // 中文注释：能不能续跑由官方 Checkpointer 决定——turn_end 带 checkpoint_id
+        // 且终态为 failed/cancelled 时，把"继续执行"挂到最近失败（或停止）的节点卡片上。
+        if ((event.status === "failed" || event.status === "cancelled") && event.checkpoint_id) {
+          const target = this.resumeTargetEvent();
+          if (target) {
+            this.markLatestResumeEvent(target);
+          }
+        } else if (event.status === "completed") {
+          // 中文注释：新一轮已经完成，旧失败入口不再可续，统一隐藏。
+          this.clearResumeMarkers();
+          this.latestFailedEvent = null;
         }
         this.isStreaming = false;
         this.activeNodeKey = null;
@@ -300,11 +296,10 @@ export class SessionStreamAggregator {
     // 每次子卡片变化后都重新汇总，父卡片始终等于所有子卡片之和。
     this.recalculateTokenTotals();
 
-    if (item.status === "failed" && this.hasRecoveryCheckpoint(item)) {
-      this.markLatestResumeEvent(item);
-    }
-
     if (item.status === "failed") {
+      // 中文注释：先记下失败节点；是否显示"继续执行"等 turn_end 携带官方
+      // checkpoint_id 时再统一决定，不再依赖失败事件里的手写恢复现场。
+      this.latestFailedEvent = item;
       this.status = "failed";
       this.isStreaming = false;
       this.activeNodeKey = null;
@@ -355,8 +350,6 @@ export class SessionStreamAggregator {
     item.updatedAt = event.updated_at ?? event.timestamp ?? item.updatedAt;
     item.completedAt = event.completed_at ?? (FINISHED_STATUSES.has(item.status) ? item.updatedAt : item.completedAt);
     item.isCollapsed = item.status === "completed";
-    item.recoveryStatus = typeof metadata.recovery_status === "string" ? metadata.recovery_status : item.recoveryStatus;
-    item.nextPosition = typeof metadata.next_position === "number" ? metadata.next_position : item.nextPosition;
     item.completed = typeof metadata.completed === "number" ? metadata.completed : item.completed;
     item.total = typeof metadata.total === "number" ? metadata.total : item.total;
     if (typeof event.input_tokens === "number") {
@@ -450,10 +443,21 @@ export class SessionStreamAggregator {
     }
   }
 
-  /** 判断失败事件里是否带有后端保存的恢复位置。 */
-  private hasRecoveryCheckpoint(event: UIRuntimeTimelineEvent) {
-    const checkpoint = event.metadata.checkpoint;
-    return Boolean(checkpoint && typeof checkpoint === "object");
+  /** 找到挂"继续执行"的节点卡片：优先最近失败节点；取消的 run 没有失败节点时取最近停止的卡片。 */
+  private resumeTargetEvent(): UIRuntimeTimelineEvent | null {
+    if (this.latestFailedEvent) {
+      return this.latestFailedEvent;
+    }
+    let candidate: UIRuntimeTimelineEvent | null = null;
+    for (const item of this.runtimeEventMap.values()) {
+      if (item.status !== "cancelled" && item.status !== "running" && item.status !== "pending") {
+        continue;
+      }
+      if (!candidate || String(item.updatedAt ?? "") >= String(candidate.updatedAt ?? "")) {
+        candidate = item;
+      }
+    }
+    return candidate;
   }
 
   /** 把最近一次可恢复失败标出来，旧失败点先隐藏按钮，避免用户不知道该点哪一个。 */

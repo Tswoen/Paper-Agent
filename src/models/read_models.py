@@ -111,6 +111,9 @@ class FullTextStatus:
     markdown_path: str | None = None
     page_count: int | None = None
     chunk_count: int = 0
+    # 5d：全文下载尝试次数（跨崩溃续跑累计，随 note 落盘）。只用于限制扫尾重跑
+    # 预算，不影响业务结果；旧 note 缺省按 0，无需迁移。
+    attempts: int = 0
 
     def to_dict(self) -> JsonObject:
         """把全文处理状态转换为普通字典。"""
@@ -131,6 +134,8 @@ class PaperReadResult:
     # 对应的原文引用和失败原因。没有启用验证时保持空字典。
     verification: JsonObject = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+    # 仅记录“没有可用笔记、被放弃”的失败；下载/解析等部分失败仍走 full_text 状态。
+    failure: JsonObject | None = None
 
     def to_dict(self) -> JsonObject:
         """把单篇阅读结果转成可序列化字典。"""
@@ -143,4 +148,5 @@ class PaperReadResult:
             "extraction": dict(self.extraction),
             "verification": dict(self.verification),
             "warnings": list(self.warnings),
+            "failure": dict(self.failure) if isinstance(self.failure, dict) else None,
         }

@@ -20,7 +20,6 @@ class SearchArtifactRef:
     artifact_id: str
     artifact_type: str
     name: str
-    path: str
     size: int
     created_at: str
     metadata: JsonObject = field(default_factory=dict)
@@ -32,7 +31,6 @@ class SearchArtifactRef:
             "artifact_id": self.artifact_id,
             "artifact_type": self.artifact_type,
             "name": self.name,
-            "path": self.path,
             "size": self.size,
             "created_at": self.created_at,
             "metadata": dict(self.metadata),
@@ -185,7 +183,6 @@ class SearchPersistenceSink:
             artifact_id=str(record["id"]),
             artifact_type=str(record["artifact_type"]),
             name=str(record["name"]),
-            path=str(record["path"]),
             size=int(record["size"]),
             created_at=str(record["created_at"]),
             metadata=dict(record.get("metadata") or {}),

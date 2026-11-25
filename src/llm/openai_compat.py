@@ -39,7 +39,8 @@ class OpenAICompatProvider(LLMProvider):
                 default_headers=self.extra_headers or None,
                 timeout=self.timeout_s,
                 # 中文注释：项目基类已经统一做重试、计时和 Retry-After 处理，SDK 这里不再额外重试，避免实际请求次数翻倍。
-                max_retries=5,
+                # 必须显式写 0：SDK 默认值是 2，删掉这行会悄悄回落到默认重试。
+                max_retries=0,
             )
 
     async def chat(
@@ -56,6 +57,7 @@ class OpenAICompatProvider(LLMProvider):
         return await self._run_llm_call(
             "chat",
             lambda: self._chat_once(messages, tools=tools, temperature=temperature, max_tokens=max_tokens, reasoning_effort=reasoning_effort),
+            messages=messages,
         )
 
     async def _chat_once(
@@ -94,6 +96,7 @@ class OpenAICompatProvider(LLMProvider):
         return await self._run_llm_call(
             "chat_stream",
             lambda: self._chat_stream_once(messages, callbacks, tools=tools, temperature=temperature, max_tokens=max_tokens, reasoning_effort=reasoning_effort),
+            messages=messages,
         )
 
     async def _chat_stream_once(

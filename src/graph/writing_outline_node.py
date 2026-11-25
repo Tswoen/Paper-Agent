@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from src.agents.writingOutlineAgent import (
     OVERALL_ANALYSIS_FIELDS,
@@ -13,12 +13,12 @@ from src.agents.writingOutlineAgent import (
 from src.graph.runtime import WorkflowRuntimeContext
 from src.graph.state_models import JsonObject, State
 from src.llm import ProviderSnapshot
+from src.models.artifacts import to_artifact_ref
 from src.models.sessions import utc_now
-from src.repositories.sessions.base import SessionRepository
 
 
-# 中文说明：标题字段和正文范围发生了变化，使用新版本号便于识别旧产物。
-WRITING_OUTLINE_VERSION = "1.1"
+if TYPE_CHECKING:
+    from langgraph.runtime import Runtime
 
 
 def run_writing_outline_node():
@@ -29,16 +29,18 @@ def run_writing_outline_node():
     小节正文写作还没有设计好，所以这里不会生成正文，避免后面不好改。
     """
 
-    async def _node(state: State) -> State:
+    async def _node(state: State, runtime: Runtime[WorkflowRuntimeContext] | None) -> State:
         """从分析报告里读取 overall_framework，并生成结构化写作大纲。"""
 
         request = state.get("request")
         if request is None:
             raise ValueError("写作大纲节点缺少用户综述主题，无法继续生成大纲")
+        # 中文注释：State 里的 request 是纯 dict。
+        topic = str(request.get("topic") or "") if isinstance(request, dict) else ""
 
-        reporter = _resolve_reporter(state)
+        reporter = _resolve_reporter(runtime)
         analysis_report = dict(state.get("analysis_report") or {})
-        llm = _resolve_llm(state)
+        llm = load_writing_outline_agent_llm()
         agent = build_writing_outline_agent(llm)
 
         if reporter is not None:
@@ -57,11 +59,10 @@ def run_writing_outline_node():
         )
         used_llm = outline is not None and reason == "ok"
         if outline is None:
-            outline = _fallback_outline(topic=request.topic, analysis_report=analysis_report)
+            outline = _fallback_outline(topic=topic, analysis_report=analysis_report)
 
         report = {
-            "outline_version": WRITING_OUTLINE_VERSION,
-            "topic": request.topic,
+            "topic": topic,
             # 中文说明：writing_outline 是后续正文写作最应该直接读取的核心对象。
             "writing_outline": outline,
             "execution_metadata": {
@@ -73,7 +74,7 @@ def run_writing_outline_node():
         }
 
         artifact_refs = list(state.get("writing_outline_artifact_refs") or [])
-        persisted = await _persist_outline_if_possible(state, report)
+        persisted = await _persist_outline_if_possible(runtime, report)
         if persisted:
             artifact_refs.append(persisted)
             if reporter is not None:
@@ -95,15 +96,17 @@ def run_writing_outline_node():
                 used_llm=used_llm,
             )
 
-        updated = dict(state)
-        updated.update(
-            writing_outline=outline,
-            writing_outline_report=report,
-            writing_outline_artifact_refs=artifact_refs,
-            diagnostics=diagnostics,
-            current_step="write_outline",
+        # 中文注释：只返回本节点改动的键。
+        return cast(
+            State,
+            {
+                "writing_outline": outline,
+                "writing_outline_report": report,
+                "writing_outline_artifact_refs": artifact_refs,
+                "diagnostics": diagnostics,
+                "current_step": "write_outline",
+            },
         )
-        return cast(State, updated)
 
     return _node
 
@@ -241,32 +244,22 @@ def _available_evidence_fields(overall_analysis: JsonObject, *fields: str) -> li
     ]
 
 
-def _resolve_llm(state: State) -> ProviderSnapshot | None:
-    """优先使用外部注入的写作大纲模型，没有注入时读取默认配置。"""
+def _resolve_reporter(runtime: Runtime[WorkflowRuntimeContext] | None):
+    """从 graph context 里取出写作大纲节点的进度上报器。"""
 
-    injected = state.get("writing_outline_node_llm")
-    if isinstance(injected, ProviderSnapshot):
-        return injected
-    if injected is None:
-        return load_writing_outline_agent_llm()
-    return None
-
-
-def _resolve_reporter(state: State):
-    """从运行上下文里取出写作大纲节点的进度上报器。"""
-
-    runtime = cast(WorkflowRuntimeContext | None, state.get("runtime_context"))
-    if runtime is None or runtime.sync_port is None:
+    context = runtime.context if runtime is not None else None
+    if context is None or context.sync_port is None:
         return None
-    return runtime.sync_port.for_node("write_outline", "写作大纲")
+    return context.sync_port.for_node("write_outline", "写作大纲")
 
 
-async def _persist_outline_if_possible(state: State, report: JsonObject) -> JsonObject | None:
+async def _persist_outline_if_possible(runtime: Runtime[WorkflowRuntimeContext] | None, report: JsonObject) -> JsonObject | None:
     """如果当前有会话仓库，就把写作大纲保存成 JSON 产物。"""
 
-    repo = cast(SessionRepository | None, state.get("session_repo"))
-    session_key = _optional_text(state.get("session_key"))
-    turn_id = _optional_text(state.get("turn_id"))
+    context = runtime.context if runtime is not None else None
+    repo = context.session_repo if context is not None else None
+    session_key = _optional_text(context.session_key) if context is not None else None
+    turn_id = _optional_text(context.turn_id) if context is not None else None
     if repo is None or not session_key or not turn_id:
         return None
     try:
@@ -277,19 +270,11 @@ async def _persist_outline_if_possible(state: State, report: JsonObject) -> Json
             "writing_outline.json",
             json.dumps(report, ensure_ascii=False, indent=2),
             relative_path=f"artifacts/writing_outline/{turn_id}/writing_outline.json",
-            metadata={"turn_id": turn_id, "format": "json", "outline_version": WRITING_OUTLINE_VERSION},
+            metadata={"turn_id": turn_id, "format": "json"},
         )
     except Exception:
         return None
-    return {
-        "artifact_id": str(record["id"]),
-        "artifact_type": str(record["artifact_type"]),
-        "name": str(record["name"]),
-        "path": str(record["path"]),
-        "size": int(record["size"]),
-        "created_at": str(record["created_at"]),
-        "metadata": dict(record.get("metadata") or {}),
-    }
+    return to_artifact_ref(record)
 
 
 def _optional_text(value: Any) -> str | None:

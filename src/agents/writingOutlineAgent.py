@@ -122,7 +122,7 @@ def build_writing_outline_agent(llm: ProviderSnapshot | None | str = "auto", usa
 def _outline_messages(state: JsonObject) -> list[JsonObject]:
     """把分析报告整理成模型容易理解的提示词。"""
 
-    request = state["request"]
+    request = state.get("request") or {}
     analysis_report = dict(state.get("analysis_report") or {})
     overall_framework = str(analysis_report.get("overall_framework") or "").strip()
     overall_analysis = _compact_overall_analysis(dict(analysis_report.get("overall_analysis") or {}))
@@ -132,7 +132,7 @@ def _outline_messages(state: JsonObject) -> list[JsonObject]:
     system_prompt = WRITING_OUTLINE_AGENT_SYSTEM_PROMPT
     user_prompt = json.dumps(
         {
-            "用户综述主题": getattr(request, "topic", ""),
+            "用户综述主题": str(request.get("topic") or ""),
             "任务": "根据 overall_framework 生成章节和小节级别的写作大纲",
             "overall_framework": overall_framework,
             "综合分析节点输出": overall_analysis,

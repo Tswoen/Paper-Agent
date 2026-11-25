@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 import uuid
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,8 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from src.graph.checkpointing import CheckpointBundle, build_checkpoint_bundle
+from src.llm.config import SystemConfig
 from src.repositories.sessions.base import SessionRepository
 from src.repositories.sessions.sqlite import SQLiteSessionRepository
 from src.repositories.settings.json import SettingsRepository
@@ -44,6 +47,7 @@ def create_app(
     sessions_repo: SessionRepository | None = None,
     config: GatewayConfig | None = None,
     message_handler: MessageHandler | None = None,
+    checkpoint_bundle: CheckpointBundle | None = None,
 ) -> FastAPI:
     """创建面向前端工作台的 FastAPI 应用。
 
@@ -60,7 +64,21 @@ def create_app(
     sessions_repo = sessions_repo or SQLiteSessionRepository()
     config = config or GatewayConfig()
     message_handler = message_handler or build_paper_workflow_message_handler(sessions_repo)
-    run_service = SessionRunService(repo=sessions_repo, message_handler=message_handler)
+    # 中文注释：生产默认按 config/system.yaml 使用 SQLite 存档；测试显式注入内存 bundle，
+    # 既不落盘、也不会在仓库里留下 data/checkpoints.db。
+    checkpoint_bundle = checkpoint_bundle or build_checkpoint_bundle(SystemConfig.load().checkpoint)
+    # 中文注释：非 sync 的 durability 会削弱崩溃续跑；在启动时明确提醒，避免改配置后
+    # 不知道代价。内存 bundle 本来就不保证持久化，不在此列。
+    if checkpoint_bundle.is_persistent and checkpoint_bundle.settings.durability != "sync":
+        logger.warning(
+            "checkpoint durability 不是 sync，崩溃时可能丢失最后一个快照",
+            extra={"durability": checkpoint_bundle.settings.durability},
+        )
+    run_service = SessionRunService(
+        repo=sessions_repo,
+        message_handler=message_handler,
+        checkpoint_bundle=checkpoint_bundle,
+    )
     # 后台任务句柄只存在于进程内。应用重启后先清理数据库中的孤儿运行标记，
     # 否则这些会话会永久被 start_run 的并发保护拒绝。
     recovered_sessions = run_service.recover_interrupted_runs()
@@ -69,8 +87,26 @@ def create_app(
             "应用启动时恢复了中断的后台会话",
             extra={"recovered_session_count": len(recovered_sessions)},
         )
+    # 中文注释：先对账无主 running 行，再按 7/30 天策略清理过期 checkpoint。
+    purged_checkpoints = run_service.purge_expired_checkpoints()
+    if purged_checkpoints:
+        logger.info(
+            "启动时清理过期 checkpoint",
+            extra={"purged_checkpoint_count": len(purged_checkpoints)},
+        )
 
-    app = FastAPI(title="Papers Agents API")
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        """应用退出时关闭 checkpoint 连接，避免 Windows 上文件句柄残留。"""
+
+        try:
+            yield
+        finally:
+            # 中文注释：先取消/等待活跃 run 收尾，再关 checkpoint 连接。
+            await run_service.shutdown()
+            checkpoint_bundle.close()
+
+    app = FastAPI(title="Papers Agents API", lifespan=lifespan)
     app.include_router(create_settings_router(settings_repo))
     app.include_router(
         create_sessions_router(
@@ -142,7 +178,6 @@ def create_app(
             "runtime_capabilities": {
                 "fastapi_rest": True,
                 "rest_management": True,
-                "http_message_submit": True,
                 "session_runs": True,
                 "sse_streaming": True,
                 "multi_chat_socket": False,

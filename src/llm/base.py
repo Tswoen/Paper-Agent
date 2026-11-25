@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import inspect
 import json
 import random
@@ -11,6 +12,8 @@ from dataclasses import dataclass, field
 from email.utils import parsedate_to_datetime
 from typing import Any, Callable, Mapping, Sequence
 
+from src.models.sessions import utc_now
+from src.trace.context import current_trace_context, emit_trace_event
 from src.utils import get_logger
 
 
@@ -406,7 +409,10 @@ class LLMProvider(ABC):
             # 中文注释：同步线程里没有正在运行的事件循环，可以安全使用同一个 Runner 复用循环。
             if self._sync_runner is None:
                 self._sync_runner = asyncio.Runner()
-            return self._sync_runner.run(awaitable)
+            # 中文注释：Runner 默认在首次 run 时冻结一份 context 并永久复用，
+            # 之后调用方上下文（trace 上下文、日志上下文）的变化都传不进去。
+            # 这里每次显式传入当前 context 的副本，保证按调用隔离。
+            return self._sync_runner.run(awaitable, context=contextvars.copy_context())
         # 中文注释：如果已经在 async 环境中，就不能再走同步桥，否则会把事件循环套住。
         # 这种场景说明调用方已经具备 await 条件，应直接 await provider.chat/embed。
         if hasattr(awaitable, "close"):
@@ -423,11 +429,22 @@ class LLMProvider(ABC):
         finally:
             self._sync_runner = None
 
-    async def _run_llm_call(self, operation: str, call_once: Callable[[], Awaitable[LLMResponse]]) -> LLMResponse:
-        """按统一规则执行一次文本模型调用，包含限流、重试和耗时日志。"""
+    async def _run_llm_call(
+        self,
+        operation: str,
+        call_once: Callable[[], Awaitable[LLMResponse]],
+        *,
+        messages: Sequence[Message] | None = None,
+    ) -> LLMResponse:
+        """按统一规则执行一次文本模型调用，包含限流、重试和耗时日志。
+
+        中文注释：这里是所有聊天请求的总闸门，trace 埋点装在这里即可覆盖
+        全部供应商与调用点。messages 仅用于全量记录 prompt，不参与请求逻辑。
+        """
 
         last = LLMResponse(finish_reason="error", error_kind="unknown", error_should_retry=True)
         started_at = time.perf_counter()
+        started_wall = utc_now()
         attempts = 0
         async with self._semaphore:
             for attempt in range(self.max_retries):
@@ -440,10 +457,68 @@ class LLMProvider(ABC):
                     last = self._error_response(exc)
                 if last.ok or not self._should_retry(last) or attempt == self.max_retries - 1:
                     self._log_call_result(operation, last, attempts, started_at)
+                    self._emit_llm_call_trace(operation, messages, last, attempts, started_at, started_wall)
                     return last
                 await asyncio.sleep(self._retry_delay(attempts))
         self._log_call_result(operation, last, attempts, started_at)
+        self._emit_llm_call_trace(operation, messages, last, attempts, started_at, started_wall)
         return last
+
+    def _emit_llm_call_trace(
+        self,
+        operation: str,
+        messages: Sequence[Message] | None,
+        response: LLMResponse,
+        attempts: int,
+        started_perf: float,
+        started_wall: str,
+    ) -> None:
+        """把本次聊天调用全量记入 trace 账本（llm_call 事件）。
+
+        中文注释：全量保真——prompt 与 response 一字不砍；没有绑定 trace
+        上下文时静默跳过；构造异常只记警告，绝不影响调用结果。
+        """
+
+        if current_trace_context() is None:
+            return
+        try:
+            duration_ms = int((time.perf_counter() - started_perf) * 1000)
+            ok = response.ok
+            error = None
+            if not ok:
+                error = {
+                    "kind": response.error_kind,
+                    "status_code": response.error_status_code,
+                    "type": response.error_type,
+                    "code": response.error_code,
+                    "retry_after_s": response.error_retry_after_s,
+                    "should_retry": response.error_should_retry,
+                }
+            payload = {
+                "operation": operation,
+                "model": self.model,
+                "attempts": attempts,
+                "finish_reason": response.finish_reason,
+                "prompt": [dict(message) for message in (messages or [])],
+                "response": response.content,
+                "reasoning_content": response.reasoning_content,
+                "tool_calls": [
+                    {"id": call.id, "name": call.name, "arguments": call.arguments}
+                    for call in response.tool_calls
+                ],
+            }
+            emit_trace_event(
+                "llm_call",
+                status="completed" if ok else "failed",
+                started_at=started_wall,
+                duration_ms=duration_ms,
+                tokens=normalize_token_usage(response.usage),
+                error=error,
+                payload=payload,
+                content=f"模型调用 {self.model} · {operation} · {duration_ms}ms",
+            )
+        except Exception:
+            logger.warning("llm_call trace 事件构造失败（不影响运行）", exc_info=True)
 
     async def _run_embedding_call(self, operation: str, call_once: Callable[[], Awaitable[EmbeddingResponse]]) -> EmbeddingResponse:
         """按统一规则执行一次 embedding 调用，包含限流、重试和耗时日志。"""
