@@ -84,6 +84,8 @@ temp/
 model.json
 
 # other
+# 过程文档集中存放，本地保留，不纳入版本跟踪
+process-docs/
 doc/*
 paper-search-mcp/
 data/*
