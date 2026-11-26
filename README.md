@@ -270,6 +270,22 @@ npm run front:dev:network
 
 ---
 
+## ⭐ Star History
+
+<p align="center">
+  <a href="https://www.star-history.com/#Tswoen/Paper-Agent&Date">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=Tswoen/Paper-Agent&type=Date&theme=dark" />
+      <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=Tswoen/Paper-Agent&type=Date" />
+      <img alt="Paper-Agent Star History Chart" src="https://api.star-history.com/svg?repos=Tswoen/Paper-Agent&type=Date" width="720" />
+    </picture>
+  </a>
+  <br>
+  <em>如果 Paper-Agent 对你有帮助，欢迎点个 Star ⭐</em>
+</p>
+
+---
+
 <div align="center">
 
 **让论文检索更快，让研究脉络更清楚。**
